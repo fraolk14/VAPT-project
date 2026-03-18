@@ -16,6 +16,16 @@ Unified VAPT platform scaffold that combines network, web, mobile, shadow IT, an
 docker compose up --build
 ```
 
+## OpenVAS / Greenbone
+
+Run Greenbone separately with the official compose file:
+
+```bash
+docker compose -f docker/openvas-compose.yml up -d
+```
+
+Details are in [openvas-setup.md](/C:/Users/User/Documents/VAPT%20project/vapt-platform/docs/openvas-setup.md).
+
 ## Default demo login
 
 - Username: `admin`

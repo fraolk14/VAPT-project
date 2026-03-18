@@ -1,3 +1,10 @@
+function sourceLabel(source) {
+  if (source === "openvas") return "Network Engine";
+  if (source === "zap") return "Web Engine";
+  if (source === "mobsf") return "Mobile Engine";
+  return source;
+}
+
 export default function Findings({ findings }) {
   return (
     <section id="findings" className="panel">
@@ -14,7 +21,7 @@ export default function Findings({ findings }) {
               <span className={`pill pill--${finding.severity || "info"}`}>
                 {finding.severity || "info"}
               </span>
-              <small>{finding.source}</small>
+              <small>{sourceLabel(finding.source)}</small>
             </div>
             <h3>{finding.title}</h3>
             <p>{finding.remediation || finding.evidence || "Awaiting enrichment."}</p>

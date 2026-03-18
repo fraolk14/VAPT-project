@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import api from "./api/client";
 import Navbar from "./components/Navbar";
 import Dashboard from "./pages/Dashboard";
 import Assets from "./pages/Assets";
 import Scans from "./pages/Scans";
 import Findings from "./pages/Findings";
+import Integrations from "./pages/Integrations";
 import "./App.css";
 
 const emptySummary = {
@@ -17,34 +19,52 @@ const emptySummary = {
 };
 
 function App() {
+  const location = useLocation();
   const [summary, setSummary] = useState(emptySummary);
   const [assets, setAssets] = useState([]);
   const [scans, setScans] = useState([]);
   const [findings, setFindings] = useState([]);
   const [integrations, setIntegrations] = useState({});
 
+  const handleScanQueued = (scan) => {
+    setScans((current) => [scan, ...current.filter((item) => item.id !== scan.id)]);
+  };
+
   useEffect(() => {
-    Promise.all([
-      api.get("/dashboard/summary"),
-      api.get("/assets"),
-      api.get("/scans"),
-      api.get("/findings"),
-      api.get("/integrations/health"),
-    ])
-      .then(([summaryRes, assetsRes, scansRes, findingsRes, integrationsRes]) => {
-        setSummary(summaryRes.data);
-        setAssets(assetsRes.data);
-        setScans(scansRes.data);
-        setFindings(findingsRes.data);
-        setIntegrations(integrationsRes.data);
-      })
-      .catch(() => {
-        setSummary(emptySummary);
-        setAssets([]);
-        setScans([]);
-        setFindings([]);
-        setIntegrations({});
-      });
+    let ignore = false;
+
+    const load = () => {
+      Promise.all([
+        api.get("/dashboard/summary"),
+        api.get("/assets"),
+        api.get("/scans/"),
+        api.get("/findings/"),
+        api.get("/integrations/health"),
+      ])
+        .then(([summaryRes, assetsRes, scansRes, findingsRes, integrationsRes]) => {
+          if (ignore) return;
+          setSummary(summaryRes.data);
+          setAssets(assetsRes.data);
+          setScans(scansRes.data);
+          setFindings(findingsRes.data);
+          setIntegrations(integrationsRes.data);
+        })
+        .catch(() => {
+          if (ignore) return;
+          setSummary(emptySummary);
+          setAssets([]);
+          setScans([]);
+          setFindings([]);
+          setIntegrations({});
+        });
+    };
+
+    load();
+    const interval = window.setInterval(load, 15000);
+    return () => {
+      ignore = true;
+      window.clearInterval(interval);
+    };
   }, []);
 
   return (
@@ -57,7 +77,7 @@ function App() {
             <p className="eyebrow">Unified Offensive Security Operations</p>
             <h1>VAPT Command Center</h1>
             <p className="hero__lede">
-              Correlate OpenVAS, ZAP, mobile, and shadow IT telemetry into one
+              Correlate network, web, mobile, and shadow IT telemetry into one
               risk-driven workflow across web, desktop, and mobile surfaces.
             </p>
           </div>
@@ -77,13 +97,30 @@ function App() {
           </div>
         </section>
 
-        <Dashboard summary={summary} integrations={integrations} />
-        <Scans scans={scans} />
-        <Findings findings={findings} />
-        <Assets assets={assets} />
+        <div className="page-intro">
+          <p className="eyebrow">Workspace</p>
+          <h2>{pageTitle(location.pathname)}</h2>
+        </div>
+
+        <Routes>
+          <Route path="/" element={<Dashboard summary={summary} />} />
+          <Route path="/scans" element={<Scans scans={scans} onScanQueued={handleScanQueued} />} />
+          <Route path="/findings" element={<Findings findings={findings} />} />
+          <Route path="/assets" element={<Assets assets={assets} />} />
+          <Route path="/integrations" element={<Integrations integrations={integrations} />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
       </main>
     </div>
   );
+}
+
+function pageTitle(pathname) {
+  if (pathname === "/scans") return "Scans";
+  if (pathname === "/findings") return "Findings";
+  if (pathname === "/assets") return "Assets";
+  if (pathname === "/integrations") return "Integrations";
+  return "Dashboard";
 }
 
 export default App;

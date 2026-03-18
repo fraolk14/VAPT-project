@@ -10,3 +10,4 @@ python-multipart
 ldap3
 requests
 email-validator
+python-gvm

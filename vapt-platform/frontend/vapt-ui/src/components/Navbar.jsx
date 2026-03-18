@@ -1,3 +1,13 @@
+import { NavLink } from "react-router-dom";
+
+const navItems = [
+  { to: "/", label: "Dashboard", end: true },
+  { to: "/scans", label: "Scans" },
+  { to: "/findings", label: "Findings" },
+  { to: "/assets", label: "Assets" },
+  { to: "/integrations", label: "Integrations" },
+];
+
 export default function Navbar() {
   return (
     <header className="topbar">
@@ -6,10 +16,16 @@ export default function Navbar() {
         <strong>Blackridge Security Mesh</strong>
       </div>
       <nav className="topbar__nav">
-        <a href="#dashboard">Dashboard</a>
-        <a href="#scans">Scans</a>
-        <a href="#findings">Findings</a>
-        <a href="#assets">Assets</a>
+        {navItems.map((item) => (
+          <NavLink
+            key={item.to}
+            to={item.to}
+            end={item.end}
+            className={({ isActive }) => (isActive ? "topbar__link is-active" : "topbar__link")}
+          >
+            {item.label}
+          </NavLink>
+        ))}
       </nav>
     </header>
   );

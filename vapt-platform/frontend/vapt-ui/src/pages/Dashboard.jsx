@@ -1,12 +1,8 @@
 import Card from "../components/Card";
 
-function StatusDot({ healthy }) {
-  return <span className={`status-dot ${healthy ? "is-healthy" : "is-unhealthy"}`} />;
-}
-
-export default function Dashboard({ summary, integrations }) {
+export default function Dashboard({ summary }) {
   return (
-    <section id="dashboard" className="section-grid">
+    <section className="section-grid">
       <div className="panel panel--metrics">
         <div className="panel__header">
           <div>
@@ -22,29 +18,6 @@ export default function Dashboard({ summary, integrations }) {
               value={metric.value}
               trend={metric.trend}
             />
-          ))}
-        </div>
-      </div>
-
-      <div className="panel">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Scanner health</p>
-            <h2>Integration posture</h2>
-          </div>
-        </div>
-        <div className="integration-list">
-          {Object.entries(integrations).map(([name, value]) => (
-            <div key={name} className="integration-item">
-              <div>
-                <strong>{name.toUpperCase()}</strong>
-                <p>{value.url}</p>
-              </div>
-              <div className="integration-item__status">
-                <StatusDot healthy={value.healthy} />
-                <span>{value.healthy ? "Healthy" : "Unavailable"}</span>
-              </div>
-            </div>
           ))}
         </div>
       </div>
