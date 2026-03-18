@@ -1,0 +1,81 @@
+services:
+  api:
+    build: ./backend
+    env_file:
+      - .env.example
+    environment:
+      DATABASE_URL: postgresql://vapt:${POSTGRES_PASSWORD:-vaptpass}@db:5432/${POSTGRES_DB:-vaptdb}
+      REDIS_URL: redis://redis:6379/0
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+      - elasticsearch
+      - openvas
+      - zap
+      - mobsf
+
+  frontend:
+    build: ./frontend/vapt-ui
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vapt}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vaptpass}
+      POSTGRES_DB: ${POSTGRES_DB:-vaptdb}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.1
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.14.1
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+
+  openvas:
+    image: greenbone/community-edition:stable
+    ports:
+      - "9392:9392"
+
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    command: ["zap.sh", "-daemon", "-host", "0.0.0.0", "-port", "8080"]
+    ports:
+      - "8080:8080"
+
+  mobsf:
+    image: opensecurity/mobile-security-framework-mobsf:latest
+    ports:
+      - "8001:8000"
+
+volumes:
+  pgdata:
+  esdata:
