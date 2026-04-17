@@ -12,7 +12,9 @@ class Asset(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     asset_name = Column(String, nullable=False)
+    tenant_id = Column(String, nullable=False, default="default", index=True)
     ip_address = Column(String, index=True, nullable=False)
+    url = Column(String, nullable=True)
     hostname = Column(String)
     os = Column(String)
     asset_type = Column(String, nullable=False)

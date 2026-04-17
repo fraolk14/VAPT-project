@@ -16,9 +16,13 @@ services:
     depends_on:
       - db
       - redis
+      - mailpit
 
   frontend:
-    build: ./frontend/vapt-ui
+    build:
+      context: ./frontend/vapt-ui
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL-}
     ports:
       - "5173:80"
     depends_on:
@@ -39,6 +43,12 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "1025:1025"
+      - "8025:8025"
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.14.1
@@ -64,7 +74,21 @@ services:
 
   zap:
     image: ghcr.io/zaproxy/zaproxy:stable
-    command: ["zap.sh", "-daemon", "-host", "0.0.0.0", "-port", "8080"]
+    command:
+      [
+        "zap.sh",
+        "-daemon",
+        "-host",
+        "0.0.0.0",
+        "-port",
+        "8080",
+        "-config",
+        "api.key=${ZAP_API_KEY:-zap}",
+        "-config",
+        "api.addrs.addr.name=.*",
+        "-config",
+        "api.addrs.addr.regex=true"
+      ]
     ports:
       - "8080:8080"
     profiles: ["extended"]

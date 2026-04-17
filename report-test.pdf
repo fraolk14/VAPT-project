@@ -1,0 +1,25 @@
+%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj
+4 0 obj << /Length 821 >> stream
+BT
+/F1 12 Tf
+50 740 Td
+(VAPT Platform Report) Tj T* () Tj T* (Total findings: 1084) Tj T* (Open findings: 1082) Tj T* () Tj T* (Severity breakdown:) Tj T* (- medium: 217) Tj T* (- info: 274) Tj T* (- low: 590) Tj T* (- high: 3) Tj T* () Tj T* (Top findings:) Tj T* (- Hardcoded secret | high | mobsf | No CVE) Tj T* (- Hardcoded secret | high | mobsf | No CVE) Tj T* (- Content Security Policy [CSP] Header Not Set | medium | zap | No CVE) Tj T* (- Content Security Policy [CSP] Header Not Set | medium | zap | No CVE) Tj T* (- Missing Anti-clickjacking Header | medium | zap | No CVE) Tj T* (- Content Security Policy [CSP] Header Not Set | medium | zap | No CVE) Tj T* (- Content Security Policy [CSP] Header Not Set | medium | zap | No CVE) Tj T* (- Cross-Domain Misconfiguration | medium | zap | No CVE) Tj T* (- Content Security Policy [CSP] Header Not Set | medium | zap | No CVE) Tj T* (- Cross-Domain Misconfiguration | medium | zap | No CVE) Tj
+ET
+endstream
+endobj
+5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj
+xref
+0 6
+0000000000 65535 f 
+0000000010 00000 n 
+0000000063 00000 n 
+0000000122 00000 n 
+0000000248 00000 n 
+0000000000 00000 n 
+trailer << /Size 6 /Root 1 0 R >>
+startxref
+0
+%%EOF

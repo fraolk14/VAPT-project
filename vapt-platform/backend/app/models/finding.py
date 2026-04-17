@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -28,6 +28,11 @@ class Finding(Base):
     confidence = Column(Float, default=0.5, nullable=False)
     evidence = Column(Text)
     remediation = Column(Text)
+    assigned_to = Column(String, nullable=True, index=True)
+    team_name = Column(String, nullable=True)
+    sla_due_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    verification_state = Column(String, default="pending", nullable=False)
     compliance_map = Column(JSON, default=list, nullable=False)
     finding_metadata = Column(JSON, default=dict, nullable=False)
     detected_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -44,4 +49,16 @@ class AuditLog(Base):
     resource_id = Column(String, nullable=False)
     outcome = Column(String, default="success", nullable=False)
     details = Column(JSON, default=dict, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class FalsePositiveRule(Base):
+    __tablename__ = "false_positive_rules"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    title_pattern = Column(String, nullable=False, index=True)
+    cve_id = Column(String, nullable=True, index=True)
+    source = Column(String, nullable=True, index=True)
+    reason = Column(Text, nullable=True)
+    enabled = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

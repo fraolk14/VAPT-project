@@ -11,3 +11,5 @@ ldap3
 requests
 email-validator
 python-gvm
+pyotp
+openai

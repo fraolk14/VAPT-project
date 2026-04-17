@@ -1,5 +1,7 @@
 import os
+import re
 from contextlib import contextmanager
+from urllib.parse import urlparse
 from typing import Any
 from uuid import uuid4
 from xml.etree import ElementTree as ET
@@ -14,6 +16,7 @@ DEFAULT_OPENVAS_SCANNER_ID = "08b69003-5fc2-4037-a479-93b440211c73"
 DEFAULT_OPENVAS_SCAN_CONFIG_ID = "daba56c8-73ec-11df-a475-002264764cea"
 DEFAULT_OPENVAS_PORT_LIST_ID = "4a4717fe-57d2-11e1-9a26-406186ea4fc5"
 DEFAULT_OPENVAS_REPORT_FORMAT_ID = "a994b278-1f62-11e1-96ac-406186ea4fc5"
+CVE_PATTERN = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
 
 
 def _severity_from_score(score: float | None) -> str:
@@ -28,6 +31,45 @@ def _severity_from_score(score: float | None) -> str:
     if score > 0:
         return "low"
     return "info"
+
+
+def _severity_from_openvas(score: float | None, threat: str | None, title: str | None = None) -> str:
+    if score is not None and score > 0:
+        return _severity_from_score(score)
+
+    threat_text = (threat or "").strip().lower()
+    if threat_text in {"critical", "alarm"}:
+        return "critical"
+    if threat_text == "high":
+        return "high"
+    if threat_text == "medium":
+        return "medium"
+    if threat_text == "low":
+        return "low"
+
+    title_text = (title or "").lower()
+    if any(keyword in title_text for keyword in ["remote code", "rce", "sql injection", "auth bypass", "default credentials"]):
+        return "critical"
+    return "info"
+
+
+def _severity_from_zap(score: float | None, risk: str | None, title: str | None = None) -> tuple[str, float | None]:
+    if score is not None and score > 0:
+        return _severity_from_score(score), score
+
+    risk_text = (risk or "").strip().lower()
+    title_text = (title or "").lower()
+    if risk_text == "high":
+        if any(keyword in title_text for keyword in ["sql injection", "command injection", "remote code", "auth bypass", "server side request forgery", "ssrf"]):
+            return "critical", 9.4
+        return "high", 8.0
+    if risk_text == "medium":
+        if any(keyword in title_text for keyword in ["cross site scripting", "xss", "csrf", "path traversal", "directory traversal"]):
+            return "high", 7.5
+        return "medium", 5.6
+    if risk_text == "low":
+        return "low", 3.1
+    return "info", 0.0
 
 
 def _xml_transform(response: Any) -> ET.Element:
@@ -71,6 +113,15 @@ def _split_port(port_value: str | None) -> tuple[int, str]:
         return 0, "tcp"
 
 
+def _extract_cve_candidates(*values: str | None) -> list[str]:
+    matches: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        matches.extend(match.upper() for match in CVE_PATTERN.findall(value))
+    return sorted(dict.fromkeys(matches))
+
+
 class OpenVASClient:
     def __init__(self) -> None:
         self.base_url = os.getenv("OPENVAS_API_URL", "http://host.docker.internal:9392")
@@ -88,7 +139,7 @@ class OpenVASClient:
 
     @contextmanager
     def _gmp(self):
-        connection = UnixSocketConnection(path=self.socket_path)
+        connection = UnixSocketConnection(path=self.socket_path, timeout=180)
         with GMP(connection, transform=_xml_transform) as gmp:
             gmp.authenticate(self.username, self.password)
             yield gmp
@@ -190,21 +241,44 @@ class OpenVASClient:
             "remote_report_id": report_id,
         }
 
-    def get_report_results(self, report_id: str) -> list[dict[str, Any]]:
+    def stop_task(self, task_id: str) -> None:
+        try:
+            with self._gmp() as gmp:
+                stop_task = getattr(gmp, "stop_task", None)
+                if callable(stop_task):
+                    stop_task(task_id=task_id)
+        except GvmError:
+            return
+
+    def get_report_results(self, report_id: str, task_id: str | None = None) -> list[dict[str, Any]]:
         with self._gmp() as gmp:
-            response = gmp.get_report(
-                report_id=report_id,
-                report_format_id=self.report_format_id,
-                details=True,
-                ignore_pagination=True,
-            )
+            if task_id:
+                response = gmp.get_results(task_id=task_id, details=True)
+            else:
+                response = gmp.get_report(
+                    report_id=report_id,
+                    report_format_id=self.report_format_id,
+                    details=True,
+                    ignore_pagination=True,
+                )
 
         results: list[dict[str, Any]] = []
         for result in response.findall(".//result"):
             severity_score = _safe_float(_text(result, "./severity"))
             port, protocol = _split_port(_text(result, "./port"))
             refs = result.findall(".//nvt/refs/ref")
-            cve_id = next((ref.attrib.get("id") for ref in refs if ref.attrib.get("type") == "cve"), None)
+            cve_refs = [
+                ref.attrib.get("id", "").upper()
+                for ref in refs
+                if ref.attrib.get("type") == "cve" and ref.attrib.get("id")
+            ]
+            cve_candidates = _extract_cve_candidates(
+                _text(result, "./description"),
+                _text(result, ".//nvt/tags"),
+                _text(result, ".//nvt/summary"),
+            )
+            cve_values = sorted(dict.fromkeys([*cve_refs, *cve_candidates]))
+            cve_id = ", ".join(cve_values) if cve_values else None
             results.append(
                 {
                     "title": _text(result, "./name")
@@ -218,7 +292,11 @@ class OpenVASClient:
                     "state": "open",
                     "cve_id": cve_id,
                     "cvss_score": severity_score,
-                    "severity": _severity_from_score(severity_score),
+                    "severity": _severity_from_openvas(
+                        severity_score,
+                        _text(result, "./threat"),
+                        _text(result, "./name") or _text(result, ".//nvt/name"),
+                    ),
                     "evidence": _text(result, "./description"),
                     "remediation": _text(result, ".//nvt/solution"),
                     "compliance_map": ["OWASP ASVS V1", "NIST RA-5"],
@@ -227,6 +305,7 @@ class OpenVASClient:
                         "threat": _text(result, "./threat"),
                         "qod": _text(result, "./qod/value"),
                         "report_id": report_id,
+                        "cve_refs": cve_values,
                     },
                 }
             )
@@ -261,35 +340,136 @@ class ZAPClient:
         self.base_url = os.getenv("ZAP_API_URL", "http://zap:8080")
         self.api_key = os.getenv("ZAP_API_KEY", "zap")
 
-    def launch_scan(self, target: str, mode: str = "active") -> dict[str, Any]:
+    def _request(self, component: str, category: str, name: str, **params: Any) -> dict[str, Any]:
+        try:
+            response = requests.get(
+                f"{self.base_url}/JSON/{component}/{category}/{name}/",
+                params={"apikey": self.api_key, **params},
+                timeout=15,
+                verify=False,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Unable to reach ZAP at {self.base_url}: {exc}") from exc
+        except ValueError as exc:
+            raise RuntimeError("ZAP returned a non-JSON response.") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("Unexpected ZAP API response")
+        return payload
+
+    def normalize_target(self, target: str) -> str:
+        normalized = target.strip()
+        parsed = urlparse(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise RuntimeError("Web scans require a valid absolute http:// or https:// URL.")
+        return normalized
+
+    def launch_scan(self, target: str, mode: str = "spider-active") -> dict[str, Any]:
+        normalized_target = self.normalize_target(target)
+        payload = self._request("spider", "action", "scan", url=normalized_target, maxChildren=0, recurse="true")
+        spider_scan_id = payload.get("scan")
+        if not spider_scan_id:
+            raise RuntimeError("ZAP did not return a spider scan id.")
         return {
             "engine": "zap",
-            "target": target,
+            "target": normalized_target,
             "mode": mode,
             "status": "queued",
-            "remote_task_id": f"zap-{target}",
+            "phase": "spider",
+            "spider_scan_id": str(spider_scan_id),
+            "remote_task_id": str(spider_scan_id),
         }
+
+    def get_spider_status(self, spider_scan_id: str) -> dict[str, Any]:
+        payload = self._request("spider", "view", "status", scanId=spider_scan_id)
+        progress = int(payload.get("status", "0"))
+        return {"status": "completed" if progress >= 100 else "running", "progress": progress}
+
+    def launch_active_scan(self, target: str) -> dict[str, Any]:
+        normalized_target = self.normalize_target(target)
+        payload = self._request("ascan", "action", "scan", url=normalized_target, recurse="true", inScopeOnly="false")
+        active_scan_id = payload.get("scan")
+        if active_scan_id is None:
+            raise RuntimeError("ZAP did not return an active scan id.")
+        return {"active_scan_id": str(active_scan_id), "phase": "active"}
+
+    def get_active_scan_status(self, active_scan_id: str) -> dict[str, Any]:
+        payload = self._request("ascan", "view", "status", scanId=active_scan_id)
+        progress = int(payload.get("status", "0"))
+        return {"status": "completed" if progress >= 100 else "running", "progress": progress}
+
+    def get_alerts(self, target: str) -> list[dict[str, Any]]:
+        normalized_target = self.normalize_target(target)
+        alerts: list[dict[str, Any]] = []
+        start = 0
+        count = 500
+
+        while True:
+            payload = self._request("core", "view", "alerts", baseurl=normalized_target, start=start, count=count)
+            batch = payload.get("alerts", [])
+            if not isinstance(batch, list):
+                raise RuntimeError("Unexpected ZAP alerts response")
+            alerts.extend(batch)
+            if len(batch) < count:
+                break
+            start += count
+
+        return alerts
 
     def normalize_results(self, raw_alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         normalized = []
         for alert in raw_alerts:
-            score = float(alert.get("risk_score", 0.0))
+            score = _safe_float(alert.get("risk_score")) or _safe_float(alert.get("riskcode"))
+            severity, normalized_score = _severity_from_zap(score, alert.get("risk"), alert.get("alert"))
+            confidence_text = (alert.get("confidence") or "").strip().lower()
+            confidence = {
+                "false positive": 0.1,
+                "low": 0.35,
+                "medium": 0.65,
+                "high": 0.9,
+                "confirmed": 0.98,
+            }.get(confidence_text, 0.5)
+            parsed_url = urlparse(alert.get("url", ""))
+            port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
+            protocol = parsed_url.scheme or alert.get("protocol", "https")
+            cwe_id = alert.get("cweid")
+            cwe_tag = f"CWE-{cwe_id}" if cwe_id not in {None, "", "0"} else None
+            cve_candidates = _extract_cve_candidates(
+                alert.get("cveid"),
+                alert.get("reference"),
+                alert.get("otherinfo"),
+                alert.get("desc"),
+                alert.get("evidence"),
+            )
+            cve_id = ", ".join(cve_candidates) if cve_candidates else None
             normalized.append(
                 {
                     "title": alert.get("alert", "ZAP alert"),
                     "category": "web",
                     "source": "zap",
-                    "port": int(alert.get("port", 80)),
-                    "protocol": alert.get("protocol", "https"),
+                    "port": int(port),
+                    "protocol": protocol,
                     "service": "http",
                     "state": "open",
-                    "cve_id": alert.get("cveid"),
-                    "cvss_score": score,
-                    "severity": _severity_from_score(score),
+                    "cve_id": cve_id,
+                    "cvss_score": normalized_score,
+                    "severity": severity,
                     "evidence": alert.get("evidence"),
                     "remediation": alert.get("solution"),
-                    "compliance_map": ["OWASP Top 10", "CWE"],
-                    "metadata": {"url": alert.get("url"), "param": alert.get("param")},
+                    "compliance_map": [tag for tag in ["OWASP Top 10", cwe_tag] if tag],
+                    "confidence": confidence,
+                    "metadata": {
+                        "url": alert.get("url"),
+                        "param": alert.get("param"),
+                        "plugin_id": alert.get("pluginId"),
+                        "confidence": alert.get("confidence"),
+                        "risk": alert.get("risk"),
+                        "attack": alert.get("attack"),
+                        "reference": alert.get("reference"),
+                        "cwe_id": cwe_id,
+                        "cve_refs": cve_candidates,
+                    },
                 }
             )
         return normalized
@@ -333,17 +513,34 @@ class MobSFClient:
         return normalized
 
 
+def _probe_service(name: str, base_url: str) -> dict[str, Any]:
+    try:
+        if name == "zap":
+            response = requests.get(
+                f"{base_url}/JSON/core/view/version/",
+                params={"apikey": os.getenv("ZAP_API_KEY", "zap")},
+                timeout=2,
+                verify=False,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return {
+                "healthy": bool(payload.get("version")),
+                "url": base_url,
+                "detail": payload.get("version", "reachable"),
+            }
+
+        response = requests.get(base_url, timeout=2, verify=False)
+        return {"healthy": response.status_code < 500, "url": base_url}
+    except (requests.RequestException, ValueError):
+        return {"healthy": False, "url": base_url}
+
+
 def integration_health() -> dict[str, Any]:
     services = {
         "openvas": os.getenv("OPENVAS_API_URL", "http://host.docker.internal:9392"),
         "zap": os.getenv("ZAP_API_URL", "http://zap:8080"),
         "mobsf": os.getenv("MOBSF_API_URL", "http://mobsf:8000"),
+        "misp": os.getenv("MISP_FEED_URL", "https://www.misp-project.org/feeds/"),
     }
-    health = {}
-    for name, base_url in services.items():
-        try:
-            response = requests.get(base_url, timeout=2, verify=False)
-            health[name] = {"healthy": response.status_code < 500, "url": base_url}
-        except requests.RequestException:
-            health[name] = {"healthy": False, "url": base_url}
-    return health
+    return {name: _probe_service(name, base_url) for name, base_url in services.items()}
