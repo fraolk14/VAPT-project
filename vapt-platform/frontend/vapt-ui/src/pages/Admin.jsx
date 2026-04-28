@@ -207,6 +207,19 @@ export default function Admin({ user, integrations, threatIntel, authStatus, aut
     }
   };
 
+  const deleteUser = async (entry) => {
+    if (!window.confirm(`Delete user "${entry.username}"? This removes their sessions and platform account.`)) return;
+    try {
+      await api.delete(`/auth/admin/users/${entry.id}`);
+      setLocalUsers((current) => current.filter((item) => item.id !== entry.id));
+      setFeedbackType("success");
+      setFeedback("User deleted successfully.");
+    } catch (error) {
+      setFeedbackType("error");
+      setFeedback(error?.response?.data?.detail || "Unable to delete the user right now.");
+    }
+  };
+
   return (
     <section className="section-grid">
       <div className="panel panel--metrics">
@@ -454,7 +467,10 @@ export default function Admin({ user, integrations, threatIntel, authStatus, aut
                           <button type="button" className="scan-action" onClick={cancelEditUser}>Cancel</button>
                         </>
                       ) : (
-                        <button type="button" className="scan-action scan-action--resume" onClick={() => startEditUser(entry)}>Edit</button>
+                        <>
+                          <button type="button" className="scan-action scan-action--resume" onClick={() => startEditUser(entry)}>Edit</button>
+                          <button type="button" className="scan-action scan-action--cancel" onClick={() => deleteUser(entry)}>Delete</button>
+                        </>
                       )}
                     </div>
                   </td>

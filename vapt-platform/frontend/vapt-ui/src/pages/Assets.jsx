@@ -17,6 +17,14 @@ const emptyAssetForm = {
   business_unit: "",
 };
 
+function assetDisplayName(asset) {
+  return asset.asset_name || asset.name || asset.hostname || asset.ip_address || asset.url || "Unnamed asset";
+}
+
+function assetAddress(asset) {
+  return asset.url || asset.ip_address || asset.hostname || "No address";
+}
+
 export default function Assets({ assets, attackSurface, attackPaths, onAssetCreated }) {
   const [localAssets, setLocalAssets] = useState(assets || []);
   const [assetForm, setAssetForm] = useState(emptyAssetForm);
@@ -58,12 +66,26 @@ export default function Assets({ assets, attackSurface, attackPaths, onAssetCrea
     }
   };
 
+  const deleteAsset = async (asset) => {
+    const label = assetDisplayName(asset);
+    if (!window.confirm(`Delete asset "${label}"? Historical findings will remain, but this asset record will be removed.`)) return;
+    try {
+      await api.delete(`/assets/${asset.id}`);
+      setLocalAssets((current) => current.filter((item) => item.id !== asset.id));
+      setFeedbackType("success");
+      setFeedback("Asset deleted.");
+    } catch (error) {
+      setFeedbackType("error");
+      setFeedback(error?.response?.data?.detail || "Unable to delete the asset right now.");
+    }
+  };
+
   const selectedPath = useMemo(() => attackPaths?.paths?.[selectedPathIndex] || [], [attackPaths, selectedPathIndex]);
   const filteredAssets = useMemo(
     () =>
       localAssets.filter((asset) => {
         const matchesExposure = exposureFilter === "all" || asset.exposure === exposureFilter;
-        const blob = `${asset.asset_name} ${asset.hostname || ""} ${asset.ip_address || ""} ${asset.url || ""}`.toLowerCase();
+        const blob = `${assetDisplayName(asset)} ${asset.hostname || ""} ${asset.ip_address || ""} ${asset.url || ""}`.toLowerCase();
         return matchesExposure && blob.includes(search.toLowerCase());
       }),
     [localAssets, search, exposureFilter]
@@ -136,23 +158,29 @@ export default function Assets({ assets, attackSurface, attackPaths, onAssetCrea
                 <th>Exposure</th>
                 <th>Criticality</th>
                 <th>Risk</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {filteredAssets.map((asset) => (
                 <tr key={asset.id}>
                   <td data-label="Asset">
-                    <strong>{asset.asset_name}</strong>
-                    <p>{asset.hostname || "No hostname"}</p>
+                    <strong>{assetDisplayName(asset)}</strong>
+                    <p>{asset.hostname || asset.ip_address || "No hostname"}</p>
                   </td>
-                  <td data-label="Address">{asset.url || asset.ip_address}</td>
+                  <td data-label="Address">{assetAddress(asset)}</td>
                   <td data-label="Type">{asset.asset_type}</td>
                   <td data-label="Exposure">{asset.exposure}</td>
                   <td data-label="Criticality">{asset.criticality}</td>
                   <td data-label="Risk">{asset.risk_score}</td>
+                  <td data-label="Actions">
+                    <button type="button" className="scan-action scan-action--cancel" onClick={() => deleteAsset(asset)}>
+                      Delete
+                    </button>
+                  </td>
                 </tr>
               ))}
-              {!filteredAssets.length ? <tr><td colSpan="6"><p className="empty-copy">No assets matched the current filters.</p></td></tr> : null}
+              {!filteredAssets.length ? <tr><td colSpan="7"><p className="empty-copy">No assets matched the current filters.</p></td></tr> : null}
             </tbody>
           </table>
         </div>
@@ -183,7 +211,7 @@ export default function Assets({ assets, attackSurface, attackPaths, onAssetCrea
         <div className="coverage-list">
           {actionQueue.map((asset) => (
             <div className="coverage-row" key={`task-${asset.id}`}>
-              <span>{asset.asset_name}</span>
+              <span>{assetDisplayName(asset)}</span>
               <strong>{asset.exposure === "external" ? "Review exposure" : "Confirm ownership"}</strong>
             </div>
           ))}

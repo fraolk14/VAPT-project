@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { geoCentroid, geoOrthographic, geoPath } from "d3-geo";
+import { geoCentroid, geoInterpolate, geoOrthographic, geoPath } from "d3-geo";
 import { feature } from "topojson-client";
 import worldAtlas from "world-atlas/countries-110m.json";
 
 import api from "../api/client";
 import Card from "../components/Card";
 
-const MAP_WIDTH = 980;
-const MAP_HEIGHT = 520;
+const DEFAULT_WIDTH = 980;
+const DEFAULT_HEIGHT = 520;
 const worldFeatures = feature(worldAtlas, worldAtlas.objects.countries).features;
 
 function severityClass(severity) {
@@ -39,13 +39,18 @@ function backendCountryName(name) {
   return name;
 }
 
-function arcPath(from, to) {
-  if (!from || !to) return "";
-  const [x1, y1] = from;
-  const [x2, y2] = to;
-  const curveX = (x1 + x2) / 2;
-  const curveY = Math.min(y1, y2) - Math.abs(x2 - x1) * 0.18 - 24;
-  return `M ${x1} ${y1} Q ${curveX} ${curveY} ${x2} ${y2}`;
+function globeArcPath(projection, fromLonLat, toLonLat) {
+  if (!projection || !fromLonLat || !toLonLat) return "";
+  const interpolate = geoInterpolate(fromLonLat, toLonLat);
+  const points = [];
+  for (let step = 0; step <= 1.00001; step += 1 / 42) {
+    const value = interpolate(step);
+    const projected = projection(value);
+    if (!projected) continue;
+    points.push(projected);
+  }
+  if (points.length < 2) return "";
+  return points.reduce((path, [x, y], index) => (index === 0 ? `M ${x} ${y}` : `${path} L ${x} ${y}`), "");
 }
 
 function parseFlowTime(value) {
@@ -75,8 +80,14 @@ export default function GlobalAttackMap() {
   const [rotation, setRotation] = useState([-18, -14]);
   const [zoom, setZoom] = useState(1.18);
   const [autoRotate, setAutoRotate] = useState(true);
+  const [sourceFilter, setSourceFilter] = useState("");
+  const [destinationFilter, setDestinationFilter] = useState("");
+  const [mapSize, setMapSize] = useState({ width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
+  const mapShellRef = useRef(null);
   const dragStateRef = useRef(null);
   const movedRef = useRef(false);
+  const pointerIdRef = useRef(null);
+  const pointerElementRef = useRef(null);
 
   useEffect(() => {
     let ignore = false;
@@ -106,7 +117,33 @@ export default function GlobalAttackMap() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!mapShellRef.current) return undefined;
+    if (typeof ResizeObserver === "undefined") return undefined;
+    const element = mapShellRef.current;
+    const ro = new ResizeObserver((entries) => {
+      const rect = entries?.[0]?.contentRect;
+      if (!rect) return;
+      const width = Math.max(540, Math.floor(rect.width));
+      const height = Math.max(420, Math.floor(rect.height));
+      setMapSize((current) => (current.width === width && current.height === height ? current : { width, height }));
+    });
+    ro.observe(element);
+    return () => ro.disconnect();
+  }, []);
+
   const flows = state.data?.flows || [];
+
+  const countryOptions = useMemo(() => {
+    const keys = Object.keys(state.data?.countries || {});
+    if (keys.length) return keys.sort((a, b) => a.localeCompare(b));
+    const unique = new Set();
+    flows.forEach((flow) => {
+      if (flow?.source_country) unique.add(flow.source_country);
+      if (flow?.target_country) unique.add(flow.target_country);
+    });
+    return Array.from(unique).sort((a, b) => a.localeCompare(b));
+  }, [state.data, flows]);
 
   useEffect(() => {
     if (!flows.length) return undefined;
@@ -139,18 +176,37 @@ export default function GlobalAttackMap() {
       const time = parseFlowTime(flow.timestamp);
       return time ? time.getTime() >= threshold : false;
     });
-    return recent.length ? recent : flows;
-  }, [flows, windowKey]);
+    const windowed = recent.length ? recent : flows;
+    const byCountries = windowed.filter((flow) => {
+      const matchesSource = !sourceFilter || flow.source_country === sourceFilter;
+      const matchesDestination = !destinationFilter || flow.target_country === destinationFilter;
+      return matchesSource && matchesDestination;
+    });
+    return sourceFilter || destinationFilter ? byCountries : windowed;
+  }, [flows, windowKey, sourceFilter, destinationFilter]);
+
+  const filteredAttackTypes = useMemo(() => {
+    if (!sourceFilter && !destinationFilter) return [];
+    const counter = new Map();
+    filteredFlows.forEach((flow) => {
+      const key = flow.attack_type || "Unknown";
+      counter.set(key, (counter.get(key) || 0) + 1);
+    });
+    return Array.from(counter.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([attack_type, attacks]) => ({ attack_type, attacks }));
+  }, [filteredFlows, sourceFilter, destinationFilter]);
 
   const projection = useMemo(
     () =>
       geoOrthographic()
-        .scale((MAP_WIDTH / 2.35) * zoom)
-        .translate([MAP_WIDTH / 2, MAP_HEIGHT / 2 + 10])
+        .scale((mapSize.width / 2.35) * zoom)
+        .translate([mapSize.width / 2, mapSize.height / 2])
         .rotate([-(rotation[0] || 0), rotation[1] || -14, 0])
         .clipAngle(90)
         .precision(0.5),
-    [rotation, zoom]
+    [rotation, zoom, mapSize]
   );
 
   const pathGenerator = useMemo(() => geoPath(projection), [projection]);
@@ -161,10 +217,12 @@ export default function GlobalAttackMap() {
         .map((flow, index) => {
           const sourceCoords = countryLookup[normalizeCountryName(flow.source_country)]?.centroid;
           const targetCoords = countryLookup[normalizeCountryName(flow.target_country)]?.centroid;
-          const source = sourceCoords ? projection(sourceCoords) : null;
-          const target = targetCoords ? projection(targetCoords) : null;
-          if (!source || !target) return null;
-          return { ...flow, sourcePoint: source, targetPoint: target, isActive: index === activeFlowIndex };
+          if (!sourceCoords || !targetCoords) return null;
+          const arc = globeArcPath(projection, sourceCoords, targetCoords);
+          const source = projection(sourceCoords);
+          const target = projection(targetCoords);
+          if (!source || !target || !arc) return null;
+          return { ...flow, arc, sourcePoint: source, targetPoint: target, isActive: index === activeFlowIndex };
         })
         .filter(Boolean)
         .slice(0, 220),
@@ -173,6 +231,13 @@ export default function GlobalAttackMap() {
 
   const handlePointerDown = (event) => {
     movedRef.current = false;
+    pointerIdRef.current = event.pointerId;
+    pointerElementRef.current = event.currentTarget;
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // ignore capture issues
+    }
     dragStateRef.current = {
       x: event.clientX,
       y: event.clientY,
@@ -193,10 +258,31 @@ export default function GlobalAttackMap() {
   };
 
   const handlePointerUp = () => {
+    if (pointerIdRef.current !== null) {
+      try {
+        pointerElementRef.current?.releasePointerCapture(pointerIdRef.current);
+      } catch {
+        // ignore
+      }
+    }
+    pointerIdRef.current = null;
+    pointerElementRef.current = null;
     dragStateRef.current = null;
   };
 
-  const countryDetail = state.data?.countries?.[selectedCountry] || null;
+  const countryDetail = selectedCountry
+    ? state.data?.countries?.[selectedCountry] || {
+        country: selectedCountry,
+        attack_count: 0,
+        source_count: 0,
+        target_count: 0,
+        top_attack_types: [],
+        top_sources: [],
+        top_industries: [],
+        top_malware: [],
+        latest_flows: [],
+      }
+    : null;
   const activeFlow = renderedFlows.find((flow) => flow.isActive) || renderedFlows[0];
 
   return (
@@ -209,24 +295,35 @@ export default function GlobalAttackMap() {
               <h2>Threat flows across the globe</h2>
             </div>
             <div className="scan-actions">
+              <select className="scan-select" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}>
+                <option value="">All source countries</option>
+                {countryOptions.map((country) => <option key={`src-${country}`} value={country}>{country}</option>)}
+              </select>
+              <select className="scan-select" value={destinationFilter} onChange={(event) => setDestinationFilter(event.target.value)}>
+                <option value="">All destination countries</option>
+                {countryOptions.map((country) => <option key={`dst-${country}`} value={country}>{country}</option>)}
+              </select>
+              <button type="button" className="scan-action" onClick={() => { setSourceFilter(""); setDestinationFilter(""); }}>
+                Clear filter
+              </button>
               <button type="button" className={`scan-action ${autoRotate ? "scan-action--active" : ""}`} onClick={() => setAutoRotate((current) => !current)}>
                 {autoRotate ? "Pause rotate" : "Auto rotate"}
               </button>
-              <button type="button" className="scan-action" onClick={() => setZoom((current) => Math.max(0.88, Number((current - 0.12).toFixed(2))))}>Zoom out</button>
-              <button type="button" className="scan-action" onClick={() => setZoom((current) => Math.min(1.8, Number((current + 0.12).toFixed(2))))}>Zoom in</button>
+              <button type="button" className="scan-action" onClick={() => setZoom((current) => Math.max(0.8, Number((current - 0.1).toFixed(2))))}>Zoom out</button>
+              <button type="button" className="scan-action" onClick={() => setZoom((current) => Math.min(2.2, Number((current + 0.1).toFixed(2))))}>Zoom in</button>
               <button type="button" className="scan-action" onClick={() => { setRotation([-18, -14]); setAutoRotate(false); }}>Reset view</button>
             </div>
           </div>
-          <div className="world-map-shell world-map-shell--immersive" onWheel={(event) => {
+          <div ref={mapShellRef} className="world-map-shell world-map-shell--immersive" onWheel={(event) => {
             event.preventDefault();
             setZoom((current) => {
               const next = event.deltaY > 0 ? current - 0.08 : current + 0.08;
-              return Math.max(0.88, Math.min(1.8, Number(next.toFixed(2))));
+              return Math.max(0.8, Math.min(2.2, Number(next.toFixed(2))));
             });
           }}>
             <svg
               className="world-map world-map--immersive"
-              viewBox={`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`}
+              viewBox={`0 0 ${mapSize.width} ${mapSize.height}`}
               role="img"
               aria-label="Global live attack globe"
               onPointerDown={handlePointerDown}
@@ -240,8 +337,8 @@ export default function GlobalAttackMap() {
                   <stop offset="100%" stopColor="rgba(6, 15, 25, 0)" />
                 </radialGradient>
               </defs>
-              <circle cx={MAP_WIDTH / 2} cy={MAP_HEIGHT / 2} r={MAP_HEIGHT / 2.45} className="world-map__sphere" />
-              <circle cx={MAP_WIDTH / 2} cy={MAP_HEIGHT / 2} r={MAP_HEIGHT / 2.42} fill="url(#globeGlow)" />
+              <circle cx={mapSize.width / 2} cy={mapSize.height / 2} r={Math.min(mapSize.width, mapSize.height) / 2.32} className="world-map__sphere" />
+              <circle cx={mapSize.width / 2} cy={mapSize.height / 2} r={Math.min(mapSize.width, mapSize.height) / 2.29} fill="url(#globeGlow)" />
               <g className="world-map__countries">
                 {worldFeatures.map((country) => {
                   const countryName = backendCountryName(country.properties.name);
@@ -270,7 +367,7 @@ export default function GlobalAttackMap() {
                 {renderedFlows.map((flow, index) => (
                   <path
                     key={flow.id}
-                    d={arcPath(flow.sourcePoint, flow.targetPoint)}
+                    d={flow.arc}
                     className={`world-map__flow world-map__flow--${severityClass(flow.severity)} ${flow.isActive ? "is-active" : ""}`}
                     style={{ "--flow-delay": `${index * 42}ms` }}
                   />
@@ -355,6 +452,22 @@ export default function GlobalAttackMap() {
               <Card title="Active Flows" value={state.data?.active_flow_count || 0} trend="Country-to-country attack arcs" />
               <Card title="Most Attacked" value={leaderboard?.[0]?.country || "Awaiting data"} trend={leaderboard?.[0] ? `${leaderboard[0].attacks} hits` : "No recent activity"} />
               <Card title="Selected Country" value={selectedCountry || "No country selected"} trend={countryDetail ? `${countryDetail.target_count} inbound / ${countryDetail.source_count} outbound` : "Click a country"} />
+            </div>
+            <div className="coverage-list">
+              {(sourceFilter || destinationFilter) ? (
+                <>
+                  <div className="coverage-row"><span>Filtered source</span><strong>{sourceFilter || "Any"}</strong></div>
+                  <div className="coverage-row"><span>Filtered destination</span><strong>{destinationFilter || "Any"}</strong></div>
+                  {filteredAttackTypes.length ? filteredAttackTypes.map((item) => (
+                    <div className="coverage-row" key={item.attack_type}>
+                      <span>{item.attack_type}</span>
+                      <strong>{item.attacks}</strong>
+                    </div>
+                  )) : <p className="empty-copy">No flows match the selected country filter yet.</p>}
+                </>
+              ) : (
+                <p className="empty-copy">Select a source or destination country to see which attack types are active.</p>
+              )}
             </div>
           </div>
           <div className="panel panel--embedded">
@@ -477,7 +590,7 @@ export default function GlobalAttackMap() {
                     </tr>
                   </thead>
                   <tbody>
-                    {countryDetail.latest_flows.map((flow) => (
+                    {countryDetail.latest_flows.length ? countryDetail.latest_flows.map((flow) => (
                       <tr key={flow.id}>
                         <td data-label="Time">{new Date(flow.timestamp).toLocaleString()}</td>
                         <td data-label="Attack">
@@ -491,7 +604,13 @@ export default function GlobalAttackMap() {
                         <td data-label="Severity"><span className={`pill pill--${severityClass(flow.severity)}`}>{flow.severity}</span></td>
                         <td data-label="Feed">{flow.ti_source || "Internal telemetry"}</td>
                       </tr>
-                    ))}
+                    )) : (
+                      <tr>
+                        <td colSpan="8" className="empty-cell">
+                          No live flow records for this country yet. Keep the map running or adjust the source/destination filter.
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>

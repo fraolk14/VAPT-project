@@ -168,6 +168,12 @@ export default function Findings({ findings, users, groups }) {
   const [expandedDetails, setExpandedDetails] = useState({});
   const [columnWidths, setColumnWidths] = useState(DEFAULT_COLUMN_WIDTHS);
   const selectedTarget = searchParams.get("target") || "";
+  const queryParam = searchParams.get("q") || "";
+  const [queryText, setQueryText] = useState(queryParam);
+
+  useEffect(() => {
+    setQueryText(queryParam);
+  }, [queryParam]);
 
   useEffect(() => {
     setLocalFindings(findings);
@@ -198,7 +204,14 @@ export default function Findings({ findings, users, groups }) {
   }, [activeTab, pageSize, sortState]);
 
   const tabFindings = useMemo(() => {
-    const filtered = localFindings.filter((finding) => findingMatchesTab(finding, activeTab));
+    const needle = (queryText || selectedTarget).trim().toLowerCase();
+    const filtered = localFindings.filter((finding) => {
+      if (!findingMatchesTab(finding, activeTab)) return false;
+      if (!needle) return true;
+      const target = targetLabel(finding);
+      const blob = `${target} ${(finding.title || "")} ${(finding.evidence || "")}`.toLowerCase();
+      return blob.includes(needle);
+    });
     const sorted = [...filtered].sort((left, right) => {
       const leftValue = sortValue(left, sortState.key);
       const rightValue = sortValue(right, sortState.key);
@@ -207,7 +220,7 @@ export default function Findings({ findings, users, groups }) {
       return 0;
     });
     return sorted;
-  }, [localFindings, activeTab, sortState]);
+  }, [localFindings, activeTab, sortState, queryText, selectedTarget]);
 
   const totalPages = Math.max(1, Math.ceil(tabFindings.length / pageSize));
   const visibleFindings = tabFindings.slice(pageIndex * pageSize, pageIndex * pageSize + pageSize);
@@ -345,6 +358,12 @@ export default function Findings({ findings, users, groups }) {
           <h2>Findings</h2>
         </div>
         <div className="table-controls">
+          <input
+            className="scan-input"
+            placeholder="Search host, IP, URL, or title"
+            value={queryText}
+            onChange={(event) => setQueryText(event.target.value)}
+          />
           <select className="scan-select" value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>
             <option value={10}>10 per page</option>
             <option value={20}>20 per page</option>

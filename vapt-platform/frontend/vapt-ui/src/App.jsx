@@ -12,6 +12,7 @@ import Dashboard from "./pages/Dashboard";
 import Developer from "./pages/Developer";
 import Findings from "./pages/Findings";
 import FindingDetail from "./pages/FindingDetail";
+import Hosts from "./pages/Hosts";
 import GlobalAttackMap from "./pages/GlobalAttackMap";
 import Integrations from "./pages/Integrations";
 import Login from "./pages/Login";
@@ -494,6 +495,7 @@ function Workspace({ user, onLogout, publicAuthConfig }) {
               />
             }
           />
+          <Route path="/hosts" element={<Hosts scans={scans} />} />
           <Route path="/findings" element={<Findings findings={findings} users={users} groups={groups} />} />
           <Route path="/findings/:findingId" element={<FindingDetail findings={findings} />} />
           <Route path="/attack-map" element={<GlobalAttackMap />} />
@@ -548,6 +550,7 @@ function pageTitle(pathname) {
   if (pathname === "/assets") return "Assets";
   if (pathname === "/ai-remediation") return "AI Remediation";
   if (pathname === "/scans") return "Scans";
+  if (pathname === "/hosts") return "Hosts";
   if (pathname === "/findings") return "Findings";
   if (pathname.startsWith("/findings/")) return "Finding Detail";
   if (pathname === "/attack-map") return "Global Attack Map";

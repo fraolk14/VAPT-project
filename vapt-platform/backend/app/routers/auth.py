@@ -424,6 +424,33 @@ def update_admin_user(
     return user
 
 
+@router.delete("/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_admin_user(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    enforce_roles(current_user, "admin")
+    if str(current_user.id) == str(user_id):
+        raise HTTPException(status_code=400, detail="You cannot delete your own active account.")
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    db.query(AuthSession).filter(AuthSession.user_id == user.id).delete(synchronize_session=False)
+    _audit(
+        db,
+        actor=current_user.username,
+        action="user.delete",
+        resource_type="user",
+        resource_id=user.id,
+        details={"username": user.username, "email": user.email, "role": user.role},
+    )
+    db.delete(user)
+    db.commit()
+    return None
+
+
 @router.post("/admin/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def create_admin_user(
     payload: UserCreate,

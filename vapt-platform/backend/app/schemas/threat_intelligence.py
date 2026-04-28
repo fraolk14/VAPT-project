@@ -66,6 +66,7 @@ class AttackMapFlow(BaseModel):
     ti_source: str | None = None
     references: list[str] = Field(default_factory=list)
     target_label: str | None = None
+    company_name: str | None = None
 
 
 class AttackMapCountryStat(BaseModel):

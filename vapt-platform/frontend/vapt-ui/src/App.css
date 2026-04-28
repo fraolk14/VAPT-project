@@ -612,7 +612,7 @@
 
 .world-map-shell {
   position: relative;
-  min-height: calc(100vh - 290px);
+  min-height: 520px;
   padding: 16px;
   border-radius: 24px;
   overflow: hidden;
@@ -634,7 +634,7 @@
 }
 
 .world-map-shell--immersive {
-  min-height: calc(100vh - 210px);
+  height: clamp(520px, calc(100vh - 210px), 860px);
 }
 
 .world-map {
@@ -646,7 +646,9 @@
 }
 
 .world-map--immersive {
-  min-height: calc(100vh - 240px);
+  height: 100%;
+  min-height: 0;
+  touch-action: none;
 }
 
 .world-map:active {
@@ -675,6 +677,13 @@
 .world-map__country.is-selected {
   fill: rgba(79, 209, 197, 0.26);
   stroke: rgba(143, 184, 255, 0.8);
+}
+
+.empty-cell {
+  color: var(--muted);
+  font-size: 0.84rem;
+  text-align: center;
+  padding: 28px 16px;
 }
 
 .world-map__country.has-attacks {
@@ -1961,6 +1970,20 @@
 
 .finding-title-link:hover {
   color: var(--accent);
+  text-decoration: underline;
+}
+
+.link-button {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.link-button:hover {
   text-decoration: underline;
 }
 

@@ -4,6 +4,47 @@ import { Link } from "react-router-dom";
 import api from "../api/client";
 import Card from "../components/Card";
 
+function buildDownloadUrl(path) {
+  const baseURL = api.defaults.baseURL || "/api";
+  if (/^https?:\/\//i.test(path)) return path;
+  if (baseURL.endsWith("/") && path.startsWith("/")) return `${baseURL.slice(0, -1)}${path}`;
+  if (!baseURL.endsWith("/") && !path.startsWith("/")) return `${baseURL}/${path}`;
+  return `${baseURL}${path}`;
+}
+
+async function fetchDownloadBlob(path, fallbackMimeType) {
+  const token = window.localStorage.getItem("vapt_token");
+  const response = await fetch(buildDownloadUrl(path), {
+    method: "GET",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+
+  if (!response.ok) {
+    let detail = `Download failed with status ${response.status}.`;
+    try {
+      const text = await response.text();
+      if (text) detail = text;
+    } catch {
+      // ignore parse issues
+    }
+    throw new Error(detail);
+  }
+
+  const blob = await response.blob();
+  return new Blob([blob], { type: blob.type || fallbackMimeType });
+}
+
+function triggerDirectDownload(path, filename) {
+  const anchor = document.createElement("a");
+  anchor.href = buildDownloadUrl(path);
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
 export default function Reports({ findings, scans, compliance, incidents, alertRules, alertEvents }) {
   const completedScans = scans.filter((scan) => scan.status === "completed").length;
   const openFindings = findings.filter((finding) => finding.status === "open").length;
@@ -61,16 +102,10 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
   const downloadReport = async (path, filename, mimeType) => {
     setDownloadState(path);
     try {
-      const response = await api.get(path, { responseType: "blob" });
-      const blob = new Blob([response.data], { type: mimeType });
-      const objectUrl = window.URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = objectUrl;
-      anchor.download = filename;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.URL.revokeObjectURL(objectUrl);
+      triggerDirectDownload(path, filename);
+      setActionFeedback(`Downloaded ${filename}.`);
+    } catch (error) {
+      setActionFeedback(error?.message || "Unable to download the report right now.");
     } finally {
       setDownloadState("idle");
     }
@@ -79,16 +114,22 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
   const downloadAssessment = async (assessment) => {
     setDownloadState(`assessment-${assessment.id}`);
     try {
-      const response = await api.get(`/operations/compliance/assessments/${assessment.id}/download`, { responseType: "blob" });
-      const blob = new Blob([response.data], { type: "application/json" });
+      const blob = await fetchDownloadBlob(`/operations/compliance/assessments/${assessment.id}/download`, "application/json");
+      if (!blob.size) {
+        throw new Error("The generated scorecard is empty.");
+      }
       const objectUrl = window.URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = objectUrl;
       anchor.download = `${assessment.name.replace(/\s+/g, "-").toLowerCase()}-scorecard.json`;
+      anchor.style.display = "none";
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
-      window.URL.revokeObjectURL(objectUrl);
+      window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 2000);
+      setActionFeedback(`Downloaded ${assessment.name} scorecard.`);
+    } catch (error) {
+      setActionFeedback(error?.message || "Unable to download the scorecard right now.");
     } finally {
       setDownloadState("idle");
     }

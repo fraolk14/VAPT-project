@@ -5,6 +5,7 @@ function navItemsForRole(role) {
     { to: "/", label: "Dashboard", end: true },
     { to: "/assets", label: "Assets" },
     { to: "/scans", label: "Scans" },
+    { to: "/hosts", label: "Hosts" },
     { to: "/findings", label: "Findings" },
     { to: "/ai-remediation", label: "AI Remediation" },
     { to: "/attack-map", label: "Attack Map" },

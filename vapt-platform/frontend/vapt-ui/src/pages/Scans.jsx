@@ -98,8 +98,24 @@ function actionLabel(action) {
 }
 
 function assetTarget(asset, engine) {
-  if (engine === "zap") return asset.url || "";
-  return asset.ip_address || asset.hostname || "";
+  if (engine === "zap") {
+    if (asset.url) return asset.url;
+    const host = asset.hostname || asset.ip_address;
+    return host ? `http://${host}` : "";
+  }
+  if (asset.ip_address || asset.hostname) return asset.ip_address || asset.hostname;
+  if (asset.url) {
+    try {
+      return new URL(asset.url).hostname;
+    } catch {
+      return asset.url.replace(/^https?:\/\//, "").split("/")[0];
+    }
+  }
+  return "";
+}
+
+function assetDisplayName(asset) {
+  return asset.asset_name || asset.name || asset.hostname || asset.ip_address || asset.url || "Unnamed asset";
 }
 
 export default function Scans({ scans, assets, onScanQueued, onScanUpdated }) {
@@ -115,7 +131,7 @@ export default function Scans({ scans, assets, onScanQueued, onScanUpdated }) {
   const targetError = validateTarget(engine, target);
   const inProgressScans = scans.filter((scan) => ["waiting", "queued", "running", "paused"].includes(scan.status));
   const filteredAssets = useMemo(
-    () => (assetInventory || []).filter((asset) => (engine === "zap" ? Boolean(asset.url) : Boolean(asset.ip_address || asset.hostname))),
+    () => (assetInventory || []).filter((asset) => (engine === "zap" ? Boolean(asset.url || asset.hostname || asset.ip_address) : Boolean(asset.ip_address || asset.hostname || asset.url))),
     [assetInventory, engine]
   );
 
@@ -257,7 +273,7 @@ export default function Scans({ scans, assets, onScanQueued, onScanUpdated }) {
                 <option value="">Pick from assets</option>
                 {filteredAssets.map((asset) => (
                   <option key={asset.id} value={asset.id}>
-                    {asset.asset_name} - {assetTarget(asset, engine)}
+                    {assetDisplayName(asset)} - {assetTarget(asset, engine)}
                   </option>
                 ))}
               </select>
