@@ -2,7 +2,7 @@
 
 Unified VAPT platform for network, web, mobile, threat intelligence, asset governance, misconfiguration review, and AI-assisted remediation workflows.
 
-This repository has moved beyond a scaffold. The current version includes a working FastAPI backend, React analyst UI, Docker-based local deployment, background scan orchestration, reporting, user/group administration, a global attack map, and Gemini-assisted remediation workflows.
+This repository has moved beyond a scaffold. The current version includes a working FastAPI backend, React analyst UI, Docker-based local deployment, background scan orchestration, reporting, user/group administration, a global attack map, and NVIDIA NIM-assisted remediation workflows.
 
 ## Current status
 
@@ -16,7 +16,7 @@ Implemented and actively wired into the platform:
 - Asset inventory, scan history, findings management, and hosts view
 - Threat intelligence and global attack-map visualization
 - User/group administration, RBAC, MFA/SSO management surfaces, and email gateway integration
-- AI remediation workspace with Gemini-backed guidance flow
+- AI remediation workspace with NVIDIA NIM-backed guidance flow and deterministic local fallback
 - Exportable reports in PDF, CSV, and JSON formats
 
 Still evolving:
@@ -80,7 +80,7 @@ Still evolving:
 
 ### AI
 
-- Gemini-backed AI remediation workflow
+- NVIDIA NIM-backed AI remediation workflow
 - Structured vulnerability explanation and recommendation surfaces
 - AI recommendation support in findings workflows
 
@@ -114,9 +114,11 @@ docker compose up --build
 
 Default exposed services:
 
-- UI: [http://localhost:5173](http://localhost:5173)
+- UI: [http://localhost:18080](http://localhost:18080)
 - API: [http://localhost:8000](http://localhost:8000)
 - Mailpit UI: [http://localhost:8025](http://localhost:8025)
+
+On this Windows workstation, the common Vite ports around `5173` are reserved by the OS. Keep `FRONTEND_PORT=18080` in `.env` so Docker can bind the frontend reliably.
 
 ### 3. Optional extended profile
 
@@ -141,7 +143,7 @@ See [openvas-setup.md](/C:/Users/User/Documents/VAPT%20project/vapt-platform/doc
 Bootstrap/default local admin in the current code path:
 
 - Username: `admin`
-- Password: `Admin@123`
+- Password: `ChangeMe123!`
 
 Change this immediately in any non-demo environment.
 

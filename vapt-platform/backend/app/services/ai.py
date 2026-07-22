@@ -30,12 +30,16 @@ _rate_limit_bucket: dict[str, deque[float]] = defaultdict(deque)
 
 
 def _model_name() -> str:
-    return os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    return os.getenv("NVIDIA_NIM_MODEL", "nvidia/llama-3.3-nemotron-super-49b-v1.5")
 
 
 def _candidate_models() -> list[str]:
     configured = _model_name()
-    fallbacks = [configured, "gemini-2.0-flash", "gemini-1.5-flash"]
+    fallbacks = [
+        configured,
+        "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+        "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+    ]
     seen = []
     for model in fallbacks:
         if model and model not in seen:
@@ -51,15 +55,15 @@ def _rate_limit_per_minute() -> int:
     return int(os.getenv("AI_RATE_LIMIT_PER_MINUTE", "30"))
 
 
-def is_gemini_configured() -> bool:
-    return bool(os.getenv("GEMINI_API_KEY", "").strip())
+def is_nim_configured() -> bool:
+    return bool(os.getenv("NVIDIA_NIM_API_KEY", "").strip())
 
 
 def ai_status() -> dict:
-    configured = is_gemini_configured()
+    configured = is_nim_configured()
     return {
         "available": True,
-        "provider": "gemini" if configured else "local-fallback",
+        "provider": "nvidia-nim" if configured else "local-fallback",
         "model": _model_name() if configured else "deterministic-local-engine",
         "status": "ready" if configured else "fallback_ready",
         "capabilities": [
@@ -71,7 +75,7 @@ def ai_status() -> dict:
             "finding recommendations",
             "chat assistant",
         ],
-        "setup_hint": None if configured else "Add GEMINI_API_KEY to enable live Gemini analysis. Secure local structured responses are active until then.",
+        "setup_hint": None if configured else "Add NVIDIA_NIM_API_KEY to enable live NVIDIA NIM analysis. Secure local structured responses are active until then.",
     }
 
 
@@ -87,29 +91,48 @@ def enforce_ai_rate_limit(actor: str, analysis_type: str) -> None:
     bucket.append(now)
 
 
-def _gemini_request(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+def _nim_request(messages: list[dict[str, str]], *, temperature: float = 0, max_tokens: int = 1200) -> tuple[str, dict[str, Any]]:
+    api_key = os.getenv("NVIDIA_NIM_API_KEY", "").strip()
     if not api_key:
-        raise RuntimeError("Gemini is not configured. Set GEMINI_API_KEY in the backend environment.")
+        raise RuntimeError("NVIDIA NIM is not configured. Set NVIDIA_NIM_API_KEY in the backend environment.")
+    base_url = os.getenv("NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
     last_error = None
     for model in _candidate_models():
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        url = f"{base_url}/chat/completions"
         try:
-            response = requests.post(url, json=payload, timeout=60)
+            response = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "stream": False,
+                },
+                timeout=60,
+            )
             response.raise_for_status()
             return (model, response.json())
         except requests.RequestException as exc:
             last_error = exc
             continue
-    raise RuntimeError("Gemini is temporarily unavailable.") from last_error
+    raise RuntimeError("NVIDIA NIM is temporarily unavailable.") from last_error
 
 
-def _gemini_text(response: dict[str, Any]) -> str:
-    candidates = response.get("candidates") or []
-    if not candidates:
+def _nim_text(response: dict[str, Any]) -> str:
+    choices = response.get("choices") or []
+    if not choices:
         return ""
-    parts = ((candidates[0].get("content") or {}).get("parts") or [])
-    return "\n".join(part.get("text", "") for part in parts if part.get("text")).strip()
+    message = choices[0].get("message") or {}
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        return "\n".join(part.get("text", "") for part in content if isinstance(part, dict) and part.get("text")).strip()
+    return str(content).strip()
 
 
 def _sanitize_text(value: str | None, *, limit: int | None = None) -> str:
@@ -177,7 +200,7 @@ def _log_decision(
 
 def _lookup_cache(db: Session, analysis_type: str, payload: dict[str, Any]) -> AIAnalysisCache | None:
     cache = db.query(AIAnalysisCache).filter(AIAnalysisCache.cache_key == _cache_key(analysis_type, payload)).first()
-    if cache and is_gemini_configured() and cache.provider != "gemini":
+    if cache and is_nim_configured() and cache.provider != "nvidia-nim":
         return None
     return cache
 
@@ -212,7 +235,7 @@ def _mark_cache_hit(db: Session, cache: AIAnalysisCache) -> None:
     db.commit()
 
 
-def _gemini_schema_from_pydantic(model: type[BaseModel]) -> dict[str, Any]:
+def _json_schema_from_pydantic(model: type[BaseModel]) -> dict[str, Any]:
     def convert(node: dict[str, Any]) -> dict[str, Any]:
         if "anyOf" in node:
             non_null = next((item for item in node["anyOf"] if item.get("type") != "null"), {"type": "string"})
@@ -277,7 +300,7 @@ def _response_example(response_model: type[BaseModel]) -> dict[str, Any]:
     }
 
 
-def _gemini_retry_prompt(analysis_type: str, payload: dict[str, Any], example: dict[str, Any]) -> str:
+def _json_retry_prompt(analysis_type: str, payload: dict[str, Any], example: dict[str, Any]) -> str:
     return (
         "Return only strict JSON matching the required response shape. "
         "Do not include markdown or explanations outside JSON. "
@@ -289,7 +312,7 @@ def _gemini_retry_prompt(analysis_type: str, payload: dict[str, Any], example: d
     )
 
 
-def _gemini_json_analysis(analysis_type: str, payload: dict[str, Any], response_model: type[BaseModel]) -> tuple[str, str, dict[str, Any]]:
+def _nim_json_analysis(analysis_type: str, payload: dict[str, Any], response_model: type[BaseModel]) -> tuple[str, str, dict[str, Any]]:
     model = _model_name()
     example = _response_example(response_model)
     prompt = (
@@ -302,36 +325,32 @@ def _gemini_json_analysis(analysis_type: str, payload: dict[str, Any], response_
         f"Required JSON shape example:\n{json.dumps(example, ensure_ascii=True)}\n\n"
         f"Input JSON:\n{json.dumps(payload, ensure_ascii=True)}"
     )
-    model, response = _gemini_request(
-        {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseSchema": _gemini_schema_from_pydantic(response_model),
-            },
-        }
+    model, response = _nim_request(
+        [
+            {"role": "system", "content": "You are a deterministic cybersecurity JSON analysis engine. Return strict JSON only."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0,
     )
     try:
-        parsed = _parse_json_response(_gemini_text(response))
+        parsed = _parse_json_response(_nim_text(response))
         validated = response_model.model_validate(parsed)
-        return ("gemini", model, validated.model_dump())
+        return ("nvidia-nim", model, validated.model_dump())
     except Exception as exc:
-        retry_prompt = _gemini_retry_prompt(analysis_type, payload, example)
-        retry_model, retry_response = _gemini_request(
-            {
-                "contents": [{"parts": [{"text": retry_prompt}]}],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "temperature": 0,
-                },
-            }
+        retry_prompt = _json_retry_prompt(analysis_type, payload, example)
+        retry_model, retry_response = _nim_request(
+            [
+                {"role": "system", "content": "Return only parseable JSON. No markdown. No extra prose."},
+                {"role": "user", "content": retry_prompt},
+            ],
+            temperature=0,
         )
         try:
-            parsed = _parse_json_response(_gemini_text(retry_response))
+            parsed = _parse_json_response(_nim_text(retry_response))
             validated = response_model.model_validate(parsed)
-            return ("gemini", retry_model, validated.model_dump())
+            return ("nvidia-nim", retry_model, validated.model_dump())
         except Exception as retry_exc:
-            raise RuntimeError(f"Gemini {analysis_type} analysis failed.") from retry_exc
+            raise RuntimeError(f"NVIDIA NIM {analysis_type} analysis failed.") from retry_exc
 
 
 def _priority_from_score(score: int) -> str:
@@ -465,9 +484,9 @@ def run_structured_analysis(
         return (cache.provider, cache.model, True, response_payload)
 
     enforce_ai_rate_limit(actor, analysis_type)
-    if is_gemini_configured():
+    if is_nim_configured():
         try:
-            provider, model, response_payload = _gemini_json_analysis(analysis_type, sanitized, schema_model)
+            provider, model, response_payload = _nim_json_analysis(analysis_type, sanitized, schema_model)
         except Exception:
             provider = "local-fallback"
             model = "deterministic-local-engine"
@@ -536,7 +555,7 @@ def _recommendation_text(finding: Finding, scan: Scan | None) -> str:
 def generate_finding_recommendations(findings: list[Finding], scan_map: dict[str, Scan]) -> tuple[str, str, list[dict]]:
     if not findings:
         return ("local-fallback", "deterministic-local-engine", [])
-    if not is_gemini_configured():
+    if not is_nim_configured():
         return (
             "local-fallback",
             "deterministic-local-engine",
@@ -568,26 +587,23 @@ def generate_finding_recommendations(findings: list[Finding], scan_map: dict[str
             "required": ["finding_id", "recommendation"],
         }
         try:
-            model, response = _gemini_request(
-                {
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "responseMimeType": "application/json",
-                        "responseSchema": schema,
-                        "temperature": 0,
-                    },
-                }
+            model, response = _nim_request(
+                [
+                    {"role": "system", "content": "Return strict JSON only with keys finding_id and recommendation."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
             )
-            parsed = json.loads(_gemini_text(response))
+            parsed = _parse_json_response(_nim_text(response))
             if not isinstance(parsed, dict):
-                raise RuntimeError("Gemini finding recommendation output was invalid.")
+                raise RuntimeError("NVIDIA NIM finding recommendation output was invalid.")
             items.append(
                 {
                     "finding_id": str(parsed.get("finding_id") or finding.id),
                     "recommendation": str(parsed.get("recommendation") or _recommendation_text(finding, scan)).strip(),
                 }
             )
-            providers_used.add("gemini")
+            providers_used.add("nvidia-nim")
             models_used.append(model)
         except Exception:
             items.append(
@@ -598,7 +614,7 @@ def generate_finding_recommendations(findings: list[Finding], scan_map: dict[str
             )
             providers_used.add("local-fallback")
 
-    provider = "gemini" if providers_used == {"gemini"} else "mixed" if "gemini" in providers_used else "local-fallback"
+    provider = "nvidia-nim" if providers_used == {"nvidia-nim"} else "mixed" if "nvidia-nim" in providers_used else "local-fallback"
     model = models_used[0] if models_used else "deterministic-local-engine"
     return (provider, model, items)
 
@@ -615,32 +631,32 @@ def generate_ai_assistance(mode: str, prompt: str, findings: list[Finding], scan
     if context.get("compliance_frameworks"):
         lines.extend(["", f"Frameworks in scope: {', '.join(context['compliance_frameworks'])}"])
 
-    if is_gemini_configured():
+    if is_nim_configured():
         try:
-            model, response = _gemini_request(
-                {
-                    "contents": [
-                        {
-                            "parts": [
-                                {
-                                    "text": (
-                                        "You are a concise technical security assistant. Use only the supplied context. "
-                                        "Be factual, avoid hallucination, and keep the answer operator-focused. "
-                                        "Answer directly, cite the exact vulnerability behavior from context when possible, and avoid generic repeated remediation text.\n\n"
-                                        f"{json.dumps({'mode': mode, 'prompt': prompt, 'findings': [_finding_context(item, scan_map.get(str(item.scan_id))) for item in selected], 'context': context}, ensure_ascii=True)}"
-                                    )
-                                }
-                            ]
-                        }
-                    ],
-                    "generationConfig": {
-                        "temperature": 0,
+            model, response = _nim_request(
+                [
+                    {
+                        "role": "system",
+                        "content": "You are a concise technical security assistant. Use only supplied context, be factual, and avoid generic repeated remediation text.",
                     },
-                }
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "mode": mode,
+                                "prompt": prompt,
+                                "findings": [_finding_context(item, scan_map.get(str(item.scan_id))) for item in selected],
+                                "context": context,
+                            },
+                            ensure_ascii=True,
+                        ),
+                    },
+                ],
+                temperature=0,
             )
-            content = _gemini_text(response)
+            content = _nim_text(response)
             if content:
-                return ("gemini", model, content)
+                return ("nvidia-nim", model, content)
         except Exception:
             pass
     return ("local-fallback", "deterministic-local-engine", "\n".join(lines))

@@ -46,7 +46,7 @@ def create_asset(
 
 @router.get("/", response_model=list[AssetResponse])
 def list_assets(db: Session = Depends(get_db)):
-    return db.query(Asset).order_by(Asset.risk_score.desc()).all()
+    return db.query(Asset).order_by(Asset.created_at.desc(), Asset.risk_score.desc()).all()
 
 
 @router.delete("/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)

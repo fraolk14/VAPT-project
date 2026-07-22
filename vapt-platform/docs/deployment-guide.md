@@ -12,10 +12,12 @@ docker compose up --build
 3. Access services:
 
 - API: `http://localhost:8000`
-- Frontend: `http://localhost:5173`
+- Frontend: `http://localhost:18080`
 - Kibana: `http://localhost:5601`
-- OpenVAS: `http://localhost:9392`
+- Greenbone UI: `http://localhost:9392`
 - ZAP daemon: `http://localhost:8080`
+
+On Windows, ports in the `5173` range may be reserved by the OS. This project defaults the Docker frontend to `FRONTEND_PORT=18080` to avoid that bind failure.
 
 ## Production recommendations
 

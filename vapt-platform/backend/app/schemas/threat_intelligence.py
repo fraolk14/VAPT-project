@@ -33,6 +33,20 @@ class MISPFeedEvent(BaseModel):
     url: str | None = None
 
 
+class ExternalThreatEvent(BaseModel):
+    id: str
+    source: str
+    name: str
+    description: str | None = None
+    created: str | None = None
+    indicator_count: int = 0
+    severity: str | None = None
+    matched_findings: int = 0
+    matched_targets: list[str] = Field(default_factory=list)
+    references: list[str] = Field(default_factory=list)
+    url: str | None = None
+
+
 class ThreatIntelSummary(BaseModel):
     total_enriched: int
     actively_exploited: int
@@ -44,6 +58,8 @@ class ThreatIntelSummary(BaseModel):
     misp_status: str = "not_configured"
     top_feed: list[ThreatFeedItem] = Field(default_factory=list)
     misp_events: list[MISPFeedEvent] = Field(default_factory=list)
+    external_feed_status: str = "not_configured"
+    external_events: list[ExternalThreatEvent] = Field(default_factory=list)
 
 
 class ThreatIntelFeedResponse(BaseModel):

@@ -8,9 +8,11 @@ from app.models.operations import MonitoringEvent, SecurityIncident
 from app.models.scan import Scan
 from app.schemas.threat_intelligence import AttackMapResponse, ThreatIntelFeedResponse, ThreatIntelSummary
 from app.services.threat_intelligence import (
+    build_external_event_feed,
     build_attack_map_data,
     build_threat_feed,
     fetch_misp_events,
+    fetch_urlhaus_recent,
     filter_threat_feed,
     threat_intel_summary,
 )
@@ -25,7 +27,16 @@ def get_threat_intelligence_summary(db: Session = Depends(get_db)):
     scan_map = {str(scan.id): scan for scan in scans}
     feed = build_threat_feed(findings, scan_map)
     misp_status, misp_events = fetch_misp_events()
-    return ThreatIntelSummary(**threat_intel_summary(feed), misp_status=misp_status, misp_events=misp_events)
+    urlhaus_status, urlhaus_rows = fetch_urlhaus_recent()
+    external_events = build_external_event_feed(findings, misp_events, urlhaus_rows)
+    external_status = "connected" if external_events else ("connected" if misp_status == "connected" or urlhaus_status == "connected" else "unavailable")
+    return ThreatIntelSummary(
+        **threat_intel_summary(feed),
+        misp_status=misp_status,
+        misp_events=misp_events,
+        external_feed_status=external_status,
+        external_events=external_events,
+    )
 
 
 @router.get("/feed", response_model=ThreatIntelFeedResponse)

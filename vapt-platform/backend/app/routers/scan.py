@@ -8,6 +8,7 @@ from app.models.user import User
 from app.schemas.finding import FindingOut
 from app.schemas.scan import NetworkScanRequest, ScanCreate, ScanDebugResponse, ScanResponse, WebScanRequest
 from app.services.integrations import ZAPClient
+from app.services.mobile_analysis import persist_mobile_upload
 from app.services.orchestrator import (
     cancel_scan,
     create_scan,
@@ -146,7 +147,8 @@ async def create_mobile_scan(
     if not lowered.endswith((".apk", ".ipa", ".aab")):
         raise HTTPException(status_code=400, detail="Mobile scans require an APK, IPA, or AAB file.")
 
-    await file.read()
+    content = await file.read()
+    upload_metadata = persist_mobile_upload(filename, content)
     scan = Scan(
         scan_name=label or f"Mobile Assessment {filename}",
         scan_type="mobile",
@@ -154,7 +156,7 @@ async def create_mobile_scan(
         target=filename,
         profile="static-analysis",
         schedule=None,
-        engine_metadata={"file_name": filename, "content_type": file.content_type},
+        engine_metadata={"file_name": filename, "content_type": file.content_type, **upload_metadata},
         status="waiting",
         progress="0",
         error_message="Mobile engine queued. Static analysis will begin automatically in the background.",

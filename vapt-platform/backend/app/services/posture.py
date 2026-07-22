@@ -5,6 +5,7 @@ from collections import Counter
 from app.models.asset import Asset
 from app.models.finding import Finding
 from app.models.platform import EndpointSoftwareInventory
+from app.services.cis_hardening import benchmark_for_os, infer_os_family
 
 
 RISKY_SOFTWARE_KEYWORDS = {
@@ -34,11 +35,23 @@ def build_shadow_it_summary(assets: list[Asset], findings: list[Finding] | None 
     for asset in assets:
         tags = [str(tag) for tag in (asset.tags or [])]
         tag_blob = " ".join(tags).lower()
+        classification = "approved"
+        control_gap = []
         suspicious = any(keyword in tag_blob for keyword in SHADOW_IT_KEYWORDS) or (
             str(asset.exposure or "").lower() == "external" and not (asset.owner or "").strip()
         )
         if suspicious:
             unknown_services += 1
+            if "shadow" in tag_blob or "saas" in tag_blob:
+                classification = "unsanctioned_saas"
+            elif str(asset.exposure or "").lower() == "external":
+                classification = "internet_exposed_unowned"
+            if not (asset.owner or "").strip():
+                control_gap.append("Owner not assigned")
+            if str(asset.exposure or "").lower() == "external":
+                control_gap.append("Internet exposure review required")
+            if not asset.business_unit:
+                control_gap.append("Business unit not mapped")
             suspicious_services.append(
                 {
                     "label": asset.asset_name,
@@ -48,6 +61,11 @@ def build_shadow_it_summary(assets: list[Asset], findings: list[Finding] | None 
                         "tags": tags,
                         "business_unit": asset.business_unit,
                         "owner": asset.owner,
+                        "classification": classification,
+                        "control_gap": control_gap,
+                        "source": "asset_inventory",
+                        "exposure": asset.exposure,
+                        "recommended_action": "Validate business ownership, approve or block the service, and enforce SSO/MFA controls.",
                     },
                 }
             )
@@ -63,6 +81,13 @@ def build_shadow_it_summary(assets: list[Asset], findings: list[Finding] | None 
         )
         if suspicious:
             unknown_services += 1
+            control_gap = []
+            if not finding.assigned_to:
+                control_gap.append("No assigned owner")
+            if finding.source == "zap":
+                control_gap.append("Web exposure requires SaaS validation")
+            elif finding.source in {"openvas", "network-db"}:
+                control_gap.append("Externally reachable network service")
             suspicious_services.append(
                 {
                     "label": finding.title,
@@ -72,6 +97,9 @@ def build_shadow_it_summary(assets: list[Asset], findings: list[Finding] | None 
                         "finding_id": str(finding.id),
                         "source": finding.source,
                         "reason": "Discovered from scan telemetry without an assigned owner.",
+                        "classification": "scan_discovered_shadow_surface",
+                        "control_gap": control_gap,
+                        "recommended_action": "Review ownership, confirm whether the service is sanctioned, and restrict exposure if not approved.",
                     },
                 }
             )
@@ -99,6 +127,25 @@ def build_misconfiguration_summary(findings: list[Finding]) -> dict:
     top_items = []
     for finding in findings:
         text = f"{finding.title} {finding.remediation or ''} {finding.evidence or ''}".lower()
+        metadata = finding.finding_metadata or {}
+        os_family = infer_os_family(
+            service=metadata.get("service_name") or finding.service or "",
+            title=finding.title or "",
+            banner=" ".join(
+                str(value)
+                for value in [
+                    metadata.get("server"),
+                    metadata.get("banner"),
+                    metadata.get("technology"),
+                    metadata.get("generator"),
+                ]
+                if value
+            ),
+            evidence=finding.evidence or "",
+            port=finding.port or 0,
+        )
+        os_family = str(metadata.get("os_family") or os_family or "network").lower()
+        cis_benchmark = metadata.get("cis_benchmark") or benchmark_for_os(os_family)
         if "tls" in text or "transport-security" in text or "strict-transport-security" in text:
             categories["weak_tls"] += 1
         if finding.category == "network" or "port" in text or "service" in text:
@@ -107,6 +154,7 @@ def build_misconfiguration_summary(findings: list[Finding]) -> dict:
             categories["auth_issues"] += 1
         if "cloud" in text or "bucket" in text or "s3" in text or "azure" in text or "gcp" in text:
             categories["cloud_findings"] += 1
+        categories[f"cis_{os_family}"] += 1
 
         if finding.status == "open":
             top_items.append(
@@ -114,7 +162,14 @@ def build_misconfiguration_summary(findings: list[Finding]) -> dict:
                     "label": finding.title,
                     "value": finding.source,
                     "severity": (finding.severity or "info").lower(),
-                    "metadata": {"cve_id": finding.cve_id, "compliance_map": finding.compliance_map or []},
+                    "metadata": {
+                        "cve_id": finding.cve_id,
+                        "compliance_map": finding.compliance_map or [],
+                        "cis_benchmark": cis_benchmark,
+                        "os_family": os_family,
+                        "hardening_recommendation": metadata.get("hardening_recommendation"),
+                        "references": metadata.get("references", []),
+                    },
                 }
             )
 
@@ -177,7 +232,13 @@ def build_software_summary(
                                 "label": tag,
                                 "value": asset.asset_name,
                                 "severity": severity,
-                                "metadata": {"hostname": asset.hostname, "owner": asset.owner},
+                                "metadata": {
+                                    "hostname": asset.hostname,
+                                    "owner": asset.owner,
+                                    "source": "asset_tags",
+                                    "baseline_status": "not_approved",
+                                    "recommended_action": "Validate whether the tool is sanctioned for this endpoint and remove or isolate it if not approved.",
+                                },
                             }
                         )
 
@@ -200,6 +261,8 @@ def build_software_summary(
                         "owner": inventory.reported_by,
                         "reason": app.get("reason"),
                         "source": inventory.source,
+                        "baseline_status": "not_in_baseline",
+                        "recommended_action": "Compare the installed software list with the approved baseline and remove or formally approve the drift.",
                     },
                 }
             )
@@ -224,6 +287,8 @@ def build_software_summary(
                         "reason": f"Observed in scan evidence: {finding.title}",
                         "source": finding.source,
                         "finding_id": str(finding.id),
+                        "baseline_status": "scan_observed",
+                        "recommended_action": "Validate whether the observed software should exist on this host and collect endpoint inventory for confirmation.",
                     },
                 }
             )

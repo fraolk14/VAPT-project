@@ -12,13 +12,17 @@ function buildDownloadUrl(path) {
   return `${baseURL}${path}`;
 }
 
-async function fetchDownloadBlob(path, fallbackMimeType) {
+async function fetchBlob(path, { method = "GET", body, fallbackMimeType } = {}) {
   const token = window.localStorage.getItem("vapt_token");
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  if (!(body instanceof FormData)) {
+    headers["Content-Type"] = "application/json";
+  }
   const response = await fetch(buildDownloadUrl(path), {
-    method: "GET",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    method,
+    headers,
+    body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
   });
-
   if (!response.ok) {
     let detail = `Download failed with status ${response.status}.`;
     try {
@@ -29,20 +33,40 @@ async function fetchDownloadBlob(path, fallbackMimeType) {
     }
     throw new Error(detail);
   }
-
-  const blob = await response.blob();
-  return new Blob([blob], { type: blob.type || fallbackMimeType });
+  const buffer = await response.arrayBuffer();
+  return new Blob([buffer], { type: response.headers.get("content-type") || fallbackMimeType || "application/octet-stream" });
 }
 
-function triggerDirectDownload(path, filename) {
+async function fetchJson(path, { method = "GET", body } = {}) {
+  const token = window.localStorage.getItem("vapt_token");
+  const headers = { Accept: "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (!(body instanceof FormData)) headers["Content-Type"] = "application/json";
+  const response = await fetch(buildDownloadUrl(path), {
+    method,
+    headers,
+    body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
+  });
+  if (!response.ok) {
+    throw new Error(`Request failed with status ${response.status}.`);
+  }
+  return response.json();
+}
+
+function saveBlobDownload(blob, filename) {
+  if (window.navigator?.msSaveOrOpenBlob) {
+    window.navigator.msSaveOrOpenBlob(blob, filename);
+    return;
+  }
+  const objectUrl = window.URL.createObjectURL(blob);
   const anchor = document.createElement("a");
-  anchor.href = buildDownloadUrl(path);
+  anchor.href = objectUrl;
   anchor.download = filename;
-  anchor.rel = "noopener";
   anchor.style.display = "none";
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
+  window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 60000);
 }
 
 export default function Reports({ findings, scans, compliance, incidents, alertRules, alertEvents }) {
@@ -63,9 +87,23 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
   const [localIncidents, setLocalIncidents] = useState(incidents || []);
   const [assessmentDetail, setAssessmentDetail] = useState(null);
   const [actionFeedback, setActionFeedback] = useState("");
+  const [reportTargets, setReportTargets] = useState([]);
+  const [selectedTargets, setSelectedTargets] = useState([]);
+  const [targetFilter, setTargetFilter] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [companyName, setCompanyName] = useState("VAPTICOM");
+  const [logoFile, setLogoFile] = useState(null);
+  const [branding, setBranding] = useState({ logo_name: null, logo_uploaded: false, updated_at: null });
+  const [reportTitle, setReportTitle] = useState("VAPTICOM Security Assessment Report");
 
   useEffect(() => {
     api.get("/reports/summary").then((response) => setSummary(response.data)).catch(() => {});
+    api.get("/reports/targets").then((response) => setReportTargets(response.data || [])).catch(() => {});
+    api.get("/reports/branding").then((response) => {
+      setBranding(response.data || {});
+      setCompanyName(response.data?.company_name || "VAPTICOM");
+      setReportTitle(`${response.data?.company_name || "VAPTICOM"} Security Assessment Report`);
+    }).catch(() => {});
   }, []);
 
   useEffect(() => setLocalAssessments(compliance?.assessments || []), [compliance?.assessments]);
@@ -76,10 +114,7 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
       setAssessmentDetail(null);
       return;
     }
-    api
-      .get(`/operations/compliance/assessments/${selectedAssessment.id}`)
-      .then((response) => setAssessmentDetail(response.data))
-      .catch(() => setAssessmentDetail(null));
+    api.get(`/operations/compliance/assessments/${selectedAssessment.id}`).then((response) => setAssessmentDetail(response.data)).catch(() => setAssessmentDetail(null));
   }, [selectedAssessment]);
 
   const strongestSeverity = useMemo(() => {
@@ -90,19 +125,72 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
   }, [summary.severity_counts]);
 
   const stakeholderNarrative = useMemo(() => {
-    if (reportType === "technical") {
-      return "Technical reporting keeps evidence, CVEs, normalized finding metadata, and remediation state ready for engineering teams.";
-    }
-    if (reportType === "compliance") {
-      return "Compliance reporting emphasizes mapped controls, assessment scorecards, and exportable evidence packs for audits.";
-    }
-    return "Executive reporting emphasizes top risk, attack exposure, and the current operational load on remediation teams.";
+    if (reportType === "technical") return "Technical reporting keeps evidence, CVEs, finding detail, and remediation state ready for engineering teams.";
+    if (reportType === "compliance") return "Compliance reporting emphasizes mapped controls, assessment scorecards, and exportable evidence packs for audits.";
+    return "Executive reporting emphasizes top risk, affected targets, business impact, and remediation priorities.";
   }, [reportType]);
+
+  const visibleTargets = useMemo(() => {
+    const query = targetFilter.trim().toLowerCase();
+    if (!query) return reportTargets;
+    return reportTargets.filter((item) =>
+      [item.target, item.asset_name, item.hostname, item.ip_address, item.url, item.os_family]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query))
+    );
+  }, [reportTargets, targetFilter]);
+
+  const requestPayload = useMemo(
+    () => ({
+      mode: reportType,
+      selected_targets: selectedTargets,
+      report_title: reportTitle,
+    }),
+    [reportType, selectedTargets, reportTitle]
+  );
+
+  const toggleTarget = (target) => {
+    setSelectedTargets((current) => (current.includes(target) ? current.filter((item) => item !== target) : [...current, target]));
+  };
+
+  const previewReport = async () => {
+    setDownloadState("preview");
+    try {
+      const response = await fetchJson("/reports/preview", { method: "POST", body: requestPayload });
+      setPreview(response);
+      setActionFeedback("Report preview refreshed.");
+    } catch (error) {
+      setActionFeedback(error?.message || "Unable to build the preview right now.");
+    } finally {
+      setDownloadState("idle");
+    }
+  };
+
+  const downloadPdf = async () => {
+    setDownloadState("pdf");
+    try {
+      const response = await fetchJson("/reports/download-link", {
+        method: "POST",
+        body: requestPayload,
+      });
+      if (!response?.download_url) {
+        throw new Error("Unable to create the report download link.");
+      }
+      window.location.assign(response.download_url);
+      setActionFeedback("PDF report download started.");
+    } catch (error) {
+      setActionFeedback(error?.message || "Unable to download the PDF report right now.");
+    } finally {
+      setDownloadState("idle");
+    }
+  };
 
   const downloadReport = async (path, filename, mimeType) => {
     setDownloadState(path);
     try {
-      triggerDirectDownload(path, filename);
+      const blob = await fetchBlob(path, { fallbackMimeType: mimeType });
+      if (!blob.size) throw new Error("The generated report is empty.");
+      saveBlobDownload(blob, filename);
       setActionFeedback(`Downloaded ${filename}.`);
     } catch (error) {
       setActionFeedback(error?.message || "Unable to download the report right now.");
@@ -111,22 +199,35 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
     }
   };
 
+  const uploadLogo = async () => {
+    if (!logoFile) {
+      setActionFeedback("Choose a PNG or JPG logo first.");
+      return;
+    }
+    setDownloadState("branding");
+    try {
+      const form = new FormData();
+      form.append("company_name", companyName);
+      form.append("file", logoFile);
+      const response = await fetchJson("/reports/branding/logo", { method: "POST", body: form });
+      setBranding(response);
+      if (response?.company_name) {
+        setCompanyName(response.company_name);
+      }
+      setActionFeedback("Report branding updated.");
+    } catch (error) {
+      setActionFeedback(error?.message || "Unable to upload the logo right now.");
+    } finally {
+      setDownloadState("idle");
+    }
+  };
+
   const downloadAssessment = async (assessment) => {
     setDownloadState(`assessment-${assessment.id}`);
     try {
-      const blob = await fetchDownloadBlob(`/operations/compliance/assessments/${assessment.id}/download`, "application/json");
-      if (!blob.size) {
-        throw new Error("The generated scorecard is empty.");
-      }
-      const objectUrl = window.URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = objectUrl;
-      anchor.download = `${assessment.name.replace(/\s+/g, "-").toLowerCase()}-scorecard.json`;
-      anchor.style.display = "none";
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 2000);
+      const blob = await fetchBlob(`/operations/compliance/assessments/${assessment.id}/download`, { fallbackMimeType: "application/json" });
+      if (!blob.size) throw new Error("The generated scorecard is empty.");
+      saveBlobDownload(blob, `${assessment.name.replace(/\s+/g, "-").toLowerCase()}-scorecard.json`);
       setActionFeedback(`Downloaded ${assessment.name} scorecard.`);
     } catch (error) {
       setActionFeedback(error?.message || "Unable to download the scorecard right now.");
@@ -178,8 +279,8 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
       <div className="panel panel--metrics">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Export workflow</p>
-            <h2>Delivery workspace</h2>
+            <p className="eyebrow">Custom report workspace</p>
+            <h2>Build and preview</h2>
           </div>
           <select className="scan-select" value={reportType} onChange={(event) => setReportType(event.target.value)}>
             <option value="executive">Executive</option>
@@ -187,36 +288,144 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
             <option value="compliance">Compliance</option>
           </select>
         </div>
-        <div className="risk-hero">
+        <div className="threat-grid">
+          <div className="panel panel--embedded">
+            <div className="panel__header">
+              <div>
+                <p className="eyebrow">Branding</p>
+                <h2>Company identity</h2>
+              </div>
+            </div>
+            <label className="scan-target-label">Company name</label>
+            <input className="scan-input" value={companyName} onChange={(event) => setCompanyName(event.target.value)} />
+            <label className="scan-target-label">Report title</label>
+            <input className="scan-input" value={reportTitle} onChange={(event) => setReportTitle(event.target.value)} />
+            <label className="scan-target-label">Upload logo</label>
+            <input type="file" accept=".png,.jpg,.jpeg" onChange={(event) => setLogoFile(event.target.files?.[0] || null)} />
+            <p className="scan-target-hint">
+              Current logo: <strong>{branding?.logo_uploaded ? branding.logo_name : "No custom logo uploaded"}</strong>
+            </p>
+            <div className="scan-actions">
+              <button type="button" className="scan-action" onClick={uploadLogo}>
+                {downloadState === "branding" ? "Uploading..." : "Upload logo"}
+              </button>
+            </div>
+          </div>
+
+          <div className="panel panel--embedded">
+            <div className="panel__header">
+              <div>
+                <p className="eyebrow">Scope</p>
+                <h2>Select targets</h2>
+              </div>
+            </div>
+            <input
+              className="scan-input"
+              placeholder="Filter targets by IP, hostname, URL, asset, or OS"
+              value={targetFilter}
+              onChange={(event) => setTargetFilter(event.target.value)}
+            />
+            <div className="scan-actions" style={{ marginTop: "10px" }}>
+              <button type="button" className="scan-action" onClick={() => setSelectedTargets(visibleTargets.map((item) => item.target))}>Select visible</button>
+              <button type="button" className="scan-action" onClick={() => setSelectedTargets([])}>Clear selection</button>
+            </div>
+            <div className="coverage-list" style={{ maxHeight: "260px", overflowY: "auto", marginTop: "12px" }}>
+              {visibleTargets.map((item) => (
+                <label key={item.target} className="coverage-row" style={{ gap: "12px", alignItems: "flex-start" }}>
+                  <input type="checkbox" checked={selectedTargets.includes(item.target)} onChange={() => toggleTarget(item.target)} />
+                  <span>
+                    {item.target}
+                    <p>{item.asset_name || item.hostname || item.ip_address || item.url || "Target"}</p>
+                    <p>{item.os_family || "OS not fingerprinted"} • {item.finding_count} finding(s) • {(item.highest_severity || "info").toUpperCase()}</p>
+                  </span>
+                </label>
+              ))}
+              {!visibleTargets.length ? <p className="empty-copy">No targets available yet. Complete scans first so report scope can be selected.</p> : null}
+            </div>
+          </div>
+        </div>
+        <div className="risk-hero" style={{ marginTop: "16px" }}>
           <div className="risk-hero__badge">
             <span>Primary report mode</span>
             <strong>{reportType}</strong>
           </div>
-            <div>
-              <p className="hero__lede">{stakeholderNarrative}</p>
-              <div className="scan-actions">
-                <button type="button" className="scan-action scan-action--resume" onClick={() => downloadReport("/reports/findings.pdf", "findings-report.pdf", "application/pdf")}>
-                  {downloadState === "/reports/findings.pdf" ? "Preparing PDF..." : "Download PDF"}
-                </button>
-                <button type="button" className="scan-action" onClick={() => downloadReport("/reports/findings.csv", "findings-report.csv", "text/csv")}>
-                  {downloadState === "/reports/findings.csv" ? "Preparing CSV..." : "Export CSV"}
-                </button>
-                <button type="button" className="scan-action" onClick={() => downloadReport("/reports/findings.json", "findings-report.json", "application/json")}>
-                  {downloadState === "/reports/findings.json" ? "Preparing JSON..." : "Export JSON"}
-                </button>
-              </div>
-              <div className="scan-actions" style={{ marginTop: "10px" }}>
-                <button type="button" className="scan-action" onClick={() => setSelectedAssessment((localAssessments || [])[0] || null)}>
-                  Open scorecard workspace
-                </button>
-                <button type="button" className="scan-action" onClick={refreshAssessments}>
-                  Refresh scorecards
-                </button>
-              </div>
+          <div>
+            <p className="hero__lede">{stakeholderNarrative}</p>
+            <p className="scan-target-hint"><strong>Selected targets:</strong> {selectedTargets.length || "All targets"}</p>
+            <div className="scan-actions">
+              <button type="button" className="scan-action" onClick={previewReport}>
+                {downloadState === "preview" ? "Building preview..." : "Preview report"}
+              </button>
+              <button type="button" className="scan-action scan-action--resume" onClick={downloadPdf}>
+                {downloadState === "pdf" ? "Preparing PDF..." : "Download PDF"}
+              </button>
+              <button type="button" className="scan-action" onClick={() => downloadReport("/reports/findings.csv", "findings-report.csv", "text/csv")}>
+                {downloadState === "/reports/findings.csv" ? "Preparing CSV..." : "Export CSV"}
+              </button>
+              <button type="button" className="scan-action" onClick={() => downloadReport("/reports/findings.json", "findings-report.json", "application/json")}>
+                {downloadState === "/reports/findings.json" ? "Preparing JSON..." : "Export JSON"}
+              </button>
+            </div>
             <p className="scan-target-hint"><strong>Highest active severity:</strong> {strongestSeverity}</p>
           </div>
         </div>
         {actionFeedback ? <p className="scan-target-hint">{actionFeedback}</p> : null}
+      </div>
+
+      <div className="panel">
+        <div className="panel__header">
+          <div>
+            <p className="eyebrow">Preview</p>
+            <h2>Before download</h2>
+          </div>
+        </div>
+        {preview ? (
+          <div className="threat-grid">
+            <div className="panel panel--embedded">
+              <div className="coverage-list">
+                <div className="coverage-row"><span>Report title</span><strong>{preview.report_title}</strong></div>
+                <div className="coverage-row"><span>Company</span><strong>{preview.company_name}</strong></div>
+                <div className="coverage-row"><span>Targets in scope</span><strong>{preview.targets?.length || 0}</strong></div>
+                <div className="coverage-row"><span>Total findings</span><strong>{preview.summary?.total_findings || 0}</strong></div>
+                <div className="coverage-row"><span>Open findings</span><strong>{preview.summary?.open_findings || 0}</strong></div>
+                <div className="coverage-row"><span>Logo</span><strong>{preview.logo_name || "Default text branding"}</strong></div>
+              </div>
+            </div>
+            <div className="panel panel--embedded">
+              <div className="panel__header">
+                <div>
+                  <p className="eyebrow">Top findings</p>
+                  <h2>Included in report</h2>
+                </div>
+              </div>
+              <div className="table-wrap">
+                <table className="table table--dense">
+                  <thead>
+                    <tr>
+                      <th>Finding</th>
+                      <th>Target</th>
+                      <th>Severity</th>
+                      <th>CVE</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(preview.top_findings || []).map((finding) => (
+                      <tr key={finding.id}>
+                        <td data-label="Finding"><strong>{finding.title}</strong></td>
+                        <td data-label="Target">{finding.target}</td>
+                        <td data-label="Severity">{finding.severity || "info"}</td>
+                        <td data-label="CVE">{finding.cve_id || "No CVE"}</td>
+                      </tr>
+                    ))}
+                    {!preview.top_findings?.length ? <tr><td colSpan="4"><p className="empty-copy">No findings matched the current report scope.</p></td></tr> : null}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <p className="empty-copy">Choose one or more targets, then use Preview report to inspect the report scope before downloading.</p>
+        )}
       </div>
 
       <div className="panel">
@@ -244,7 +453,7 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
             <h2>{selectedAssessment?.name || "Select a scorecard"}</h2>
           </div>
           {selectedAssessment ? (
-          <div className="scan-actions">
+            <div className="scan-actions">
               <button type="button" className="scan-action scan-action--resume" onClick={() => downloadAssessment(selectedAssessment)}>
                 {downloadState === `assessment-${selectedAssessment.id}` ? "Preparing..." : "Download scorecard"}
               </button>

@@ -24,7 +24,7 @@ services:
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL-}
     ports:
-      - "5173:80"
+      - "${FRONTEND_PORT:-18080}:80"
     depends_on:
       - api
 

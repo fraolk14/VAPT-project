@@ -15,9 +15,9 @@ flowchart LR
     Cache -->|hit| Return["Validated JSON Response"]
     Cache -->|miss| Limit["Rate Limit Guard"]
     Limit --> Engine["AI Analysis Service"]
-    Engine -->|Gemini configured| Gemini["Gemini API"]
+    Engine -->|NVIDIA NIM configured| Nim["NVIDIA NIM API"]
     Engine -->|fallback| Local["Deterministic Local Rules"]
-    Gemini --> ValidateOut["Pydantic Output Validation"]
+    Nim --> ValidateOut["Pydantic Output Validation"]
     Local --> ValidateOut
     ValidateOut --> Persist["Cache + Decision Log"]
     Persist --> Return
@@ -33,7 +33,7 @@ flowchart LR
   - Sanitization
   - Cache lookup and writes
   - Rate limiting
-  - Gemini invocation
+  - NVIDIA NIM invocation
   - Local deterministic fallback
   - Finding recommendation generation
 - `backend/app/schemas/ai.py`
@@ -79,8 +79,8 @@ flowchart LR
 
 ```json
 {
-  "provider": "gemini",
-  "model": "gemini-2.5-flash",
+  "provider": "nvidia-nim",
+  "model": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
   "cached": false,
   "analysis_type": "risk-score",
   "data": {
@@ -95,8 +95,8 @@ flowchart LR
 
 ```json
 {
-  "provider": "gemini",
-  "model": "gemini-2.5-flash",
+  "provider": "nvidia-nim",
+  "model": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
   "cached": false,
   "analysis_type": "explain",
   "data": {
@@ -112,8 +112,8 @@ flowchart LR
 
 ```json
 {
-  "provider": "gemini",
-  "model": "gemini-2.5-flash",
+  "provider": "nvidia-nim",
+  "model": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
   "cached": false,
   "analysis_type": "remediation",
   "data": {
@@ -134,8 +134,8 @@ flowchart LR
 
 ```json
 {
-  "provider": "gemini",
-  "model": "gemini-2.5-flash",
+  "provider": "nvidia-nim",
+  "model": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
   "cached": false,
   "analysis_type": "false-positive",
   "data": {
@@ -150,8 +150,8 @@ flowchart LR
 
 ```json
 {
-  "provider": "gemini",
-  "model": "gemini-2.5-flash",
+  "provider": "nvidia-nim",
+  "model": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
   "cached": false,
   "analysis_type": "threat-intel",
   "data": {
@@ -231,7 +231,7 @@ Use only the provided context and exploit indicators.
 
 - Every AI response is parsed as JSON.
 - Every JSON result is validated against a strict Pydantic schema.
-- Invalid Gemini responses automatically fall back to deterministic local analysis.
+- Invalid NVIDIA NIM responses automatically fall back to deterministic local analysis.
 
 ### Cache Behavior
 
@@ -265,7 +265,7 @@ Use only the provided context and exploit indicators.
 - Explicitly instructs the model to ignore embedded instructions
 - Returns only schema-validated JSON
 - Avoids forwarding internal secrets or unrelated system state
-- Supports local fallback when Gemini is unavailable
+- Supports local fallback when NVIDIA NIM is unavailable
 
 ## High-Volume Design Notes
 
@@ -277,9 +277,15 @@ The current implementation is modular and production-oriented, but for higher th
 - dedicated analytics tables for AI summaries and reuse
 - queue-based enrichment for full scan result sets
 
-## Gemini Integration Notes
+## NVIDIA NIM Integration Notes
 
-The implementation uses the Gemini API and validates all returned JSON before it is exposed to the platform. Official references:
+The implementation uses NVIDIA NIM's OpenAI-compatible chat completions API and validates all returned JSON before it is exposed to the platform. Configure:
 
-- [Gemini API Structured Output Guide](https://ai.google.dev/gemini-api/docs/structured-output)
-- [Gemini API Generate Content Reference](https://ai.google.dev/api/generate-content)
+- `NVIDIA_NIM_API_KEY`
+- `NVIDIA_NIM_BASE_URL=https://integrate.api.nvidia.com/v1`
+- `NVIDIA_NIM_MODEL=nvidia/llama-3.3-nemotron-super-49b-v1.5`
+
+Official references:
+
+- [NVIDIA NIM LLM API Reference](https://docs.nvidia.com/nim/large-language-models/latest/api-reference.html)
+- [NVIDIA NIM API Catalog](https://build.nvidia.com/models)

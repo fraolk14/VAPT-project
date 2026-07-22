@@ -5,6 +5,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.models.alert import AlertRule
+from app.models.asset import Asset
 from app.database import get_db
 from app.models.finding import AuditLog, FalsePositiveRule, Finding
 from app.models.scan import Scan
@@ -25,7 +26,7 @@ def _finding_target(finding: Finding) -> str:
     metadata = finding.finding_metadata or {}
     if finding.source == "zap":
         return metadata.get("url") or ""
-    if finding.source == "openvas":
+    if finding.source in {"openvas", "network-db"}:
         return metadata.get("host") or ""
     if finding.source == "mobsf":
         return metadata.get("file") or ""
@@ -57,12 +58,44 @@ def _finding_details_text(finding: Finding) -> str:
     return correlation.get("correlation_summary") or finding.evidence or finding.remediation or "Finding requires review."
 
 
-def _serialize_finding(finding: Finding, scan_finished_at) -> dict:
+def _target_details(finding: Finding, asset: Asset | None = None) -> dict:
+    metadata = finding.finding_metadata or {}
+    return {
+        "asset_name": asset.asset_name if asset else None,
+        "asset_type": asset.asset_type if asset else None,
+        "asset_os": asset.os if asset else None,
+        "hostname": metadata.get("hostname") or (asset.hostname if asset else None),
+        "host": metadata.get("host") or metadata.get("ip_address") or (asset.ip_address if asset else None),
+        "url": metadata.get("url") or metadata.get("affected_url") or (asset.url if asset else None),
+        "service": finding.service,
+        "port": finding.port,
+        "protocol": finding.protocol,
+        "state": finding.state,
+        "banner": metadata.get("banner"),
+        "server": metadata.get("server"),
+        "technology": metadata.get("technology"),
+        "generator": metadata.get("generator"),
+        "os_family": metadata.get("os_family"),
+        "cis_benchmark": metadata.get("cis_benchmark"),
+    }
+
+
+def _serialize_finding(finding: Finding, scan_finished_at, asset: Asset | None = None) -> dict:
+    triage = (finding.finding_metadata or {}).get("triage", {})
+    normalized_status = finding.status or "open"
+    if finding.verification_state == "verified":
+        normalized_status = "resolved"
+    elif finding.verification_state == "scheduled" and normalized_status == "open":
+        normalized_status = "in_progress"
     payload = {
         **finding.__dict__,
+        "status": normalized_status,
         "scan_finished_at": scan_finished_at,
         "duplicate_count": 1,
         "group_key": str(finding.id),
+        "asset_name": asset.asset_name if asset else None,
+        "resolved_by": triage.get("resolved_by") or finding.assigned_to,
+        "target_details": _target_details(finding, asset),
     }
     payload["display_id"] = _display_identifier(payload)
     return payload
@@ -71,13 +104,14 @@ def _serialize_finding(finding: Finding, scan_finished_at) -> dict:
 @router.get("/", response_model=list[FindingOut])
 def list_findings(db: Session = Depends(get_db)):
     rows = (
-        db.query(Finding, Scan.finished_at)
+        db.query(Finding, Scan.finished_at, Asset)
         .join(Scan, Scan.id == Finding.scan_id)
+        .outerjoin(Asset, Asset.id == Finding.asset_id)
         .all()
     )
     grouped_findings: dict[tuple, dict] = {}
-    for finding, finished_at in rows:
-        payload = _serialize_finding(finding, finished_at)
+    for finding, finished_at, asset in rows:
+        payload = _serialize_finding(finding, finished_at, asset)
         group_key = (
             finding.source,
             finding.title.strip().lower(),
@@ -149,7 +183,8 @@ def get_finding_detail(finding_id: str, db: Session = Depends(get_db)):
     if not finding:
         raise HTTPException(status_code=404, detail="Finding not found")
     scan_finished_at = db.query(Scan.finished_at).filter(Scan.id == finding.scan_id).scalar()
-    return FindingOut.model_validate(_serialize_finding(finding, scan_finished_at))
+    asset = db.get(Asset, finding.asset_id) if finding.asset_id else None
+    return FindingOut.model_validate(_serialize_finding(finding, scan_finished_at, asset))
 
 
 @router.patch("/{finding_id}", response_model=FindingOut)
@@ -178,6 +213,13 @@ def update_finding(
         finding.status = payload.status
         if payload.status == "resolved":
             finding.resolved_at = datetime.now(timezone.utc)
+            finding.finding_metadata = {
+                **(finding.finding_metadata or {}),
+                "triage": {
+                    **((finding.finding_metadata or {}).get("triage", {})),
+                    "resolved_by": finding.assigned_to or current_user.username,
+                },
+            }
 
     if payload.severity:
         finding.severity = payload.severity
@@ -212,6 +254,17 @@ def update_finding(
         finding.sla_due_at = payload.sla_due_at
     if payload.verification_state is not None:
         finding.verification_state = payload.verification_state
+        triage = {**((finding.finding_metadata or {}).get("triage", {}))}
+        if payload.verification_state == "scheduled":
+            finding.status = "in_progress"
+        elif payload.verification_state == "verified":
+            finding.status = "resolved"
+            finding.resolved_at = datetime.now(timezone.utc)
+            triage["resolved_by"] = finding.assigned_to or current_user.username
+        finding.finding_metadata = {
+            **(finding.finding_metadata or {}),
+            "triage": triage,
+        }
 
     after = {
         "status": finding.status,
@@ -234,7 +287,8 @@ def update_finding(
     rules = db.query(AlertRule).filter(AlertRule.enabled.is_(True)).all()
     queue_alert_events(db, finding, rules)
     scan_finished_at = db.query(Scan.finished_at).filter(Scan.id == finding.scan_id).scalar()
-    return FindingOut.model_validate(_serialize_finding(finding, scan_finished_at))
+    asset = db.get(Asset, finding.asset_id) if finding.asset_id else None
+    return FindingOut.model_validate(_serialize_finding(finding, scan_finished_at, asset))
 
 
 @router.get("/false-positive-rules", response_model=list[FalsePositiveRuleOut])

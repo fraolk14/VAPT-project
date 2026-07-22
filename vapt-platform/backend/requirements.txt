@@ -12,4 +12,4 @@ requests
 email-validator
 python-gvm
 pyotp
-openai
+reportlab

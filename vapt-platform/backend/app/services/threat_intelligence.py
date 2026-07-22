@@ -530,6 +530,88 @@ def fetch_urlhaus_recent(limit: int = URLHAUS_RECENT_LIMIT) -> tuple[str, list[d
         return "unavailable", []
 
 
+def _match_external_event_to_findings(name: str, description: str, references: list[str], findings: Iterable[Finding]) -> tuple[int, list[str]]:
+    text = _text_blob(name, description, " ".join(references))
+    cves = {token.upper() for token in references if isinstance(token, str) and "CVE-" in token.upper()}
+    matched_targets: list[str] = []
+    for finding in findings:
+        finding_blob = _text_blob(
+            finding.title,
+            finding.evidence,
+            finding.remediation,
+            finding.cve_id,
+            (finding.finding_metadata or {}).get("host"),
+            (finding.finding_metadata or {}).get("url"),
+        )
+        direct_cve = bool(finding.cve_id and finding.cve_id.upper() in cves)
+        keyword_match = False
+        if not direct_cve:
+            tokens = [token for token in text.split() if len(token) > 5][:24]
+            keyword_match = any(token in finding_blob for token in tokens)
+        if direct_cve or keyword_match:
+            target = (
+                (finding.finding_metadata or {}).get("host")
+                or (finding.finding_metadata or {}).get("url")
+                or (finding.finding_metadata or {}).get("target")
+                or finding.title
+            )
+            if target:
+                matched_targets.append(str(target))
+    deduped = list(dict.fromkeys(matched_targets))
+    return len(deduped), deduped[:8]
+
+
+def build_external_event_feed(findings: Iterable[Finding], misp_events: list[dict], urlhaus_rows: list[dict]) -> list[dict]:
+    events: list[dict] = []
+    for event in misp_events:
+        references = [event.get("url")] + list(event.get("references") or [])
+        matched_count, matched_targets = _match_external_event_to_findings(
+            event.get("name") or "",
+            event.get("description") or "",
+            [ref for ref in references if ref],
+            findings,
+        )
+        events.append(
+            {
+                "id": f"misp-{event.get('id')}",
+                "source": "MISP",
+                "name": event.get("name") or "MISP event",
+                "description": event.get("description"),
+                "created": event.get("created") or event.get("modified"),
+                "indicator_count": int(event.get("indicator_count") or 0),
+                "severity": event.get("threat_level"),
+                "matched_findings": matched_count,
+                "matched_targets": matched_targets,
+                "references": [ref for ref in references if ref],
+                "url": event.get("url"),
+            }
+        )
+
+    for index, row in enumerate(urlhaus_rows[:20]):
+        name = row.get("threat") or row.get("tags") or "URLhaus malware event"
+        description = f"Recent malicious URL observed: {row.get('url') or 'n/a'}"
+        references = [ref for ref in [row.get("urlhaus_link"), row.get("url")] if ref]
+        matched_count, matched_targets = _match_external_event_to_findings(name, description, references, findings)
+        events.append(
+            {
+                "id": f"urlhaus-{row.get('id') or index}",
+                "source": "URLhaus",
+                "name": name,
+                "description": description,
+                "created": row.get("dateadded") or row.get("last_online"),
+                "indicator_count": 1,
+                "severity": "high",
+                "matched_findings": matched_count,
+                "matched_targets": matched_targets,
+                "references": references,
+                "url": row.get("urlhaus_link") or row.get("url"),
+            }
+        )
+
+    events.sort(key=lambda item: str(item.get("created") or ""), reverse=True)
+    return events[:20]
+
+
 def _infer_attack_type(*parts) -> str:
     text = _text_blob(*parts)
     if "sql" in text or "injection" in text:

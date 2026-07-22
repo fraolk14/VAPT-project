@@ -1,183 +1,101 @@
 import { useMemo, useState } from "react";
 
-import Card from "../components/Card";
-
-function severityWeight(severity) {
-  if (severity === "critical") return 4;
-  if (severity === "high") return 3;
-  if (severity === "medium") return 2;
-  return 1;
-}
-
-export default function ShadowIT({ summary, assets, incidents, monitoringEvents }) {
+export default function ShadowIT({ summary, assets = [], incidents = [], monitoringEvents = [] }) {
+  const [query, setQuery] = useState("");
+  const [selectedKey, setSelectedKey] = useState("");
   const [severityFilter, setSeverityFilter] = useState("all");
-  const [selectedServiceKey, setSelectedServiceKey] = useState("");
-  const [triageState, setTriageState] = useState({});
-  const [serviceNotes, setServiceNotes] = useState({});
 
-  const suspiciousServices = useMemo(() => {
-    const items = [...(summary?.suspicious_services || [])].sort(
-      (left, right) => severityWeight(right.severity) - severityWeight(left.severity)
-    );
-    return severityFilter === "all" ? items : items.filter((item) => item.severity === severityFilter);
-  }, [summary?.suspicious_services, severityFilter]);
+  const services = useMemo(() => {
+    return (summary?.suspicious_services || [])
+      .filter((item) => severityFilter === "all" || item.severity === severityFilter)
+      .filter((item) => {
+        const blob = `${item.label} ${item.value} ${item.metadata?.owner || ""} ${item.metadata?.business_unit || ""} ${(item.metadata?.tags || []).join(" ")} ${item.metadata?.classification || ""}`.toLowerCase();
+        return blob.includes(query.trim().toLowerCase());
+      })
+      .sort((a, b) => {
+        const weight = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+        return (weight[b.severity] || 0) - (weight[a.severity] || 0);
+      });
+  }, [summary?.suspicious_services, query, severityFilter]);
 
-  const selectedService = useMemo(() => {
-    return suspiciousServices.find((item) => `${item.label}-${item.value}` === selectedServiceKey) || suspiciousServices[0] || null;
-  }, [selectedServiceKey, suspiciousServices]);
+  const selected = useMemo(() => services.find((item) => `${item.label}-${item.value}` === selectedKey) || services[0] || null, [services, selectedKey]);
 
   const relatedAssets = useMemo(() => {
-    if (!selectedService) return [];
-    const fingerprint = `${selectedService.label} ${selectedService.value} ${selectedService.metadata?.tags?.join(" ") || ""}`.toLowerCase();
-    return (assets || []).filter((asset) => {
-      const blob = `${asset.asset_name} ${asset.hostname || ""} ${asset.ip_address || ""} ${asset.url || ""} ${asset.tags?.join(" ") || ""}`.toLowerCase();
-      return blob.includes((selectedService.value || "").toLowerCase()) || blob.includes((selectedService.label || "").toLowerCase()) || selectedService.metadata?.tags?.some((tag) => blob.includes(String(tag).toLowerCase())) || fingerprint.includes(blob);
-    });
-  }, [assets, selectedService]);
+    if (!selected) return [];
+    const target = `${selected.label} ${selected.value}`.toLowerCase();
+    return (assets || []).filter((asset) => `${asset.asset_name} ${asset.hostname || ""} ${asset.ip_address || ""} ${asset.url || ""} ${(asset.tags || []).join(" ")}`.toLowerCase().includes(target) || target.includes(`${asset.hostname || asset.ip_address || asset.url || ""}`.toLowerCase()));
+  }, [assets, selected]);
 
-  const relatedIncidents = useMemo(() => {
-    if (!selectedService) return [];
-    return (incidents || []).filter((incident) => {
-      const blob = `${incident.title} ${incident.target} ${incident.summary || ""}`.toLowerCase();
-      return blob.includes((selectedService.value || "").toLowerCase()) || blob.includes((selectedService.label || "").toLowerCase());
-    }).slice(0, 5);
-  }, [incidents, selectedService]);
-
-  const relatedEvents = useMemo(() => {
-    if (!selectedService) return [];
-    return (monitoringEvents || []).filter((event) => {
-      const blob = `${event.target} ${event.event_type} ${event.source}`.toLowerCase();
-      return blob.includes((selectedService.value || "").toLowerCase()) || blob.includes((selectedService.label || "").toLowerCase());
-    }).slice(0, 6);
-  }, [monitoringEvents, selectedService]);
+  const relatedSignals = useMemo(() => {
+    if (!selected) return [];
+    const target = `${selected.label} ${selected.value}`.toLowerCase();
+    const signalRows = [
+      ...(incidents || []).map((incident) => ({ type: "incident", id: incident.id, title: incident.title, target: incident.target, status: incident.status, severity: incident.severity })),
+      ...(monitoringEvents || []).map((event) => ({ type: "event", id: event.id, title: event.event_type, target: event.target, status: event.status, severity: event.severity })),
+    ];
+    return signalRows.filter((row) => `${row.title} ${row.target}`.toLowerCase().includes(target)).slice(0, 10);
+  }, [incidents, monitoringEvents, selected]);
 
   return (
     <section className="section-grid">
       <div className="panel panel--metrics">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Discovery posture</p>
-            <h2>Shadow IT</h2>
+            <p className="eyebrow">Shadow IT discovery</p>
+            <h2>Unsanctioned services and SaaS exposure</h2>
           </div>
         </div>
         <div className="metrics-grid">
-          <Card title="External Assets" value={summary?.external_assets || 0} trend="Internet-facing footprint under watch" />
-          <Card title="Cloud Footprint" value={summary?.cloud_assets || 0} trend="Cloud-connected inventory observed" />
-          <Card title="Unknown Services" value={summary?.unknown_services || 0} trend="Unowned or unsanctioned services detected" />
-          <Card title="Reviewed Services" value={summary?.reviewed_services || 0} trend="Discovery items triaged by operators" />
-        </div>
-      </div>
-
-      <div className="panel panel--metrics">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Discovery findings</p>
-            <h2>Suspicious services</h2>
-          </div>
-          <select className="scan-select" value={severityFilter} onChange={(event) => setSeverityFilter(event.target.value)}>
-            <option value="all">All severities</option>
-            <option value="critical">Critical</option>
-            <option value="high">High</option>
-            <option value="medium">Medium</option>
-            <option value="low">Low</option>
-          </select>
-        </div>
-
-        <div className="attack-path-layout">
-          <div className="coverage-list">
-            {suspiciousServices.length ? suspiciousServices.map((item) => {
-              const key = `${item.label}-${item.value}`;
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  className={selectedServiceKey === key || (!selectedServiceKey && selectedService?.label === item.label && selectedService?.value === item.value)
-                    ? "coverage-row coverage-row--button is-active"
-                    : "coverage-row coverage-row--button"}
-                  onClick={() => setSelectedServiceKey(key)}
-                >
-                  <span>
-                    {item.label}
-                    <p>{item.value}</p>
-                  </span>
-                  <strong><span className={`pill pill--${item.severity}`}>{item.severity}</span></strong>
-                </button>
-              );
-            }) : <p className="empty-copy">No suspicious services detected yet.</p>}
-          </div>
-
-          <div className="panel panel--embedded attack-path-detail">
-            <div className="panel__header">
-              <div>
-                <p className="eyebrow">Service drill-down</p>
-                <h2>{selectedService?.label || "Select a service"}</h2>
-              </div>
-            </div>
-            {selectedService ? (
-              <div className="attack-path-nodes">
-                <article className="attack-path-node">
-                  <span className={`pill pill--${selectedService.severity}`}>{selectedService.severity}</span>
-                  <strong>{selectedService.value}</strong>
-                  <p>{selectedService.metadata?.business_unit || selectedService.metadata?.tags?.join(", ") || "Discovery context pending"}</p>
-                  <div className="coverage-list">
-                    <div className="coverage-row"><span>Triage</span>
-                      <strong>
-                        <select
-                          className="scan-select"
-                          value={triageState[`${selectedService.label}-${selectedService.value}`] || "new"}
-                          onChange={(event) => setTriageState((current) => ({ ...current, [`${selectedService.label}-${selectedService.value}`]: event.target.value }))}
-                        >
-                          <option value="new">New</option>
-                          <option value="reviewing">Reviewing</option>
-                          <option value="approved">Approved SaaS</option>
-                          <option value="contain">Contain / block</option>
-                        </select>
-                      </strong>
-                    </div>
-                    <div className="coverage-row"><span>Connector hint</span><strong>{Object.keys(summary?.connector_status || {}).filter((name) => String(summary.connector_status[name]).toLowerCase() !== "planned").slice(0, 2).join(", ") || "Heuristic only"}</strong></div>
-                  </div>
-                  <textarea
-                    className="scan-input ai-textarea"
-                    placeholder="Record ownership validation, business justification, or offboarding notes"
-                    value={serviceNotes[`${selectedService.label}-${selectedService.value}`] || ""}
-                    onChange={(event) => setServiceNotes((current) => ({ ...current, [`${selectedService.label}-${selectedService.value}`]: event.target.value }))}
-                  />
-                </article>
-              </div>
-            ) : (
-              <p className="empty-copy">Choose a suspicious service to inspect related assets, events, and triage notes.</p>
-            )}
-          </div>
+          <article className="metric-card"><span>Unknown services</span><strong>{summary?.unknown_services || 0}</strong><small>Assets or services without clear ownership</small></article>
+          <article className="metric-card"><span>External assets</span><strong>{summary?.external_assets || 0}</strong><small>Internet-facing assets under observation</small></article>
+          <article className="metric-card"><span>Cloud-connected assets</span><strong>{summary?.cloud_assets || 0}</strong><small>SaaS and cloud surface in inventory</small></article>
+          <article className="metric-card"><span>Reviewed services</span><strong>{summary?.reviewed_services || 0}</strong><small>Items already triaged by operators</small></article>
         </div>
       </div>
 
       <div className="panel">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Mapped assets</p>
-            <h2>Related inventory</h2>
+            <p className="eyebrow">Service inventory</p>
+            <h2>Discovery queue</h2>
+          </div>
+          <div className="table-controls">
+            <input className="scan-input" placeholder="Search service, owner, business unit, tag" value={query} onChange={(event) => setQuery(event.target.value)} />
+            <select className="scan-select" value={severityFilter} onChange={(event) => setSeverityFilter(event.target.value)}>
+              <option value="all">All severities</option>
+              <option value="critical">Critical</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
           </div>
         </div>
         <div className="table-wrap">
           <table className="table table--dense">
             <thead>
               <tr>
-                <th>Asset</th>
-                <th>Address</th>
-                <th>Exposure</th>
-                <th>Criticality</th>
+                <th>Service</th>
+                <th>Location</th>
+                <th>Severity</th>
+                <th>Classification</th>
+                <th>Owner</th>
+                <th>Business Unit</th>
+                <th>Signals</th>
               </tr>
             </thead>
             <tbody>
-              {relatedAssets.map((asset) => (
-                <tr key={asset.id}>
-                  <td data-label="Asset"><strong>{asset.asset_name}</strong></td>
-                  <td data-label="Address">{asset.url || asset.hostname || asset.ip_address || "n/a"}</td>
-                  <td data-label="Exposure">{asset.exposure}</td>
-                  <td data-label="Criticality">{asset.criticality}</td>
+              {services.map((item) => (
+                <tr key={`${item.label}-${item.value}`} className={selected?.label === item.label && selected?.value === item.value ? "finding-row--selected" : ""} onClick={() => setSelectedKey(`${item.label}-${item.value}`)} style={{ cursor: "pointer" }}>
+                  <td data-label="Service"><strong>{item.label}</strong><p>{(item.metadata?.tags || []).join(", ") || "No tags"}</p></td>
+                  <td data-label="Location">{item.value}</td>
+                  <td data-label="Severity"><span className={`pill pill--${item.severity}`}>{item.severity}</span></td>
+                  <td data-label="Classification">{item.metadata?.classification || "review_required"}</td>
+                  <td data-label="Owner">{item.metadata?.owner || "Unassigned"}</td>
+                  <td data-label="Business Unit">{item.metadata?.business_unit || "Unknown"}</td>
+                  <td data-label="Signals">{item.metadata?.source || "Discovery telemetry"}</td>
                 </tr>
               ))}
-              {!relatedAssets.length ? <tr><td colSpan="4"><p className="empty-copy">No directly related assets were matched for the selected service.</p></td></tr> : null}
+              {!services.length ? <tr><td colSpan="7"><p className="empty-copy">No shadow IT items matched the current filter.</p></td></tr> : null}
             </tbody>
           </table>
         </div>
@@ -186,42 +104,97 @@ export default function ShadowIT({ summary, assets, incidents, monitoringEvents 
       <div className="panel">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Operational signals</p>
-            <h2>Incidents and events</h2>
+            <p className="eyebrow">Selected service</p>
+            <h2>{selected?.label || "No service selected"}</h2>
           </div>
         </div>
-        <div className="coverage-list">
-          {relatedIncidents.map((incident) => (
-            <div className="coverage-row" key={incident.id}>
-              <span>{incident.title}<p>{incident.target}</p></span>
-              <strong>{incident.severity} / {incident.status}</strong>
-            </div>
-          ))}
-          {relatedEvents.map((event) => (
-            <div className="coverage-row" key={event.id}>
-              <span>{event.event_type}<p>{event.target}</p></span>
-              <strong>{event.source} / {event.status}</strong>
-            </div>
-          ))}
-          {!relatedIncidents.length && !relatedEvents.length ? <p className="empty-copy">No correlated incidents or monitoring events matched the selected service yet.</p> : null}
-        </div>
+        {selected ? (
+          <div className="finding-detail-grid finding-detail-grid--single">
+            <article className="panel panel--embedded">
+              <div className="coverage-list">
+                <div className="coverage-row"><span>Service</span><strong>{selected.label}</strong></div>
+                <div className="coverage-row"><span>Location</span><strong>{selected.value}</strong></div>
+                <div className="coverage-row"><span>Severity</span><strong>{selected.severity}</strong></div>
+                <div className="coverage-row"><span>Classification</span><strong>{selected.metadata?.classification || "review_required"}</strong></div>
+                <div className="coverage-row"><span>Owner</span><strong>{selected.metadata?.owner || "Unassigned"}</strong></div>
+                <div className="coverage-row"><span>Business unit</span><strong>{selected.metadata?.business_unit || "Unknown"}</strong></div>
+                <div className="coverage-row"><span>Tags</span><strong>{(selected.metadata?.tags || []).join(", ") || "n/a"}</strong></div>
+              </div>
+            </article>
+            <article className="panel panel--embedded">
+              <p className="eyebrow">Control gaps</p>
+              <div className="coverage-list">
+                {selected.metadata?.control_gap?.length ? selected.metadata.control_gap.map((gap) => (
+                  <div className="coverage-row" key={gap}>
+                    <span>{gap}</span>
+                    <strong>Open</strong>
+                  </div>
+                )) : <div className="coverage-row"><span>No explicit control gap was recorded</span><strong>Review</strong></div>}
+                <div className="coverage-row"><span>Recommended action</span><strong>{selected.metadata?.recommended_action || "Validate ownership and decide whether the service should be approved, governed, or removed."}</strong></div>
+              </div>
+            </article>
+          </div>
+        ) : <p className="empty-copy">Select a shadow IT item to inspect its current ownership and response actions.</p>}
       </div>
 
       <div className="panel">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Connector posture</p>
-            <h2>Discovery coverage</h2>
+            <p className="eyebrow">Matched inventory</p>
+            <h2>Related assets and telemetry</h2>
           </div>
         </div>
-        <div className="coverage-list">
-          {Object.entries(summary?.connector_status || {}).map(([label, value]) => (
-            <div className="coverage-row" key={label}>
-              <span>{label.replaceAll("_", " ")}</span>
-              <strong>{value}</strong>
+        <div className="finding-detail-grid">
+          <article className="panel panel--embedded">
+            <div className="table-wrap">
+              <table className="table table--dense">
+                <thead>
+                  <tr>
+                    <th>Asset</th>
+                    <th>Address</th>
+                    <th>Exposure</th>
+                    <th>Owner</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {relatedAssets.map((asset) => (
+                    <tr key={asset.id}>
+                      <td data-label="Asset">{asset.asset_name}</td>
+                      <td data-label="Address">{asset.url || asset.hostname || asset.ip_address || "n/a"}</td>
+                      <td data-label="Exposure">{asset.exposure}</td>
+                      <td data-label="Owner">{asset.owner || "Unassigned"}</td>
+                    </tr>
+                  ))}
+                  {!relatedAssets.length ? <tr><td colSpan="4"><p className="empty-copy">No related assets were matched for this service.</p></td></tr> : null}
+                </tbody>
+              </table>
             </div>
-          ))}
-          {!Object.keys(summary?.connector_status || {}).length ? <p className="empty-copy">Connector health will appear here as discovery sources are configured.</p> : null}
+          </article>
+          <article className="panel panel--embedded">
+            <div className="table-wrap">
+              <table className="table table--dense">
+                <thead>
+                  <tr>
+                    <th>Signal</th>
+                    <th>Target</th>
+                    <th>Severity</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {relatedSignals.map((signal) => (
+                    <tr key={`${signal.type}-${signal.id}`}>
+                      <td data-label="Signal">{signal.title}</td>
+                      <td data-label="Target">{signal.target}</td>
+                      <td data-label="Severity">{signal.severity}</td>
+                      <td data-label="Status">{signal.status}</td>
+                    </tr>
+                  ))}
+                  {!relatedSignals.length ? <tr><td colSpan="4"><p className="empty-copy">No related incidents or monitoring events were matched.</p></td></tr> : null}
+                </tbody>
+              </table>
+            </div>
+          </article>
         </div>
       </div>
     </section>

@@ -52,7 +52,7 @@ from app.services.security import (
 )
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
-FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173")
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:18080")
 
 
 def _send_welcome_safe(*, email: str, username: str, role: str, temporary_password: str) -> None:

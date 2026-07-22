@@ -324,7 +324,7 @@ function Workspace({ user, onLogout, publicAuthConfig }) {
     const load = () => {
       Promise.allSettled([
         api.get("/dashboard/summary"),
-        api.get("/assets"),
+        api.get("/assets/"),
         api.get("/scans/"),
         api.get("/findings/"),
         api.get("/integrations/health"),
@@ -482,7 +482,7 @@ function Workspace({ user, onLogout, publicAuthConfig }) {
             path="/"
             element={<Dashboard summary={summary} assets={assets} findings={findings} threatIntel={threatIntel} posture={posture} attackSurface={platformData.attackSurface} attackPaths={platformData.attackPaths} incidents={platformData.incidents} monitoringEvents={platformData.monitoringEvents} />}
           />
-          <Route path="/assets" element={<Assets assets={assets} attackSurface={platformData.attackSurface} attackPaths={platformData.attackPaths} onAssetCreated={handleAssetCreated} />} />
+          <Route path="/assets" element={<Assets assets={assets} findings={findings} attackSurface={platformData.attackSurface} attackPaths={platformData.attackPaths} onAssetCreated={handleAssetCreated} />} />
           <Route path="/ai-remediation" element={<AIRemediation findings={findings} scans={scans} compliance={platformData.compliance} />} />
           <Route
             path="/scans"
@@ -495,13 +495,13 @@ function Workspace({ user, onLogout, publicAuthConfig }) {
               />
             }
           />
-          <Route path="/hosts" element={<Hosts scans={scans} />} />
+          <Route path="/hosts" element={<Hosts scans={scans} assets={assets} findings={findings} />} />
           <Route path="/findings" element={<Findings findings={findings} users={users} groups={groups} />} />
-          <Route path="/findings/:findingId" element={<FindingDetail findings={findings} />} />
+          <Route path="/findings/:findingId" element={<FindingDetail findings={findings} assets={assets} />} />
           <Route path="/attack-map" element={<GlobalAttackMap />} />
           <Route path="/threat-intelligence" element={<ThreatIntelligence threatIntel={threatIntel} />} />
           <Route path="/shadow-it" element={<ShadowIT summary={posture.shadowIt} assets={assets} incidents={platformData.incidents} monitoringEvents={platformData.monitoringEvents} />} />
-          <Route path="/misconfigurations" element={<Misconfigurations summary={posture.misconfigurations} findings={findings} compliance={platformData.compliance} />} />
+          <Route path="/misconfigurations" element={<Misconfigurations findings={findings} assets={assets} />} />
           <Route path="/unauthorized-software" element={<UnauthorizedSoftware summary={posture.unauthorizedSoftware} assets={assets} groups={groups} users={users} />} />
           <Route path="/reports" element={<Reports findings={findings} scans={scans} compliance={platformData.compliance} incidents={platformData.incidents} alertRules={alerts.rules} alertEvents={alerts.events} />} />
           <Route

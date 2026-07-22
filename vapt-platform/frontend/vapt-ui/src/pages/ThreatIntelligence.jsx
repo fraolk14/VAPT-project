@@ -44,6 +44,7 @@ export default function ThreatIntelligence({ threatIntel }) {
 
   const topMitre = useMemo(() => Object.entries(threatIntel.mitre_coverage || {}).slice(0, 6), [threatIntel.mitre_coverage]);
   const feedSources = useMemo(() => Object.entries(threatIntel.reference_coverage || {}), [threatIntel.reference_coverage]);
+  const externalEvents = useMemo(() => threatIntel.external_events || [], [threatIntel.external_events]);
   const visibleItems = useMemo(
     () => feedState.items.slice(filters.pageIndex * filters.pageSize, filters.pageIndex * filters.pageSize + filters.pageSize),
     [feedState.items, filters.pageIndex, filters.pageSize]
@@ -70,25 +71,26 @@ export default function ThreatIntelligence({ threatIntel }) {
       <div className="panel panel--metrics">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">MISP OSINT Feeds</p>
-            <h2>Latest external threat feeds</h2>
+            <p className="eyebrow">Open threat feeds</p>
+            <h2>Latest external threats</h2>
           </div>
         </div>
         <div className="dashboard-toolbar threat-toolbar">
-          <div className="threat-toolbar__summary"><span>MISP status</span><strong>{threatIntel.misp_status}</strong></div>
-          <div className="threat-toolbar__summary"><span>Latest events</span><strong>{threatIntel.misp_events?.length || 0}</strong></div>
-          <div className="threat-toolbar__summary"><span>Usage</span><strong>{threatIntel.misp_status === "connected" ? "Live" : "Awaiting feed URL"}</strong></div>
+          <div className="threat-toolbar__summary"><span>Feed status</span><strong>{threatIntel.external_feed_status || threatIntel.misp_status}</strong></div>
+          <div className="threat-toolbar__summary"><span>Latest events</span><strong>{externalEvents.length || 0}</strong></div>
+          <div className="threat-toolbar__summary"><span>Sources</span><strong>MISP / URLhaus / CISA / NVD</strong></div>
         </div>
         <div className="coverage-list">
-          {threatIntel.misp_events?.length ? threatIntel.misp_events.map((event) => (
+          {externalEvents.length ? externalEvents.map((event) => (
             <a key={event.id} className="coverage-row coverage-row--link" href={event.url || event.references?.[0] || "#"} target="_blank" rel="noreferrer">
               <span>
                 <strong>{event.name}</strong>
-                <p>{event.description || "Feed event published by the upstream MISP source."}</p>
+                <p>{event.description || "Threat event published by the connected intelligence source."}</p>
+                <p>{event.matched_targets?.length ? `Matched targets: ${event.matched_targets.slice(0, 3).join(", ")}` : "No direct target match yet"}</p>
               </span>
-              <strong>{event.indicator_count} indicators</strong>
+              <strong>{event.source} / {event.indicator_count || 0} indicators / {event.matched_findings} matched finding(s)</strong>
             </a>
-          )) : <p className="empty-copy">Set `MISP_FEED_URL` in your backend environment to pull the latest MISP OSINT events.</p>}
+          )) : <p className="empty-copy">External feed items will appear here from the connected open-source threat intelligence sources.</p>}
         </div>
       </div>
 

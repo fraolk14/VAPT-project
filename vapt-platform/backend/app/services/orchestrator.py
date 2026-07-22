@@ -11,6 +11,7 @@ from app.models.asset import Asset
 from app.models.finding import AuditLog, FalsePositiveRule, Finding
 from app.models.scan import Scan
 from app.services.integrations import MobSFClient, OpenVASClient, ZAPClient
+from app.services.mobile_analysis import local_mobile_static_analysis
 from app.services.network_assessment import run_network_assessment
 from app.services.vulnerability_correlation import correlate_finding
 
@@ -84,6 +85,14 @@ def _append_audit_log(db: Session, scan: Scan, action: str, details: dict[str, A
 
 
 def _finding_asset_name(scan: Scan, metadata: dict[str, Any], item: dict[str, Any]) -> str:
+    if scan.tool == "mobsf":
+        return (
+            metadata.get("app_name")
+            or metadata.get("package_name")
+            or metadata.get("bundle_id")
+            or metadata.get("original_file_name")
+            or scan.target
+        )
     if metadata.get("page_title"):
         return str(metadata["page_title"])[:80]
     if metadata.get("host"):
@@ -95,6 +104,44 @@ def _finding_asset_name(scan: Scan, metadata: dict[str, Any], item: dict[str, An
 
 
 def _upsert_asset_from_finding(db: Session, scan: Scan, item: dict[str, Any], metadata: dict[str, Any]) -> Asset | None:
+    if scan.tool == "mobsf":
+        asset_key = (
+            metadata.get("package_name")
+            or metadata.get("bundle_id")
+            or metadata.get("sha256")
+            or metadata.get("stored_file_name")
+            or scan.target
+        )
+        asset = db.query(Asset).filter(Asset.ip_address == str(asset_key)).first()
+        platform = (metadata.get("platform") or "mobile").lower()
+        if asset:
+            asset.asset_name = _finding_asset_name(scan, metadata, item)
+            asset.hostname = metadata.get("package_name") or metadata.get("bundle_id") or asset.hostname
+            asset.os = asset.os or ("Android" if platform == "android" else "iOS" if platform == "ios" else "Mobile")
+            asset.asset_type = "mobile"
+            asset.tags = sorted(set([*(asset.tags or []), "scan-discovered", f"mobile:{platform}"]))
+            asset.risk_score = max(asset.risk_score or 0, float(item.get("cvss_score") or 0))
+            return asset
+
+        asset = Asset(
+            asset_name=_finding_asset_name(scan, metadata, item),
+            ip_address=str(asset_key),
+            url=None,
+            hostname=metadata.get("package_name") or metadata.get("bundle_id"),
+            os="Android" if platform == "android" else "iOS" if platform == "ios" else "Mobile",
+            asset_type="mobile",
+            environment="prod",
+            criticality="high" if (item.get("severity") or "").lower() in {"critical", "high"} else "medium",
+            owner=None,
+            exposure="internal",
+            tags=["scan-discovered", f"mobile:{platform}"],
+            business_unit="Mobile",
+            risk_score=float(item.get("cvss_score") or 0),
+        )
+        db.add(asset)
+        db.flush()
+        return asset
+
     host = metadata.get("host")
     url = metadata.get("url") or (scan.target if scan.tool == "zap" and "://" in scan.target else None)
     hostname = metadata.get("hostname") or (urlparse(str(url)).hostname if url else None)
@@ -119,6 +166,7 @@ def _upsert_asset_from_finding(db: Session, scan: Scan, item: dict[str, Any], me
         asset.hostname = asset.hostname or hostname
         asset.url = asset.url or url
         asset.asset_type = asset.asset_type or asset_type
+        asset.os = asset.os or metadata.get("os_family")
         asset.tags = sorted(set([*(asset.tags or []), "scan-discovered", f"service:{item.get('service') or 'unknown'}"]))
         asset.risk_score = max(asset.risk_score or 0, float(item.get("cvss_score") or 0))
         return asset
@@ -128,6 +176,7 @@ def _upsert_asset_from_finding(db: Session, scan: Scan, item: dict[str, Any], me
         ip_address=ip_address or str(url),
         url=str(url) if url else None,
         hostname=hostname or (None if ip_address == str(host) else ip_address),
+        os=metadata.get("os_family"),
         asset_type=asset_type,
         environment="prod",
         criticality="high" if (item.get("severity") or "").lower() in {"critical", "high"} else "medium",
@@ -224,7 +273,13 @@ def reprocess_scan_results(db: Session, scan: Scan) -> Scan:
         normalized_findings = ZAPClient().normalize_results(ZAPClient().get_alerts(target))
         replace_scan_findings(db, scan, normalized_findings)
     else:
-        normalized_findings = _mock_results(scan)
+        try:
+            normalized_findings, scan_metadata = analyze_mobile_scan(scan)
+            scan.engine_metadata = {**(scan.engine_metadata or {}), **scan_metadata}
+            db.commit()
+            db.refresh(scan)
+        except Exception as exc:
+            raise RuntimeError(f"Unable to reprocess mobile results: {exc}") from exc
         replace_scan_findings(db, scan, normalized_findings)
 
     _append_audit_log(db, scan, "scan.reprocess")
@@ -358,7 +413,8 @@ def launch_zap_scan(db: Session, scan: Scan) -> Scan:
 
 def launch_mobsf_scan(db: Session, scan: Scan) -> Scan:
     client = MobSFClient()
-    metadata = client.launch_scan(scan.target)
+    file_path = (scan.engine_metadata or {}).get("stored_file_path")
+    metadata = client.launch_scan(scan.target, file_path=file_path)
     scan.status = "queued"
     scan.started_at = datetime.now(timezone.utc)
     scan.progress = "10"
@@ -376,6 +432,27 @@ def launch_mobsf_scan(db: Session, scan: Scan) -> Scan:
     db.commit()
     db.refresh(scan)
     return scan
+
+
+def analyze_mobile_scan(scan: Scan) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    metadata = scan.engine_metadata or {}
+    file_path = metadata.get("stored_file_path")
+    file_name = metadata.get("original_file_name") or scan.target
+    if not file_path:
+        normalized = _mock_results(scan)
+        return normalized, {"analysis_engine": "mock-mobile", "fallback_reason": "no-stored-binary"}
+
+    client = MobSFClient()
+    try:
+        findings, remote_metadata = client.scan_binary(str(file_path), str(file_name))
+        if findings:
+            return findings, {**metadata, **remote_metadata}
+    except Exception as exc:
+        local_findings, local_metadata = local_mobile_static_analysis(str(file_path), str(file_name))
+        return local_findings, {**metadata, **local_metadata, "fallback_reason": str(exc)}
+
+    local_findings, local_metadata = local_mobile_static_analysis(str(file_path), str(file_name))
+    return local_findings, {**metadata, **local_metadata, "fallback_reason": "mobsf-returned-no-findings"}
 
 
 def refresh_openvas_scan(db: Session, scan: Scan) -> Scan:
@@ -630,12 +707,12 @@ def _background_mobsf_worker(scan_id: str) -> None:
                     scan.status = "running"
                     scan.progress = "80"
                     scan.error_message = None
-                    normalized_findings = _mock_results(scan)
+                    normalized_findings, mobile_metadata = analyze_mobile_scan(scan)
                     _store_findings(db, scan, normalized_findings)
                     scan.status = "completed"
                     scan.progress = "100"
                     scan.finished_at = datetime.now(timezone.utc)
-                    scan.engine_metadata = {**metadata, "phase": "completed"}
+                    scan.engine_metadata = {**metadata, **mobile_metadata, "phase": "completed"}
                     db.commit()
                     db.refresh(scan)
                     return

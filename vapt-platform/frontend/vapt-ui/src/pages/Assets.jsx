@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import api from "../api/client";
+import { resolveOsLabel } from "../utils/targetIntel";
 
 const emptyAssetForm = {
   asset_name: "",
@@ -25,7 +26,7 @@ function assetAddress(asset) {
   return asset.url || asset.ip_address || asset.hostname || "No address";
 }
 
-export default function Assets({ assets, attackSurface, attackPaths, onAssetCreated }) {
+export default function Assets({ assets, findings = [], attackSurface, attackPaths, onAssetCreated }) {
   const [localAssets, setLocalAssets] = useState(assets || []);
   const [assetForm, setAssetForm] = useState(emptyAssetForm);
   const [feedback, setFeedback] = useState("");
@@ -39,7 +40,7 @@ export default function Assets({ assets, attackSurface, attackPaths, onAssetCrea
   }, [assets]);
 
   useEffect(() => {
-    api.get("/assets").then((response) => setLocalAssets(response.data || [])).catch(() => {});
+    api.get("/assets/").then((response) => setLocalAssets(response.data || [])).catch(() => {});
   }, []);
 
   const createAsset = async (event) => {
@@ -83,11 +84,13 @@ export default function Assets({ assets, attackSurface, attackPaths, onAssetCrea
   const selectedPath = useMemo(() => attackPaths?.paths?.[selectedPathIndex] || [], [attackPaths, selectedPathIndex]);
   const filteredAssets = useMemo(
     () =>
-      localAssets.filter((asset) => {
-        const matchesExposure = exposureFilter === "all" || asset.exposure === exposureFilter;
-        const blob = `${assetDisplayName(asset)} ${asset.hostname || ""} ${asset.ip_address || ""} ${asset.url || ""}`.toLowerCase();
-        return matchesExposure && blob.includes(search.toLowerCase());
-      }),
+      [...localAssets]
+        .filter((asset) => {
+          const matchesExposure = exposureFilter === "all" || asset.exposure === exposureFilter;
+          const blob = `${assetDisplayName(asset)} ${asset.hostname || ""} ${asset.ip_address || ""} ${asset.url || ""} ${asset.owner || ""} ${asset.asset_type || ""}`.toLowerCase();
+          return matchesExposure && blob.includes(search.toLowerCase());
+        })
+        .sort((left, right) => new Date(right.created_at || 0).getTime() - new Date(left.created_at || 0).getTime()),
     [localAssets, search, exposureFilter]
   );
   const actionQueue = useMemo(
@@ -100,6 +103,67 @@ export default function Assets({ assets, attackSurface, attackPaths, onAssetCrea
 
   return (
     <section className="section-grid">
+      <section id="assets" className="panel">
+        <div className="panel__header">
+          <div>
+            <p className="eyebrow">Asset inventory</p>
+            <h2>All assets</h2>
+          </div>
+          <div className="table-controls">
+            <input className="scan-input" placeholder="Search assets" value={search} onChange={(event) => setSearch(event.target.value)} />
+            <select className="scan-select" value={exposureFilter} onChange={(event) => setExposureFilter(event.target.value)}>
+              <option value="all">All exposure</option>
+              <option value="external">External</option>
+              <option value="internal">Internal</option>
+            </select>
+          </div>
+        </div>
+        <div className="table-wrap table-wrap--full">
+          <table className="table table--dense">
+            <thead>
+              <tr>
+                <th>Created</th>
+                <th>Asset</th>
+                <th>Host / URL</th>
+                <th>OS Type</th>
+                <th>Type</th>
+                <th>Owner</th>
+                <th>Environment</th>
+                <th>Exposure</th>
+                <th>Criticality</th>
+                <th>Risk</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredAssets.map((asset) => (
+                <tr key={asset.id}>
+                  <td data-label="Created">{asset.created_at ? new Date(asset.created_at).toLocaleString() : "n/a"}</td>
+                  <td data-label="Asset">
+                    <strong>{assetDisplayName(asset)}</strong>
+                    <p>{asset.hostname || asset.ip_address || "No hostname"}</p>
+                  </td>
+                  <td data-label="Host / URL">{assetAddress(asset)}</td>
+                  <td data-label="OS Type">{resolveOsLabel({ asset, findings, target: assetAddress(asset), assets: localAssets })}</td>
+                  <td data-label="Type">{asset.asset_type}</td>
+                  <td data-label="Owner">{asset.owner || "Unassigned"}</td>
+                  <td data-label="Environment">{asset.environment || "n/a"}</td>
+                  <td data-label="Exposure">{asset.exposure}</td>
+                  <td data-label="Criticality">{asset.criticality}</td>
+                  <td data-label="Risk">{asset.risk_score}</td>
+                  <td data-label="Actions">
+                    <button type="button" className="scan-action scan-action--cancel" onClick={() => deleteAsset(asset)}>
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!filteredAssets.length ? <tr><td colSpan="10"><p className="empty-copy">No assets matched the current filters.</p></td></tr> : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section className="panel panel--metrics">
         <div className="panel__header">
           <div>
@@ -131,59 +195,6 @@ export default function Assets({ assets, attackSurface, attackPaths, onAssetCrea
           <button type="submit" className="scan-action scan-action--resume">Create Asset</button>
         </form>
         {feedback ? <p className={`scan-feedback scan-feedback--${feedbackType}`}>{feedback}</p> : null}
-      </section>
-
-      <section id="assets" className="panel">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Asset inventory</p>
-            <h2>Critical surfaces</h2>
-          </div>
-          <div className="table-controls">
-            <input className="scan-input" placeholder="Search assets" value={search} onChange={(event) => setSearch(event.target.value)} />
-            <select className="scan-select" value={exposureFilter} onChange={(event) => setExposureFilter(event.target.value)}>
-              <option value="all">All exposure</option>
-              <option value="external">External</option>
-              <option value="internal">Internal</option>
-            </select>
-          </div>
-        </div>
-        <div className="table-wrap table-wrap--full">
-          <table className="table table--dense">
-            <thead>
-              <tr>
-                <th>Asset</th>
-                <th>Address</th>
-                <th>Type</th>
-                <th>Exposure</th>
-                <th>Criticality</th>
-                <th>Risk</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredAssets.map((asset) => (
-                <tr key={asset.id}>
-                  <td data-label="Asset">
-                    <strong>{assetDisplayName(asset)}</strong>
-                    <p>{asset.hostname || asset.ip_address || "No hostname"}</p>
-                  </td>
-                  <td data-label="Address">{assetAddress(asset)}</td>
-                  <td data-label="Type">{asset.asset_type}</td>
-                  <td data-label="Exposure">{asset.exposure}</td>
-                  <td data-label="Criticality">{asset.criticality}</td>
-                  <td data-label="Risk">{asset.risk_score}</td>
-                  <td data-label="Actions">
-                    <button type="button" className="scan-action scan-action--cancel" onClick={() => deleteAsset(asset)}>
-                      Delete
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {!filteredAssets.length ? <tr><td colSpan="7"><p className="empty-copy">No assets matched the current filters.</p></td></tr> : null}
-            </tbody>
-          </table>
-        </div>
       </section>
 
       <section className="panel">

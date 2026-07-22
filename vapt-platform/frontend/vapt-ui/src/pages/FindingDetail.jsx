@@ -2,63 +2,56 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import api from "../api/client";
+import { humanSource, resolveOsLabel, targetOf } from "../utils/targetIntel";
 
 function formatDate(value) {
   if (!value) return "n/a";
-  try {
-    return new Date(value).toLocaleString();
-  } catch {
-    return String(value);
-  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? "n/a" : parsed.toLocaleString();
 }
 
-function targetLabel(finding) {
-  if (!finding) return "n/a";
-  if (finding.source === "zap") return finding.finding_metadata?.url || finding.finding_metadata?.host || "n/a";
-  if (finding.source === "openvas" || finding.source === "network-db") return finding.finding_metadata?.host || `${finding.port}/${finding.protocol}`;
-  return finding.finding_metadata?.file || "n/a";
-}
-
-function correlationReferences(finding) {
-  const references = [];
+function referenceList(finding) {
   const metadata = finding?.finding_metadata || {};
   const correlation = metadata.correlation || {};
-  for (const ref of correlation.references || []) {
-    if (ref) references.push(ref);
+  const refs = [
+    ...(correlation.references || []),
+    ...(metadata.references || []),
+    ...(metadata.reference_links || []),
+  ].filter(Boolean);
+  if (finding?.cve_id) {
+    refs.unshift(`https://www.cve.org/CVERecord?id=${encodeURIComponent(finding.cve_id)}`);
+    refs.unshift(`https://nvd.nist.gov/vuln/detail/${encodeURIComponent(finding.cve_id)}`);
   }
-  for (const ref of metadata.reference_links || []) {
-    if (ref) references.push(ref);
-  }
-  return [...new Set(references)];
+  return [...new Set(refs)];
 }
 
-export default function FindingDetail({ findings }) {
+export default function FindingDetail({ findings = [], assets = [] }) {
   const { findingId } = useParams();
-  const [state, setState] = useState({ status: "loading", finding: null });
+  const [state, setState] = useState({ status: "loading", finding: null, error: "" });
 
   useEffect(() => {
-    const localMatch = (findings || []).find((item) => item.id === findingId);
+    const localMatch = (findings || []).find((item) => String(item.id) === String(findingId));
     if (localMatch) {
-      setState({ status: "ready", finding: localMatch });
-      return;
+      setState({ status: "ready", finding: localMatch, error: "" });
     }
 
     api
       .get(`/findings/${findingId}`)
-      .then((response) => setState({ status: "ready", finding: response.data }))
-      .catch(() => setState({ status: "error", finding: null }));
+      .then((response) => setState({ status: "ready", finding: response.data, error: "" }))
+      .catch((error) => setState({ status: "error", finding: null, error: error?.response?.data?.detail || "The requested finding could not be loaded." }));
   }, [findingId, findings]);
 
   const finding = state.finding;
-  const correlation = finding?.finding_metadata?.correlation || {};
-  const references = useMemo(() => correlationReferences(finding), [finding]);
+  const references = useMemo(() => referenceList(finding), [finding]);
+  const metadata = finding?.finding_metadata || {};
+  const correlation = metadata.correlation || {};
+  const relatedAsset = useMemo(() => {
+    const target = targetOf(finding);
+    return (assets || []).find((asset) => [asset.asset_name, asset.hostname, asset.ip_address, asset.url].filter(Boolean).some((value) => String(value).toLowerCase() === String(target).toLowerCase() || String(value).toLowerCase().includes(String(target).toLowerCase()) || String(target).toLowerCase().includes(String(value).toLowerCase())));
+  }, [assets, finding]);
 
   if (state.status === "loading") {
-    return (
-      <section className="panel">
-        <p className="empty-copy">Loading vulnerability details...</p>
-      </section>
-    );
+    return <section className="panel"><p className="empty-copy">Loading finding details...</p></section>;
   }
 
   if (!finding) {
@@ -66,14 +59,12 @@ export default function FindingDetail({ findings }) {
       <section className="panel">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Vulnerability details</p>
-            <h2>Finding not available</h2>
+            <p className="eyebrow">Finding detail</p>
+            <h2>Unable to load finding</h2>
           </div>
+          <Link className="scan-action scan-action--resume" to="/findings">Back to Findings</Link>
         </div>
-        <p className="empty-copy">The requested finding could not be loaded.</p>
-        <Link className="scan-action scan-action--resume" to="/findings">
-          Back to Findings
-        </Link>
+        <p className="empty-copy">{state.error}</p>
       </section>
     );
   }
@@ -83,12 +74,10 @@ export default function FindingDetail({ findings }) {
       <section className="panel panel--metrics">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Vulnerability details</p>
+            <p className="eyebrow">Finding detail</p>
             <h2>{finding.title}</h2>
           </div>
-          <Link className="scan-action scan-action--resume" to="/findings">
-            Back to Findings
-          </Link>
+          <Link className="scan-action scan-action--resume" to="/findings">Back to Findings</Link>
         </div>
         <div className="metrics-grid">
           <article className="metric-card">
@@ -97,77 +86,53 @@ export default function FindingDetail({ findings }) {
             <small>Status: {finding.status}</small>
           </article>
           <article className="metric-card">
-            <span>CVE</span>
-            <strong>{finding.cve_id || "n/a"}</strong>
+            <span>CVE / CVSS</span>
+            <strong>{finding.cve_id || "No CVE"}</strong>
             <small>CVSS: {finding.cvss_score || "n/a"}</small>
           </article>
           <article className="metric-card">
             <span>Target</span>
-            <strong>{targetLabel(finding)}</strong>
-            <small>{finding.port}/{finding.protocol}</small>
+            <strong>{targetOf(finding)}</strong>
+            <small>{humanSource(finding.source)} / {finding.port || "n/a"} {finding.protocol || ""}</small>
           </article>
           <article className="metric-card">
             <span>Detected</span>
             <strong>{formatDate(finding.detected_at)}</strong>
-            <small>Scan finished: {formatDate(finding.scan_finished_at)}</small>
+            <small>Resolved: {formatDate(finding.resolved_at)}</small>
           </article>
         </div>
       </section>
 
-      <section className="panel finding-detail-page">
+      <section className="panel">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Assessment summary</p>
-            <h2>Context and remediation</h2>
+            <p className="eyebrow">Target context</p>
+            <h2>Asset and platform</h2>
           </div>
         </div>
         <div className="finding-detail-grid">
           <article className="panel panel--embedded">
-            <div className="panel__header">
-              <div>
-                <p className="eyebrow">Evidence</p>
-                <h2>Observed details</h2>
-              </div>
-            </div>
-            <p className="finding-detail-body">{finding.evidence || correlation.correlation_summary || "No direct evidence stored."}</p>
-          </article>
-
-          <article className="panel panel--embedded">
-            <div className="panel__header">
-              <div>
-                <p className="eyebrow">Remediation</p>
-                <h2>Recommended fix</h2>
-              </div>
-            </div>
-            <p className="finding-detail-body">{finding.remediation || "No remediation steps were stored for this finding yet."}</p>
-          </article>
-
-          <article className="panel panel--embedded">
-            <div className="panel__header">
-              <div>
-                <p className="eyebrow">Correlation</p>
-                <h2>Database matches</h2>
-              </div>
-            </div>
             <div className="coverage-list">
-              <div className="coverage-row"><span>Matched CVEs</span><strong>{(correlation.matched_cves || []).join(", ") || finding.cve_id || "n/a"}</strong></div>
-              <div className="coverage-row"><span>Sources</span><strong>{(correlation.sources || []).join(", ") || "n/a"}</strong></div>
-              <div className="coverage-row"><span>Weaknesses</span><strong>{(correlation.weaknesses || []).join(", ") || "n/a"}</strong></div>
-              <div className="coverage-row"><span>Known exploitation</span><strong>{correlation.has_known_exploitation ? "Yes" : "No"}</strong></div>
+              <div className="coverage-row"><span>Target</span><strong>{targetOf(finding)}</strong></div>
+              <div className="coverage-row"><span>Asset name</span><strong>{finding.asset_name || relatedAsset?.asset_name || "n/a"}</strong></div>
+              <div className="coverage-row"><span>Hostname</span><strong>{finding.target_details?.hostname || relatedAsset?.hostname || metadata.hostname || "n/a"}</strong></div>
+              <div className="coverage-row"><span>Host IP</span><strong>{finding.target_details?.host || relatedAsset?.ip_address || metadata.host || metadata.ip_address || "n/a"}</strong></div>
+              <div className="coverage-row"><span>URL</span><strong>{finding.target_details?.url || relatedAsset?.url || metadata.url || "n/a"}</strong></div>
+              <div className="coverage-row"><span>OS type</span><strong>{resolveOsLabel({ asset: relatedAsset, finding, assets, target: targetOf(finding) })}</strong></div>
+              <div className="coverage-row"><span>Service</span><strong>{finding.service || "n/a"}</strong></div>
+              <div className="coverage-row"><span>Protocol</span><strong>{finding.protocol || "n/a"}</strong></div>
             </div>
           </article>
 
           <article className="panel panel--embedded">
-            <div className="panel__header">
-              <div>
-                <p className="eyebrow">Workflow</p>
-                <h2>Ownership and verification</h2>
-              </div>
-            </div>
             <div className="coverage-list">
-              <div className="coverage-row"><span>Assigned user</span><strong>{finding.assigned_to || "Unassigned"}</strong></div>
-              <div className="coverage-row"><span>Group</span><strong>{finding.team_name || "No group"}</strong></div>
+              <div className="coverage-row"><span>Scanner</span><strong>{humanSource(finding.source)}</strong></div>
               <div className="coverage-row"><span>Verification</span><strong>{finding.verification_state || "pending"}</strong></div>
+              <div className="coverage-row"><span>Assigned to</span><strong>{finding.assigned_to || "Unassigned"}</strong></div>
+              <div className="coverage-row"><span>Group</span><strong>{finding.team_name || "n/a"}</strong></div>
+              <div className="coverage-row"><span>Resolved by</span><strong>{finding.resolved_by || finding.assigned_to || "n/a"}</strong></div>
+              <div className="coverage-row"><span>CIS benchmark</span><strong>{metadata.cis_benchmark || "n/a"}</strong></div>
+              <div className="coverage-row"><span>Confidence</span><strong>{finding.confidence || "n/a"}</strong></div>
               <div className="coverage-row"><span>Duplicate count</span><strong>{finding.duplicate_count || 1}</strong></div>
             </div>
           </article>
@@ -177,8 +142,38 @@ export default function FindingDetail({ findings }) {
       <section className="panel">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Reference intelligence</p>
-            <h2>Links and raw metadata</h2>
+            <p className="eyebrow">Proof and recommendation</p>
+            <h2>Validation detail</h2>
+          </div>
+        </div>
+        <div className="finding-detail-grid">
+          <article className="panel panel--embedded">
+            <div className="panel__header">
+              <div>
+                <p className="eyebrow">Proof</p>
+                <h2>Why this finding is true</h2>
+              </div>
+            </div>
+            <p className="finding-detail-body">{finding.evidence || correlation.correlation_summary || "No explicit proof text was stored."}</p>
+          </article>
+
+          <article className="panel panel--embedded">
+            <div className="panel__header">
+              <div>
+                <p className="eyebrow">Recommendation</p>
+                <h2>Remediation guidance</h2>
+              </div>
+            </div>
+            <p className="finding-detail-body">{finding.remediation || metadata.hardening_recommendation || "No remediation guidance was stored yet."}</p>
+          </article>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel__header">
+          <div>
+            <p className="eyebrow">Correlation and raw detail</p>
+            <h2>Supporting context</h2>
           </div>
         </div>
         <div className="finding-detail-grid finding-detail-grid--single">
@@ -186,14 +181,14 @@ export default function FindingDetail({ findings }) {
             <div className="panel__header">
               <div>
                 <p className="eyebrow">References</p>
-                <h2>Source material</h2>
+                <h2>External source material</h2>
               </div>
             </div>
             <div className="coverage-list">
               {references.length ? references.map((reference) => (
                 <a key={reference} className="coverage-row coverage-row--link" href={reference} target="_blank" rel="noreferrer">
                   <span>{reference}</span>
-                  <strong>Open source</strong>
+                  <strong>Open</strong>
                 </a>
               )) : <p className="empty-copy">No external references were stored for this finding.</p>}
             </div>
@@ -202,11 +197,11 @@ export default function FindingDetail({ findings }) {
           <article className="panel panel--embedded">
             <div className="panel__header">
               <div>
-                <p className="eyebrow">Raw metadata</p>
-                <h2>Structured finding payload</h2>
+                <p className="eyebrow">Structured payload</p>
+                <h2>Raw metadata</h2>
               </div>
             </div>
-            <pre className="code-block code-block--json">{JSON.stringify(finding.finding_metadata || {}, null, 2)}</pre>
+            <pre className="code-block code-block--json">{JSON.stringify({ correlation, metadata, target_details: finding.target_details || {} }, null, 2)}</pre>
           </article>
         </div>
       </section>

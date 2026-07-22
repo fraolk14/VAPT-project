@@ -140,7 +140,7 @@ export default function Scans({ scans, assets, onScanQueued, onScanUpdated }) {
   }, [assets]);
 
   useEffect(() => {
-    api.get("/assets").then((response) => setAssetInventory(response.data || [])).catch(() => {});
+    api.get("/assets/").then((response) => setAssetInventory(response.data || [])).catch(() => {});
   }, []);
 
   const loadSchedules = async () => {

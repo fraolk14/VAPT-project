@@ -1,6 +1,7 @@
 import os
 import re
 from contextlib import contextmanager
+from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any
 from uuid import uuid4
@@ -480,12 +481,81 @@ class MobSFClient:
         self.base_url = os.getenv("MOBSF_API_URL", "http://mobsf:8000")
         self.api_key = os.getenv("MOBSF_API_KEY", "mobsf")
 
-    def launch_scan(self, file_name: str) -> dict[str, Any]:
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": self.api_key,
+            "X-Mobsf-Api-Key": self.api_key,
+        }
+
+    def launch_scan(self, file_name: str, file_path: str | None = None) -> dict[str, Any]:
         return {
             "engine": "mobsf",
             "target": file_name,
             "status": "queued",
             "remote_task_id": f"mobsf-{file_name}",
+            "stored_file_path": file_path,
+        }
+
+    def upload_binary(self, file_path: str, file_name: str) -> dict[str, Any]:
+        path = Path(file_path)
+        with path.open("rb") as handle:
+            response = requests.post(
+                f"{self.base_url}/api/v1/upload",
+                headers=self._headers(),
+                files={"file": (file_name, handle, "application/octet-stream")},
+                timeout=120,
+                verify=False,
+            )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("MobSF returned an unexpected upload response.")
+        return payload
+
+    def request_scan(self, file_hash: str, scan_type: str) -> dict[str, Any]:
+        response = requests.post(
+            f"{self.base_url}/api/v1/scan",
+            headers=self._headers(),
+            data={"hash": file_hash, "scan_type": scan_type},
+            timeout=240,
+            verify=False,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("MobSF returned an unexpected scan response.")
+        return payload
+
+    def request_report(self, file_hash: str) -> dict[str, Any]:
+        response = requests.post(
+            f"{self.base_url}/api/v1/report_json",
+            headers=self._headers(),
+            data={"hash": file_hash},
+            timeout=180,
+            verify=False,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("MobSF returned an unexpected report response.")
+        return payload
+
+    def scan_binary(self, file_path: str, file_name: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        upload_payload = self.upload_binary(file_path, file_name)
+        file_hash = upload_payload.get("hash")
+        scan_type = upload_payload.get("scan_type") or upload_payload.get("analyzer") or ("ipa" if file_name.lower().endswith(".ipa") else "apk")
+        if not file_hash:
+            raise RuntimeError("MobSF upload did not return a file hash.")
+        scan_payload = self.request_scan(str(file_hash), str(scan_type))
+        report_payload = scan_payload if scan_payload.get("hash") else self.request_report(str(file_hash))
+        return self.normalize_report(report_payload), {
+            "analysis_engine": "mobsf-api",
+            "hash": file_hash,
+            "scan_type": scan_type,
+            "app_name": report_payload.get("app_name") or report_payload.get("appname"),
+            "package_name": report_payload.get("package_name") or report_payload.get("package"),
+            "version_name": report_payload.get("version_name") or report_payload.get("version"),
+            "platform": "ios" if str(scan_type).lower().startswith("ipa") else "android",
         }
 
     def normalize_results(self, raw_issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -511,6 +581,145 @@ class MobSFClient:
                 }
             )
         return normalized
+
+    def normalize_report(self, report: dict[str, Any]) -> list[dict[str, Any]]:
+        findings: list[dict[str, Any]] = []
+        package_name = report.get("package_name") or report.get("package")
+        bundle_id = report.get("bundle_id")
+        common_metadata = {
+            "package_name": package_name,
+            "bundle_id": bundle_id,
+            "app_name": report.get("app_name") or report.get("appname"),
+            "version_name": report.get("version_name") or report.get("version"),
+        }
+
+        permissions = report.get("permissions")
+        if isinstance(permissions, dict):
+            dangerous = []
+            for permission, details in permissions.items():
+                detail_text = str(details).lower()
+                if "dangerous" in detail_text or "high" in detail_text or "critical" in detail_text:
+                    dangerous.append(permission)
+            if dangerous:
+                findings.append(
+                    {
+                        "title": "Dangerous mobile permissions declared",
+                        "category": "mobile",
+                        "source": "mobsf",
+                        "port": 0,
+                        "protocol": "file",
+                        "service": "mobile-binary",
+                        "state": "open",
+                        "cve_id": None,
+                        "cvss_score": 6.8,
+                        "severity": "medium",
+                        "evidence": "Dangerous or high-risk permissions reported by MobSF: " + ", ".join(dangerous[:12]),
+                        "remediation": "Review each dangerous permission against application requirements and remove any permission that is not essential to business functionality.",
+                        "compliance_map": ["MASVS", "OWASP MSTG"],
+                        "metadata": {**common_metadata, "dangerous_permissions": dangerous[:20]},
+                    }
+                )
+
+        url_candidates: list[str] = []
+        for key in ("urls", "firebase_urls"):
+            value = report.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        candidate = item.get("url") or item.get("path")
+                    else:
+                        candidate = str(item)
+                    if isinstance(candidate, str) and candidate.lower().startswith("http://"):
+                        url_candidates.append(candidate)
+        if url_candidates:
+            findings.append(
+                {
+                    "title": "Cleartext HTTP endpoint reference found in mobile application",
+                    "category": "mobile",
+                    "source": "mobsf",
+                    "port": 0,
+                    "protocol": "file",
+                    "service": "mobile-binary",
+                    "state": "open",
+                    "cve_id": None,
+                    "cvss_score": 8.0,
+                    "severity": "high",
+                    "evidence": "MobSF reported cleartext HTTP references: " + ", ".join(url_candidates[:8]),
+                    "remediation": "Replace cleartext HTTP endpoints with HTTPS and ensure the application blocks insecure transport in production builds.",
+                    "compliance_map": ["MASVS", "OWASP MSTG"],
+                    "metadata": {**common_metadata, "cleartext_endpoints": url_candidates[:20]},
+                }
+            )
+
+        secret_candidates = report.get("secrets")
+        if isinstance(secret_candidates, list) and secret_candidates:
+            snippets: list[str] = []
+            for item in secret_candidates[:10]:
+                if isinstance(item, dict):
+                    location = item.get("file") or item.get("source") or "unknown"
+                    secret_value = str(item.get("secret") or item.get("match") or item.get("value") or "")[:24]
+                    snippets.append(f"{location}: {secret_value}")
+                else:
+                    snippets.append(str(item)[:48])
+            findings.append(
+                {
+                    "title": "Hardcoded secret detected in mobile application",
+                    "category": "mobile",
+                    "source": "mobsf",
+                    "port": 0,
+                    "protocol": "file",
+                    "service": "mobile-binary",
+                    "state": "open",
+                    "cve_id": None,
+                    "cvss_score": 9.0,
+                    "severity": "critical",
+                    "evidence": "MobSF identified embedded secret material: " + "; ".join(snippets[:6]),
+                    "remediation": "Remove embedded credentials from the application package, rotate exposed secrets, and deliver sensitive values through a protected backend design.",
+                    "compliance_map": ["MASVS", "OWASP MSTG"],
+                    "metadata": {**common_metadata, "secret_snippets": snippets[:10]},
+                }
+            )
+
+        code_analysis = report.get("code_analysis")
+        if isinstance(code_analysis, dict):
+            mobsf_findings = code_analysis.get("findings") or code_analysis.get("issues") or []
+            if isinstance(mobsf_findings, list):
+                for item in mobsf_findings[:15]:
+                    if not isinstance(item, dict):
+                        continue
+                    severity = str(item.get("severity") or "medium").lower()
+                    cvss = 8.5 if severity == "high" else 5.8 if severity == "medium" else 3.2
+                    findings.append(
+                        {
+                            "title": item.get("title") or item.get("issue") or "Mobile code issue",
+                            "category": "mobile",
+                            "source": "mobsf",
+                            "port": 0,
+                            "protocol": "file",
+                            "service": "mobile-binary",
+                            "state": "open",
+                            "cve_id": None,
+                            "cvss_score": cvss,
+                            "severity": "high" if severity == "high" else "medium" if severity == "medium" else "low",
+                            "evidence": item.get("description") or item.get("detail") or item.get("evidence") or "MobSF code analysis reported a mobile issue.",
+                            "remediation": item.get("recommendation") or item.get("fix") or "Review the affected code path and align the implementation to MASVS and platform security best practices.",
+                            "compliance_map": ["MASVS", "OWASP MSTG"],
+                            "metadata": {**common_metadata, "file": item.get("file") or item.get("filename"), "rule": item.get("rule") or item.get("issue")},
+                        }
+                    )
+
+        return findings or self.normalize_results(
+            [
+                {
+                    "title": "MobSF analysis completed with no structured issue sections returned",
+                    "cvss": 0.0,
+                    "description": "MobSF completed the analysis but did not expose any of the expected issue collections through the API response used by the platform.",
+                    "recommendation": "Review the raw MobSF report in the developer view if deeper section-specific parsing is needed for this package.",
+                    "file": report.get("file_name") or report.get("app_name"),
+                    "rule": "mobsf-generic-report",
+                }
+            ]
+        )
 
 
 def _probe_service(name: str, base_url: str) -> dict[str, Any]:

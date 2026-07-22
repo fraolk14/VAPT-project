@@ -79,7 +79,7 @@ The threat intelligence tab and dashboard widgets consume this data to show:
 
 The AI layer supports two modes:
 
-- OpenAI-backed analysis when `OPENAI_API_KEY` is configured
+- NVIDIA NIM-backed analysis when `NVIDIA_NIM_API_KEY` is configured
 - local fallback guidance when the key is not configured
 
 The AI Remediation tab helps operators with:

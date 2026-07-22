@@ -1,3 +1,4 @@
+from datetime import datetime
 import ipaddress
 from typing import Optional
 from urllib.parse import urlparse
@@ -49,6 +50,7 @@ class AssetCreate(BaseModel):
 class AssetResponse(AssetCreate):
     id: UUID
     risk_score: float
+    created_at: datetime
 
     class Config:
         from_attributes = True

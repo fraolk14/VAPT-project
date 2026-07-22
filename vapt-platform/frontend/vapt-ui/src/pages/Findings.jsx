@@ -162,7 +162,7 @@ export default function Findings({ findings, users, groups }) {
   const [assignmentState, setAssignmentState] = useState({});
   const [sortState, setSortState] = useState({ key: "date", direction: "desc" });
   const [aiRecommendations, setAiRecommendations] = useState({});
-  const [aiProvider, setAiProvider] = useState("gemini");
+  const [aiProvider, setAiProvider] = useState("nvidia-nim");
   const [aiStatus, setAiStatus] = useState("loading");
   const [expandedRecommendations, setExpandedRecommendations] = useState({});
   const [expandedDetails, setExpandedDetails] = useState({});
@@ -231,7 +231,7 @@ export default function Findings({ findings, users, groups }) {
     if (!pendingIds.length) return;
     api.post("/ai/finding-recommendations", { finding_ids: pendingIds }).then((response) => {
       setAiProvider(response.data.provider || "local-fallback");
-      setAiStatus(response.data.provider === "gemini" ? "ready" : "fallback");
+      setAiStatus(response.data.provider === "nvidia-nim" ? "ready" : "fallback");
       setAiRecommendations((current) => {
         const next = { ...current };
         for (const item of response.data.items || []) {
@@ -252,6 +252,7 @@ export default function Findings({ findings, users, groups }) {
         assigned_to: payload.assigned_to || null,
         team_name: payload.team_name || null,
         verification_state: payload.verification_state || null,
+        status: payload.status || null,
       });
       setLocalFindings((current) => current.map((item) => (item.id === findingId ? response.data : item)));
     } catch {
@@ -290,7 +291,7 @@ export default function Findings({ findings, users, groups }) {
   );
 
   const recommendationPreview = (finding) => {
-    const text = aiRecommendations[finding.id] || (aiStatus === "error" ? "Gemini recommendation unavailable right now." : "Analyzing with Gemini...");
+    const text = aiRecommendations[finding.id] || (aiStatus === "error" ? "NVIDIA NIM recommendation unavailable right now." : "Analyzing with NVIDIA NIM...");
     const expanded = expandedRecommendations[finding.id];
     if (expanded || text.length <= 112) return text;
     return `${text.slice(0, 112).trim()}...`;
@@ -370,7 +371,7 @@ export default function Findings({ findings, users, groups }) {
           </select>
           <span className="topbar__user-label">AI source {aiProvider}</span>
           <span className="topbar__user-label">
-            {aiStatus === "ready" ? "Gemini live" : aiStatus === "fallback" ? "Fallback active" : aiStatus === "error" ? "AI unavailable" : "Loading AI"}
+            {aiStatus === "ready" ? "NVIDIA NIM live" : aiStatus === "fallback" ? "Fallback active" : aiStatus === "error" ? "AI unavailable" : "Loading AI"}
           </span>
         </div>
       </div>
@@ -404,6 +405,7 @@ export default function Findings({ findings, users, groups }) {
                 assigned_to: finding.assigned_to || "",
                 team_name: finding.team_name || "",
                 verification_state: finding.verification_state || "pending",
+                status: finding.status || "open",
               };
               return (
                 <tr key={finding.id} className={targetLabel(finding) === selectedTarget ? "finding-row--selected" : ""}>
@@ -454,7 +456,17 @@ export default function Findings({ findings, users, groups }) {
                     </div>
                   </td>
                   <td data-label="Verification">
-                    <select className="scan-select" value={draft.verification_state} onChange={(event) => setAssignmentState((current) => ({ ...current, [finding.id]: { ...draft, verification_state: event.target.value } }))}>
+                    <select
+                      className="scan-select"
+                      value={draft.verification_state}
+                      onChange={(event) => {
+                        const verification_state = event.target.value;
+                        let nextStatus = draft.status || "open";
+                        if (verification_state === "scheduled") nextStatus = "in_progress";
+                        if (verification_state === "verified") nextStatus = "resolved";
+                        setAssignmentState((current) => ({ ...current, [finding.id]: { ...draft, verification_state, status: nextStatus } }));
+                      }}
+                    >
                       <option value="pending">Pending</option>
                       <option value="in_review">In Review</option>
                       <option value="scheduled">Scheduled</option>
@@ -475,7 +487,23 @@ export default function Findings({ findings, users, groups }) {
                       ) : null}
                     </div>
                   </td>
-                  <td data-label="Status">{finding.status}</td>
+                  <td data-label="Status">
+                    <select
+                      className="scan-select"
+                      value={draft.status}
+                      onChange={(event) => {
+                        const status = event.target.value;
+                        let nextVerification = draft.verification_state || "pending";
+                        if (status === "resolved") nextVerification = "verified";
+                        else if (status === "in_progress" && nextVerification === "pending") nextVerification = "scheduled";
+                        setAssignmentState((current) => ({ ...current, [finding.id]: { ...draft, status, verification_state: nextVerification } }));
+                      }}
+                    >
+                      <option value="open">Open</option>
+                      <option value="in_progress">In Progress</option>
+                      <option value="resolved">Resolved</option>
+                    </select>
+                  </td>
                 </tr>
               );
             })}

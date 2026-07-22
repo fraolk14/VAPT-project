@@ -269,8 +269,8 @@ export default function AIRemediation({ findings, scans, compliance }) {
             <h2>AI Remediation</h2>
           </div>
           <div className="ai-status">
-            <span className={`pill ${aiStatus.provider === "gemini" ? "pill--critical" : "pill--info"}`}>
-              {aiStatus.provider === "gemini" ? "Gemini Active" : "Fallback Guidance"}
+            <span className={`pill ${aiStatus.provider === "nvidia-nim" ? "pill--critical" : "pill--info"}`}>
+              {aiStatus.provider === "nvidia-nim" ? "NVIDIA NIM Active" : "Fallback Guidance"}
             </span>
             <span>{aiStatus.model}</span>
           </div>

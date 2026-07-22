@@ -19,7 +19,7 @@ flowchart TB
         ScanOrch["Scan Orchestration<br/>launch, pause, resume, cancel,<br/>schedule, reprocess, validation"]
         Findings["Normalization and Findings Service<br/>deduplication, severity mapping,<br/>AI recommendations, ownership"]
         Threat["Threat Intelligence Service<br/>MISP OSINT enrichment,<br/>MITRE and OWASP mapping"]
-        AI["AI Remediation Service<br/>OpenAI or local fallback guidance"]
+        AI["AI Remediation Service<br/>NVIDIA NIM or local fallback guidance"]
         Reports["Reporting Service<br/>PDF / CSV / JSON exports,<br/>compliance summaries"]
         Ops["Operations and Posture Services<br/>shadow IT, misconfigurations,<br/>unauthorized software, attack paths"]
     end
@@ -50,14 +50,14 @@ flowchart TB
         ZAP["OWASP ZAP<br/>web crawling and vulnerability scans"]
         MobSF["MobSF<br/>mobile static analysis workflow"]
         MISP["MISP OSINT Feed<br/>external threat events and references"]
-        OpenAI["OpenAI API<br/>AI remediation, explanation,<br/>recommendations, reporting"]
+        Nim["NVIDIA NIM API<br/>AI remediation, explanation,<br/>recommendations, reporting"]
     end
 
     ScanOrch --> Greenbone
     ScanOrch --> ZAP
     ScanOrch --> MobSF
     Threat --> MISP
-    AI --> OpenAI
+    AI --> Nim
 
     Findings --> Threat
     Findings --> AI
@@ -80,7 +80,7 @@ flowchart TB
 - Application layer: FastAPI routers plus service modules for auth, scans, findings, AI, reporting, and posture.
 - Data layer: PostgreSQL for durable state and Redis for queue and schedule support.
 - Engine layer: Greenbone, ZAP, MobSF, and MISP feed integrations.
-- Intelligence layer: MITRE, OWASP, compliance mapping, and OpenAI-powered remediation assistance.
+- Intelligence layer: MITRE, OWASP, compliance mapping, and NVIDIA NIM-powered remediation assistance.
 
 ## Primary Runtime Paths
 

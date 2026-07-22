@@ -34,6 +34,9 @@ class FindingOut(BaseModel):
     duplicate_count: int = 1
     group_key: str = ""
     display_id: Optional[str] = None
+    asset_name: Optional[str] = None
+    resolved_by: Optional[str] = None
+    target_details: dict = Field(default_factory=dict)
     detected_at: datetime
     scan_finished_at: Optional[datetime] = None
 

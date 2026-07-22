@@ -11,6 +11,8 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from app.services.cis_hardening import benchmark_for_os, compliance_tags, infer_os_family, recommendation_for_finding, vendor_reference_links
+
 
 BASE_PORTS: dict[int, str] = {
     21: "ftp",
@@ -232,6 +234,23 @@ def _base_finding(
     remediation: str,
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
+    os_family = infer_os_family(
+        service=service,
+        banner=str(metadata.get("banner", "")),
+        port=port,
+        title=title,
+        evidence=evidence,
+    )
+    hardening_recommendation = recommendation_for_finding(title=title, service=service, os_family=os_family)
+    references = metadata.get("references") or vendor_reference_links(service=service, title=title)
+    merged_metadata = {
+        "host": host,
+        "os_family": os_family,
+        "cis_benchmark": metadata.get("cis_benchmark") or benchmark_for_os(os_family),
+        "hardening_recommendation": hardening_recommendation,
+        "references": references,
+        **metadata,
+    }
     return {
         "title": title,
         "category": "network",
@@ -245,9 +264,9 @@ def _base_finding(
         "severity": severity,
         "confidence": 0.9,
         "evidence": evidence,
-        "remediation": remediation,
-        "compliance_map": ["NIST RA-5", "OWASP ASVS V1", "CIS Controls 7"],
-        "metadata": {"host": host, **metadata},
+        "remediation": remediation or hardening_recommendation,
+        "compliance_map": compliance_tags(os_family=os_family, service=service),
+        "metadata": merged_metadata,
     }
 
 
@@ -583,6 +602,9 @@ def _probe_port(host: str, port: int, service_hint: str) -> list[dict[str, Any]]
     service = _infer_service(service_hint, banner)
     probe_metadata["banner"] = banner
     probe_metadata["banner_versions"] = _banner_version_refs(banner)
+    probe_metadata["os_family"] = infer_os_family(service=service, banner=banner, port=port)
+    probe_metadata["cis_benchmark"] = benchmark_for_os(probe_metadata["os_family"])
+    probe_metadata["references"] = vendor_reference_links(service=service, title=f"{service} on port {port}")
     if port in HTTPS_PORTS:
         probe_metadata["tls_detected"] = True
 
@@ -702,6 +724,42 @@ def run_network_block_assessment(target: str, progress_callback: Callable[[int, 
             emit(mapped, {**detail, "host": host_value, "active_hosts": active_hosts, "message": f"{host_value}: {detail.get('message', 'Scanning host')}"})
 
         findings.extend(run_network_assessment(host, progress_callback=host_progress))
+
+    host_os_summary: dict[str, str] = {}
+    for item in findings:
+        metadata = item.get("metadata") or {}
+        host_value = metadata.get("host")
+        os_family = metadata.get("os_family")
+        if host_value and os_family and str(host_value) not in host_os_summary:
+            host_os_summary[str(host_value)] = str(os_family)
+
+    if host_os_summary:
+        findings.insert(
+            0,
+            {
+                "title": "Active hosts discovered with operating-system fingerprint hints",
+                "category": "network",
+                "source": "network-db",
+                "port": 0,
+                "protocol": "tcp",
+                "service": "network-block",
+                "state": "open",
+                "cve_id": None,
+                "cvss_score": 0.0,
+                "severity": "info",
+                "confidence": 0.82,
+                "evidence": "; ".join(f"{host} -> {os_family}" for host, os_family in sorted(host_os_summary.items()))[:1800],
+                "remediation": "Review discovered hosts, confirm operating-system ownership, and apply CIS-aligned hardening to internet-facing or sensitive systems before re-testing.",
+                "compliance_map": ["NIST RA-5", "CIS Controls 1", "CIS Controls 7"],
+                "metadata": {
+                    "host": str(ipaddress.ip_network(_normalize_target(target), strict=False).network_address),
+                    "network_block": target,
+                    "active_hosts": active_hosts,
+                    "host_os_summary": host_os_summary,
+                    "references": ["https://www.cisecurity.org/cis-benchmarks"],
+                },
+            },
+        )
 
     emit(95, {"phase": "analysis", "message": f"Network block scan completed for {target}: {len(active_hosts)} active host(s), {len(findings)} finding(s).", "active_hosts": active_hosts})
     return findings

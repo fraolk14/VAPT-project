@@ -1,19 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 
 import api from "../api/client";
-import Card from "../components/Card";
 
 function severityWeight(severity) {
-  if (severity === "critical") return 4;
-  if (severity === "high") return 3;
-  if (severity === "medium") return 2;
-  return 1;
+  return { critical: 4, high: 3, medium: 2, low: 1, info: 0 }[severity] || 0;
 }
 
-export default function UnauthorizedSoftware({ summary, assets, groups, users }) {
+export default function UnauthorizedSoftware({ summary, assets = [] }) {
   const [riskFilter, setRiskFilter] = useState("all");
-  const [selectedAppKey, setSelectedAppKey] = useState("");
-  const [ownershipState, setOwnershipState] = useState({});
+  const [query, setQuery] = useState("");
+  const [selectedKey, setSelectedKey] = useState("");
   const [inventory, setInventory] = useState([]);
   const [ingestForm, setIngestForm] = useState({
     endpoint_name: "",
@@ -29,26 +25,33 @@ export default function UnauthorizedSoftware({ summary, assets, groups, users })
     api.get("/posture/unauthorized-software/inventory").then((response) => setInventory(response.data)).catch(() => {});
   }, []);
 
-  const filteredApps = useMemo(() => {
-    const items = [...(summary?.detected_apps || [])].sort(
-      (left, right) => severityWeight(right.severity) - severityWeight(left.severity)
-    );
-    return riskFilter === "all" ? items : items.filter((item) => item.severity === riskFilter);
-  }, [summary?.detected_apps, riskFilter]);
+  const rows = useMemo(() => {
+    return [...(summary?.detected_apps || [])]
+      .filter((item) => riskFilter === "all" || item.severity === riskFilter)
+      .filter((item) => `${item.label} ${item.value} ${item.metadata?.hostname || ""} ${item.metadata?.reason || ""}`.toLowerCase().includes(query.trim().toLowerCase()))
+      .sort((a, b) => severityWeight(b.severity) - severityWeight(a.severity));
+  }, [summary?.detected_apps, riskFilter, query]);
 
-  const selectedApp = useMemo(() => {
-    return filteredApps.find((item) => `${item.label}-${item.value}` === selectedAppKey) || filteredApps[0] || null;
-  }, [filteredApps, selectedAppKey]);
+  const selected = useMemo(() => rows.find((item) => `${item.label}-${item.value}` === selectedKey) || rows[0] || null, [rows, selectedKey]);
+  const recommendedActions = useMemo(() => {
+    if (!selected) return [];
+    const actions = [];
+    if (severityWeight(selected.severity) >= 3) actions.push("Contain the endpoint or remove the software before returning the host to normal operations.");
+    if (selected.metadata?.baseline_status === "not_in_baseline" || selected.metadata?.baseline_status === "not_approved") {
+      actions.push("Compare the detected software against the approved baseline and document an explicit approval or removal decision.");
+    }
+    if (selected.metadata?.source === "manual-agent-import") {
+      actions.push("Re-run endpoint inventory after remediation to confirm the application is no longer present.");
+    }
+    actions.push(selected.metadata?.recommended_action || "Validate ownership and close the software drift through approval or removal.");
+    return [...new Set(actions)];
+  }, [selected]);
 
-  const relatedEndpoint = useMemo(() => {
-    if (!selectedApp) return null;
-    return (assets || []).find((asset) => {
-      const blob = `${asset.asset_name} ${asset.hostname || ""} ${asset.ip_address || ""}`.toLowerCase();
-      return blob.includes(String(selectedApp.value || "").toLowerCase());
-    }) || null;
-  }, [assets, selectedApp]);
-
-  const ownerSelectionKey = selectedApp ? `${selectedApp.label}-${selectedApp.value}` : "";
+  const relatedAsset = useMemo(() => {
+    if (!selected) return null;
+    const needle = `${selected.value} ${selected.metadata?.hostname || ""}`.toLowerCase();
+    return (assets || []).find((asset) => `${asset.asset_name} ${asset.hostname || ""} ${asset.ip_address || ""}`.toLowerCase().includes(needle) || needle.includes(`${asset.hostname || asset.ip_address || ""}`.toLowerCase())) || null;
+  }, [assets, selected]);
 
   const ingestInventory = async (event) => {
     event.preventDefault();
@@ -64,7 +67,7 @@ export default function UnauthorizedSoftware({ summary, assets, groups, users })
       });
       setInventory((current) => [response.data, ...current]);
       setIngestForm({ endpoint_name: "", hostname: "", ip_address: "", os_name: "", installed_apps: "", approved_baseline: "" });
-      setFeedback(`Inventory received for ${response.data.endpoint_name}. ${response.data.detected_apps.length} application(s) require review.`);
+      setFeedback(`Inventory analyzed for ${response.data.endpoint_name}.`);
     } catch (error) {
       setFeedback(error?.response?.data?.detail || "Unable to ingest endpoint inventory right now.");
     }
@@ -75,22 +78,108 @@ export default function UnauthorizedSoftware({ summary, assets, groups, users })
       <div className="panel panel--metrics">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Endpoint governance</p>
-            <h2>Unauthorized software</h2>
+            <p className="eyebrow">Unauthorized software governance</p>
+            <h2>Application and endpoint review</h2>
           </div>
         </div>
         <div className="metrics-grid">
-          <Card title="Managed Endpoints" value={summary?.managed_endpoints || 0} trend="Potential agent coverage targets" />
-          <Card title="Unauthorized Apps" value={summary?.unauthorized_apps || 0} trend="Baseline drift across managed inventory" />
-          <Card title="High Risk Software" value={summary?.high_risk_apps || 0} trend="Remote access and offensive tools prioritized" />
-          <Card title="Baseline Coverage" value={summary?.baseline_coverage || 0} trend="Endpoints with approved software context" />
+          <article className="metric-card"><span>Managed endpoints</span><strong>{summary?.managed_endpoints || 0}</strong><small>Endpoints with inventory context</small></article>
+          <article className="metric-card"><span>Unauthorized apps</span><strong>{summary?.unauthorized_apps || 0}</strong><small>Software outside the approved baseline</small></article>
+          <article className="metric-card"><span>High-risk tools</span><strong>{summary?.high_risk_apps || 0}</strong><small>Remote access or offensive tooling</small></article>
+          <article className="metric-card"><span>Baseline coverage</span><strong>{summary?.baseline_coverage || 0}</strong><small>Endpoints with approved software lists</small></article>
         </div>
       </div>
 
       <div className="panel">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Lightweight agent intake</p>
+            <p className="eyebrow">Detection queue</p>
+            <h2>Detected software</h2>
+          </div>
+          <div className="table-controls">
+            <input className="scan-input" placeholder="Search application, endpoint, reason" value={query} onChange={(event) => setQuery(event.target.value)} />
+            <select className="scan-select" value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)}>
+              <option value="all">All risk levels</option>
+              <option value="critical">Critical</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table className="table table--dense">
+            <thead>
+              <tr>
+                <th>Application</th>
+                <th>Endpoint</th>
+                <th>Severity</th>
+                <th>Baseline</th>
+                <th>Reason</th>
+                <th>Source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((item) => (
+                <tr key={`${item.label}-${item.value}`} className={selected?.label === item.label && selected?.value === item.value ? "finding-row--selected" : ""} onClick={() => setSelectedKey(`${item.label}-${item.value}`)} style={{ cursor: "pointer" }}>
+                  <td data-label="Application"><strong>{item.label}</strong></td>
+                  <td data-label="Endpoint">{item.value}</td>
+                  <td data-label="Severity"><span className={`pill pill--${item.severity}`}>{item.severity}</span></td>
+                  <td data-label="Baseline">{item.metadata?.baseline_status || "review_required"}</td>
+                  <td data-label="Reason">{item.metadata?.reason || "Baseline drift or risky software detected."}</td>
+                  <td data-label="Source">{item.metadata?.source || "Asset tag / scan telemetry"}</td>
+                </tr>
+              ))}
+              {!rows.length ? <tr><td colSpan="6"><p className="empty-copy">No unauthorized software matched the current filter.</p></td></tr> : null}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel__header">
+          <div>
+            <p className="eyebrow">Selected application</p>
+            <h2>{selected?.label || "No application selected"}</h2>
+          </div>
+        </div>
+        {selected ? (
+          <div className="finding-detail-grid finding-detail-grid--single">
+            <article className="panel panel--embedded">
+              <div className="coverage-list">
+                <div className="coverage-row"><span>Application</span><strong>{selected.label}</strong></div>
+                <div className="coverage-row"><span>Endpoint</span><strong>{selected.value}</strong></div>
+                <div className="coverage-row"><span>Severity</span><strong>{selected.severity}</strong></div>
+                <div className="coverage-row"><span>Baseline status</span><strong>{selected.metadata?.baseline_status || "review_required"}</strong></div>
+                <div className="coverage-row"><span>Hostname</span><strong>{selected.metadata?.hostname || relatedAsset?.hostname || "n/a"}</strong></div>
+                <div className="coverage-row"><span>Owner</span><strong>{selected.metadata?.owner || relatedAsset?.owner || "Unassigned"}</strong></div>
+                <div className="coverage-row"><span>Reason</span><strong>{selected.metadata?.reason || "Baseline drift detected"}</strong></div>
+              </div>
+            </article>
+            <article className="panel panel--embedded">
+              <div className="coverage-list">
+                <div className="coverage-row"><span>Endpoint asset</span><strong>{relatedAsset?.asset_name || "No matching asset"}</strong></div>
+                <div className="coverage-row"><span>Asset address</span><strong>{relatedAsset?.hostname || relatedAsset?.ip_address || "n/a"}</strong></div>
+                <div className="coverage-row"><span>Criticality</span><strong>{relatedAsset?.criticality || "n/a"}</strong></div>
+              </div>
+              <p className="eyebrow" style={{ marginTop: "16px" }}>Recommended actions</p>
+              <div className="coverage-list">
+                {recommendedActions.map((action) => (
+                  <div className="coverage-row" key={action}>
+                    <span>{action}</span>
+                    <strong>Action</strong>
+                  </div>
+                ))}
+              </div>
+            </article>
+          </div>
+        ) : <p className="empty-copy">Select a software finding to review its endpoint context and response action.</p>}
+      </div>
+
+      <div className="panel">
+        <div className="panel__header">
+          <div>
+            <p className="eyebrow">Agent or manual intake</p>
             <h2>Submit endpoint inventory</h2>
           </div>
         </div>
@@ -106,162 +195,35 @@ export default function UnauthorizedSoftware({ summary, assets, groups, users })
         {feedback ? <p className="scan-feedback scan-feedback--success">{feedback}</p> : null}
       </div>
 
-      <div className="panel panel--metrics">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Detection queue</p>
-            <h2>Applications</h2>
-          </div>
-          <select className="scan-select" value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)}>
-            <option value="all">All risk levels</option>
-            <option value="critical">Critical</option>
-            <option value="high">High</option>
-            <option value="medium">Medium</option>
-            <option value="low">Low</option>
-          </select>
-        </div>
-        <div className="attack-path-layout">
-          <div className="coverage-list">
-            {filteredApps.length ? filteredApps.map((item) => {
-              const key = `${item.label}-${item.value}`;
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  className={selectedAppKey === key || (!selectedAppKey && selectedApp?.label === item.label && selectedApp?.value === item.value)
-                    ? "coverage-row coverage-row--button is-active"
-                    : "coverage-row coverage-row--button"}
-                  onClick={() => setSelectedAppKey(key)}
-                >
-                  <span>
-                    {item.label}
-                    <p>{item.value}</p>
-                  </span>
-                  <strong><span className={`pill pill--${item.severity}`}>{item.severity}</span></strong>
-                </button>
-              );
-            }) : <p className="empty-copy">No unauthorized software has been detected for this filter.</p>}
-          </div>
-
-          <div className="panel panel--embedded attack-path-detail">
-            <div className="panel__header">
-              <div>
-                <p className="eyebrow">Containment detail</p>
-                <h2>{selectedApp?.label || "Select an application"}</h2>
-              </div>
-            </div>
-            {selectedApp ? (
-              <div className="attack-path-nodes">
-                <article className="attack-path-node">
-                  <span className={`pill pill--${selectedApp.severity}`}>{selectedApp.severity}</span>
-                  <strong>{selectedApp.value}</strong>
-                  <p>{selectedApp.metadata?.owner || "Owner pending"} / {selectedApp.metadata?.classification || "Baseline drift"}</p>
-                  <div className="coverage-list">
-                    <div className="coverage-row"><span>Assigned user</span>
-                      <strong>
-                        <select
-                          className="scan-select"
-                          value={ownershipState[ownerSelectionKey]?.assigned_to || ""}
-                          onChange={(event) => setOwnershipState((current) => ({
-                            ...current,
-                            [ownerSelectionKey]: { ...current[ownerSelectionKey], assigned_to: event.target.value },
-                          }))}
-                        >
-                          <option value="">Unassigned</option>
-                          {(users || []).map((entry) => <option key={entry.id} value={entry.username}>{entry.username}</option>)}
-                        </select>
-                      </strong>
-                    </div>
-                    <div className="coverage-row"><span>Owning group</span>
-                      <strong>
-                        <select
-                          className="scan-select"
-                          value={ownershipState[ownerSelectionKey]?.group_name || ""}
-                          onChange={(event) => setOwnershipState((current) => ({
-                            ...current,
-                            [ownerSelectionKey]: { ...current[ownerSelectionKey], group_name: event.target.value },
-                          }))}
-                        >
-                          <option value="">No group</option>
-                          {(groups || []).map((group) => <option key={group.id} value={group.name}>{group.name}</option>)}
-                        </select>
-                      </strong>
-                    </div>
-                    <div className="coverage-row"><span>Recommended action</span><strong>{severityWeight(selectedApp.severity) >= 3 ? "Remove / isolate" : "Review baseline"}</strong></div>
-                  </div>
-                </article>
-              </div>
-            ) : (
-              <p className="empty-copy">Select a detected application to review ownership and containment guidance.</p>
-            )}
-          </div>
-        </div>
-      </div>
-
       <div className="panel">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Endpoint context</p>
-            <h2>Matched endpoint</h2>
-          </div>
-        </div>
-        <div className="coverage-list">
-          {relatedEndpoint ? (
-            <>
-              <div className="coverage-row"><span>Endpoint</span><strong>{relatedEndpoint.asset_name}</strong></div>
-              <div className="coverage-row"><span>Address</span><strong>{relatedEndpoint.hostname || relatedEndpoint.ip_address || "n/a"}</strong></div>
-              <div className="coverage-row"><span>Exposure</span><strong>{relatedEndpoint.exposure}</strong></div>
-              <div className="coverage-row"><span>Criticality</span><strong>{relatedEndpoint.criticality}</strong></div>
-            </>
-          ) : (
-            <p className="empty-copy">No endpoint record matched the selected application automatically.</p>
-          )}
-        </div>
-      </div>
-
-      <div className="panel">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Containment tasks</p>
-            <h2>Action queue</h2>
-          </div>
-        </div>
-        <div className="coverage-list">
-          <div className="coverage-row"><span>Review remote access and admin tooling on managed endpoints</span><strong>Pending</strong></div>
-          <div className="coverage-row"><span>Compare installed software against approved baseline</span><strong>Pending</strong></div>
-          <div className="coverage-row"><span>Escalate high-risk tools for isolation and removal</span><strong>Pending</strong></div>
-        </div>
-      </div>
-
-      <div className="panel panel--metrics">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Agent submissions</p>
-            <h2>Recent endpoint inventories</h2>
+            <p className="eyebrow">Recent submissions</p>
+            <h2>Endpoint inventories</h2>
           </div>
         </div>
         <div className="table-wrap">
-          <table className="table">
+          <table className="table table--dense">
             <thead>
               <tr>
                 <th>Endpoint</th>
-                <th>Host</th>
-                <th>Apps</th>
-                <th>Flags</th>
+                <th>OS</th>
+                <th>Installed apps</th>
+                <th>Flagged apps</th>
                 <th>Status</th>
               </tr>
             </thead>
             <tbody>
-              {inventory.slice(0, 10).map((entry) => (
+              {inventory.slice(0, 12).map((entry) => (
                 <tr key={entry.id}>
-                  <td data-label="Endpoint"><strong>{entry.endpoint_name}</strong><p>{entry.os_name || "OS unknown"}</p></td>
-                  <td data-label="Host">{entry.hostname || entry.ip_address || "n/a"}</td>
-                  <td data-label="Apps">{entry.installed_apps?.length || 0}</td>
-                  <td data-label="Flags">{entry.detected_apps?.length || 0}</td>
+                  <td data-label="Endpoint"><strong>{entry.endpoint_name}</strong><p>{entry.hostname || entry.ip_address || "n/a"}</p></td>
+                  <td data-label="OS">{entry.os_name || "n/a"}</td>
+                  <td data-label="Installed apps">{entry.installed_apps?.length || 0}</td>
+                  <td data-label="Flagged apps">{entry.detected_apps?.length || 0}</td>
                   <td data-label="Status">{entry.status}</td>
                 </tr>
               ))}
-              {!inventory.length ? <tr><td colSpan="5"><p className="empty-copy">Endpoint agent submissions will appear here after inventory intake.</p></td></tr> : null}
+              {!inventory.length ? <tr><td colSpan="5"><p className="empty-copy">Endpoint inventories will appear here after submission.</p></td></tr> : null}
             </tbody>
           </table>
         </div>
