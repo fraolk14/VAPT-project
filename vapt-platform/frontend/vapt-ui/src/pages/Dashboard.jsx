@@ -651,7 +651,7 @@ export default function Dashboard({
               value: item.exploit_indicator,
               to: "/threat-intelligence",
             }))
-      } emptyMessage="Configure MISP feeds to show the latest external threat events here." />,
+      } emptyMessage="Configure abuse.ch feeds to show the latest external threat events here." />,
     },
     "shadow-it-summary": {
       title: "Shadow IT Detection Summary",
@@ -693,7 +693,7 @@ export default function Dashboard({
       render: () => <SignalGraphList items={[
         { key: "exploit-available", label: "Exploit available", value: `${threatIntel.exploit_available || 0}`, numeric: threatIntel.exploit_available || 0, to: "/threat-intelligence", tone: "#ff8c8c" },
         { key: "actively-exploited", label: "Actively exploited", value: `${threatIntel.actively_exploited || 0}`, numeric: threatIntel.actively_exploited || 0, to: "/threat-intelligence", tone: "#ffb454" },
-        { key: "misp-status", label: "MISP status", value: `${threatIntel.misp_status || "not_configured"}`, numeric: threatIntel.misp_status === "connected" ? 1 : 0, to: "/threat-intelligence", tone: "#4fd1c5" },
+        { key: "misp-status", label: "abuse.ch status", value: `${threatIntel.misp_status || "not_configured"}`, numeric: threatIntel.misp_status === "connected" ? 1 : 0, to: "/threat-intelligence", tone: "#4fd1c5" },
       ]} emptyMessage="Threat intel exploit coverage will appear here." />,
     },
     "attack-paths": {

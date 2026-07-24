@@ -14,6 +14,7 @@ from app.services.reporting import (
     build_report_preview,
     ensure_report_storage,
     export_findings_csv,
+    export_findings_docx,
     export_findings_json,
     export_findings_pdf,
     load_report_branding,
@@ -142,6 +143,22 @@ def export_pdf_custom(payload: ReportRequest, db: Session = Depends(get_db)):
         content=pdf_payload,
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename=findings-report-{normalized_mode}.pdf"},
+    )
+
+
+@router.post("/findings.docx")
+def export_docx_custom(payload: ReportRequest, db: Session = Depends(get_db)):
+    normalized_mode = _normalize_mode(payload.mode)
+    docx_payload = export_findings_docx(
+        db.query(Finding).all(),
+        mode=normalized_mode,
+        selected_targets=payload.selected_targets,
+        report_title=payload.report_title,
+    )
+    return Response(
+        content=docx_payload,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename=findings-report-{normalized_mode}.docx"},
     )
 
 

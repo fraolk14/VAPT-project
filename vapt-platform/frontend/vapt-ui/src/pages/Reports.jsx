@@ -91,6 +91,7 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
   const [selectedTargets, setSelectedTargets] = useState([]);
   const [targetFilter, setTargetFilter] = useState("");
   const [preview, setPreview] = useState(null);
+  const [previewPdfUrl, setPreviewPdfUrl] = useState(null);
   const [companyName, setCompanyName] = useState("VAPTICOM");
   const [logoFile, setLogoFile] = useState(null);
   const [branding, setBranding] = useState({ logo_name: null, logo_uploaded: false, updated_at: null });
@@ -108,6 +109,13 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
 
   useEffect(() => setLocalAssessments(compliance?.assessments || []), [compliance?.assessments]);
   useEffect(() => setLocalIncidents(incidents || []), [incidents]);
+  useEffect(() => {
+    return () => {
+      if (previewPdfUrl) {
+        window.URL.revokeObjectURL(previewPdfUrl);
+      }
+    };
+  }, [previewPdfUrl]);
 
   useEffect(() => {
     if (!selectedAssessment?.id) {
@@ -156,9 +164,17 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
   const previewReport = async () => {
     setDownloadState("preview");
     try {
-      const response = await fetchJson("/reports/preview", { method: "POST", body: requestPayload });
+      const [response, pdfBlob] = await Promise.all([
+        fetchJson("/reports/preview", { method: "POST", body: requestPayload }),
+        fetchBlob("/reports/findings.pdf", { method: "POST", body: requestPayload, fallbackMimeType: "application/pdf" }),
+      ]);
       setPreview(response);
-      setActionFeedback("Report preview refreshed.");
+      if (previewPdfUrl) {
+        window.URL.revokeObjectURL(previewPdfUrl);
+      }
+      const pdfUrl = window.URL.createObjectURL(pdfBlob);
+      setPreviewPdfUrl(pdfUrl);
+      setActionFeedback("PDF preview refreshed in the browser.");
     } catch (error) {
       setActionFeedback(error?.message || "Unable to build the preview right now.");
     } finally {
@@ -169,17 +185,30 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
   const downloadPdf = async () => {
     setDownloadState("pdf");
     try {
-      const response = await fetchJson("/reports/download-link", {
-        method: "POST",
-        body: requestPayload,
-      });
-      if (!response?.download_url) {
-        throw new Error("Unable to create the report download link.");
+      const blob = await fetchBlob("/reports/findings.pdf", { method: "POST", body: requestPayload, fallbackMimeType: "application/pdf" });
+      if (!blob.size) {
+        throw new Error("The generated report is empty.");
       }
-      window.location.assign(response.download_url);
-      setActionFeedback("PDF report download started.");
+      saveBlobDownload(blob, "findings-report.pdf");
+      setActionFeedback("PDF download started in the browser.");
     } catch (error) {
       setActionFeedback(error?.message || "Unable to download the PDF report right now.");
+    } finally {
+      setDownloadState("idle");
+    }
+  };
+
+  const downloadDocx = async () => {
+    setDownloadState("docx");
+    try {
+      const blob = await fetchBlob("/reports/findings.docx", { method: "POST", body: requestPayload, fallbackMimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+      if (!blob.size) {
+        throw new Error("The generated report is empty.");
+      }
+      saveBlobDownload(blob, "findings-report.docx");
+      setActionFeedback("DOCX download started in the browser.");
+    } catch (error) {
+      setActionFeedback(error?.message || "Unable to download the DOCX report right now.");
     } finally {
       setDownloadState("idle");
     }
@@ -359,6 +388,9 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
               <button type="button" className="scan-action scan-action--resume" onClick={downloadPdf}>
                 {downloadState === "pdf" ? "Preparing PDF..." : "Download PDF"}
               </button>
+              <button type="button" className="scan-action" onClick={downloadDocx}>
+                {downloadState === "docx" ? "Preparing DOCX..." : "Download DOCX (editable)"}
+              </button>
               <button type="button" className="scan-action" onClick={() => downloadReport("/reports/findings.csv", "findings-report.csv", "text/csv")}>
                 {downloadState === "/reports/findings.csv" ? "Preparing CSV..." : "Export CSV"}
               </button>
@@ -390,37 +422,34 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
                 <div className="coverage-row"><span>Open findings</span><strong>{preview.summary?.open_findings || 0}</strong></div>
                 <div className="coverage-row"><span>Logo</span><strong>{preview.logo_name || "Default text branding"}</strong></div>
               </div>
+              {preview.executive_summary?.summary_text ? (
+                <div className="coverage-list" style={{ marginTop: "12px" }}>
+                  <div className="coverage-row"><span>Executive summary</span><strong>{preview.executive_summary.summary_text}</strong></div>
+                  {(preview.recommendations || []).slice(0, 3).map((recommendation, index) => (
+                    <div className="coverage-row" key={`recommendation-${index}`}>
+                      <span>Action {index + 1}</span>
+                      <strong>{recommendation}</strong>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </div>
-            <div className="panel panel--embedded">
+            <div className="panel panel--embedded" style={{ minHeight: "720px" }}>
               <div className="panel__header">
                 <div>
-                  <p className="eyebrow">Top findings</p>
-                  <h2>Included in report</h2>
+                  <p className="eyebrow">Browser PDF preview</p>
+                  <h2>Executive report</h2>
                 </div>
               </div>
-              <div className="table-wrap">
-                <table className="table table--dense">
-                  <thead>
-                    <tr>
-                      <th>Finding</th>
-                      <th>Target</th>
-                      <th>Severity</th>
-                      <th>CVE</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(preview.top_findings || []).map((finding) => (
-                      <tr key={finding.id}>
-                        <td data-label="Finding"><strong>{finding.title}</strong></td>
-                        <td data-label="Target">{finding.target}</td>
-                        <td data-label="Severity">{finding.severity || "info"}</td>
-                        <td data-label="CVE">{finding.cve_id || "No CVE"}</td>
-                      </tr>
-                    ))}
-                    {!preview.top_findings?.length ? <tr><td colSpan="4"><p className="empty-copy">No findings matched the current report scope.</p></td></tr> : null}
-                  </tbody>
-                </table>
-              </div>
+              {previewPdfUrl ? (
+                <iframe
+                  title="Executive report preview"
+                  src={previewPdfUrl}
+                  style={{ width: "100%", minHeight: "640px", border: "none", borderRadius: "8px" }}
+                />
+              ) : (
+                <p className="empty-copy">The PDF preview will appear here after you click Preview report.</p>
+              )}
             </div>
           </div>
         ) : (

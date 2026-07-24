@@ -78,7 +78,7 @@ export default function ThreatIntelligence({ threatIntel }) {
         <div className="dashboard-toolbar threat-toolbar">
           <div className="threat-toolbar__summary"><span>Feed status</span><strong>{threatIntel.external_feed_status || threatIntel.misp_status}</strong></div>
           <div className="threat-toolbar__summary"><span>Latest events</span><strong>{externalEvents.length || 0}</strong></div>
-          <div className="threat-toolbar__summary"><span>Sources</span><strong>MISP / URLhaus / CISA / NVD</strong></div>
+          <div className="threat-toolbar__summary"><span>Sources</span><strong>abuse.ch / URLhaus / CISA / NVD</strong></div>
         </div>
         <div className="coverage-list">
           {externalEvents.length ? externalEvents.map((event) => (

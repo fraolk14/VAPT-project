@@ -372,6 +372,75 @@ def _normalize_misp_event(item: dict, base_url: str, event_id: str | None = None
     }
 
 
+def _normalize_abusech_event(item: dict, base_url: str) -> dict:
+    event = item if isinstance(item, dict) else {}
+    raw_tags = event.get("tags") or event.get("tag") or event.get("labels") or []
+    if isinstance(raw_tags, str):
+        tags = [tag.strip() for tag in raw_tags.split(",") if tag.strip()]
+    elif isinstance(raw_tags, list):
+        tags = [str(tag).strip() for tag in raw_tags if str(tag).strip()]
+    else:
+        tags = []
+    references = [ref for ref in [event.get("url"), event.get("urlhaus_link"), event.get("reference")] if ref]
+    description = (
+        event.get("description")
+        or event.get("comment")
+        or event.get("summary")
+        or event.get("threat")
+        or (references[0] if references else None)
+        or "Feed event published by abuse.ch."
+    )
+    created = event.get("date") or event.get("timestamp") or event.get("created") or event.get("dateadded")
+    return {
+        "id": str(event.get("id") or event.get("event_id") or ""),
+        "name": event.get("threat") or event.get("name") or "abuse.ch event",
+        "description": description,
+        "modified": None if created in {None, ""} else str(created),
+        "created": None if created in {None, ""} else str(created),
+        "author_name": event.get("reporter") or event.get("source"),
+        "indicator_count": int(event.get("indicator_count") or 1),
+        "tags": tags,
+        "adversary": event.get("reporter") or event.get("source"),
+        "tlp": None,
+        "threat_level": "high" if any(marker in " ".join(tags).lower() for marker in ["malware", "ransomware", "botnet"]) else "medium",
+        "references": [base_url],
+        "url": references[0] if references else base_url,
+    }
+
+
+def fetch_abusech_events(limit: int = 5) -> tuple[str, list[dict]]:
+    base_url = os.getenv("ABUSECH_FEED_URL", "https://mb-api.abuse.ch/api/v1/").strip().rstrip("/")
+    api_key = os.getenv("ABUSECH_API_KEY", "").strip()
+    verify_ssl = os.getenv("ABUSECH_VERIFY_SSL", "true").lower() == "true"
+    if not base_url:
+        return "not_configured", []
+
+    try:
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        if api_key:
+            headers["Auth-Key"] = api_key
+            headers["Authorization"] = api_key
+        response = requests.post(
+            base_url,
+            json={"query": "get_recent"},
+            headers=headers,
+            timeout=10,
+            verify=verify_ssl,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError):
+        return "unavailable", []
+
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, list):
+            return "connected", [_normalize_abusech_event(item, base_url) for item in data[:limit]]
+    if isinstance(payload, list):
+        return "connected", [_normalize_abusech_event(item, base_url) for item in payload[:limit]]
+    return "unavailable", []
+
+
 def fetch_misp_events(limit: int = 5) -> tuple[str, list[dict]]:
     base_url = os.getenv("MISP_FEED_URL", "").strip().rstrip("/")
     api_key = os.getenv("MISP_API_KEY", "").strip()
@@ -561,9 +630,9 @@ def _match_external_event_to_findings(name: str, description: str, references: l
     return len(deduped), deduped[:8]
 
 
-def build_external_event_feed(findings: Iterable[Finding], misp_events: list[dict], urlhaus_rows: list[dict]) -> list[dict]:
+def build_external_event_feed(findings: Iterable[Finding], ti_events: list[dict], urlhaus_rows: list[dict]) -> list[dict]:
     events: list[dict] = []
-    for event in misp_events:
+    for event in ti_events:
         references = [event.get("url")] + list(event.get("references") or [])
         matched_count, matched_targets = _match_external_event_to_findings(
             event.get("name") or "",
@@ -573,9 +642,9 @@ def build_external_event_feed(findings: Iterable[Finding], misp_events: list[dic
         )
         events.append(
             {
-                "id": f"misp-{event.get('id')}",
-                "source": "MISP",
-                "name": event.get("name") or "MISP event",
+                "id": f"abusech-{event.get('id')}",
+                "source": "abuse.ch",
+                "name": event.get("name") or "abuse.ch event",
                 "description": event.get("description"),
                 "created": event.get("created") or event.get("modified"),
                 "indicator_count": int(event.get("indicator_count") or 0),
@@ -711,7 +780,7 @@ def build_attack_map_data(
     assets: list[Asset],
     monitoring_events: list[MonitoringEvent],
     incidents: list[SecurityIncident],
-    misp_events: list[dict],
+    ti_events: list[dict],
 ) -> dict:
     scan_map = {str(scan.id): scan for scan in scans}
     asset_map = {str(asset.id): asset for asset in assets}
@@ -790,13 +859,13 @@ def build_attack_map_data(
             )
         )
 
-    for index, event in enumerate(misp_events):
+    for index, event in enumerate(ti_events):
         attack_type = _infer_attack_type(event.get("name"), event.get("description"), event.get("adversary"), " ".join(event.get("tags") or []))
         source_country = infer_country(event.get("author_name") or event.get("adversary"), fallback=SOURCE_COUNTRY_BY_ATTACK.get(attack_type, "Singapore"))
         target_country = infer_country(event.get("description") or event.get("name"), fallback="United States")
         flows.append(
             _build_flow(
-                flow_id=f"misp-{event.get('id') or index}",
+                flow_id=f"abusech-{event.get('id') or index}",
                 source_country=source_country,
                 target_country=target_country,
                 attack_type=attack_type,
@@ -805,7 +874,7 @@ def build_attack_map_data(
                 title=event.get("name") or "Threat event",
                 industry=_infer_industry(None, event.get("description"), {"industry": event.get("description")}),
                 malware_type=_infer_malware_type(event.get("name"), event.get("description"), " ".join(event.get("tags") or [])),
-                ti_source="MISP",
+                ti_source="abuse.ch",
                 references=[event.get("url")] + list(event.get("references") or []),
                 target_label=event.get("name"),
             )
