@@ -4,7 +4,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://vapt:${POSTGRES_PASSWORD:-vaptpass}@db:5432/${POSTGRES_DB:-vaptdb}
+      DATABASE_URL: postgresql://vapt:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-vaptdb}
       REDIS_URL: redis://redis:6379/0
       ELASTICSEARCH_URL: http://elasticsearch:9200
     extra_hosts:
@@ -32,10 +32,10 @@ services:
     image: postgres:15
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-vapt}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vaptpass}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-vaptdb}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 

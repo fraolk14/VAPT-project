@@ -14,7 +14,17 @@ from app.models.auth import AuthPolicy, AuthSession
 from app.models.user import User
 
 
-SECRET_KEY = os.getenv("JWT_SECRET", "development-secret-change-me")
+ENV = os.getenv("ENV", "development")
+_JWT_SECRET = os.getenv("JWT_SECRET")
+if not _JWT_SECRET:
+    if ENV == "development":
+        _JWT_SECRET = "development-secret-change-me"
+    else:
+        raise RuntimeError(
+            "JWT_SECRET must be set when ENV is not 'development'. "
+            "Refusing to start with a default signing key."
+        )
+SECRET_KEY = _JWT_SECRET
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 MAX_LOGIN_ATTEMPTS = int(os.getenv("MAX_LOGIN_ATTEMPTS", "5"))

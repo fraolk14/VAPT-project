@@ -5,7 +5,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
-
+from urllib.parse import urlparse
 from app.models.finding import Finding
 
 try:
@@ -88,10 +88,16 @@ def save_report_branding(*, company_name: str | None = None, logo_path: str | No
 
 def _finding_target(finding: Finding) -> str:
     metadata = finding.finding_metadata or {}
-    for key in ("target", "affected_url", "host", "hostname", "ip_address", "url"):
+    for key in ("target", "affected_url", "host", "hostname", "ip_address"):
         value = metadata.get(key)
         if value:
             return str(value)
+    url = metadata.get("url")
+    if url:
+        hostname = urlparse(str(url)).hostname
+        if hostname:
+            return hostname
+        return str(url)
     if finding.service:
         return f"{finding.service}:{finding.port}"
     return f"port {finding.port}"
@@ -617,7 +623,21 @@ def filter_findings(findings: Iterable[Finding], selected_targets: list[str] | N
 
 def _build_executive_summary(serialized_findings: list[dict], summary: dict) -> dict:
     severity_counts = summary.get("severity_counts", {})
-    priority_entries = [item for item in serialized_findings if _severity_rank(item.get("severity")) >= 3][:5]
+    severity_ranked = sorted(
+        (item for item in serialized_findings if _severity_rank(item.get("severity")) >= 3),
+        key=lambda entry: _severity_rank(entry.get("severity")),
+        reverse=True,
+    )
+    seen_titles: set[str] = set()
+    priority_entries = []
+    for entry in severity_ranked:
+        title = entry.get("title") or "Untitled finding"
+        if title in seen_titles:
+            continue
+        seen_titles.add(title)
+        priority_entries.append(entry)
+        if len(priority_entries) == 5:
+            break
     top_priority_findings = [
         {
             "title": item.get("title") or "Untitled finding",
@@ -1114,8 +1134,9 @@ def export_findings_pdf(
             story.append(Spacer(1, 8))
             story.append(Paragraph(f"{finding_index}. Vulnerability name: {item['title']}", styles["subsection"]))
             story.append(_detail_table(item))
-            story.append(Paragraph("<b>Vulnerability description</b>", styles["body"]))
-            story.append(Paragraph(item.get("evidence") or "No scanner narrative was stored for this finding.", styles["body"]))
+            if item.get("evidence"):
+                story.append(Paragraph("<b>Vulnerability description</b>", styles["body"]))
+                story.append(Paragraph(item["evidence"], styles["body"]))
             story.append(Paragraph("<b>Impact</b>", styles["body"]))
             story.append(
                 Paragraph(
@@ -1124,8 +1145,9 @@ def export_findings_pdf(
                     styles["body"],
                 )
             )
-            story.append(Paragraph("<b>Proof of concept / validation evidence</b>", styles["body"]))
-            story.append(Paragraph(item.get("evidence") or "Direct validation output was not stored beyond the normalized finding evidence.", styles["body"]))
+            if item.get("evidence"):
+                story.append(Paragraph("<b>Proof of concept / validation evidence</b>", styles["body"]))
+                story.append(Paragraph(item["evidence"], styles["body"]))
             story.append(Paragraph("<b>Remediation</b>", styles["body"]))
             story.append(
                 Paragraph(

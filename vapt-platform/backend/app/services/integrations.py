@@ -11,27 +11,13 @@ import requests
 from gvm.connections import UnixSocketConnection
 from gvm.errors import GvmError
 from gvm.protocols.gmp import GMP
-
+from app.services.severity import severity_from_score as _severity_from_score
 
 DEFAULT_OPENVAS_SCANNER_ID = "08b69003-5fc2-4037-a479-93b440211c73"
 DEFAULT_OPENVAS_SCAN_CONFIG_ID = "daba56c8-73ec-11df-a475-002264764cea"
 DEFAULT_OPENVAS_PORT_LIST_ID = "4a4717fe-57d2-11e1-9a26-406186ea4fc5"
 DEFAULT_OPENVAS_REPORT_FORMAT_ID = "a994b278-1f62-11e1-96ac-406186ea4fc5"
 CVE_PATTERN = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
-
-
-def _severity_from_score(score: float | None) -> str:
-    if score is None:
-        return "info"
-    if score >= 9:
-        return "critical"
-    if score >= 7:
-        return "high"
-    if score >= 4:
-        return "medium"
-    if score > 0:
-        return "low"
-    return "info"
 
 
 def _severity_from_openvas(score: float | None, threat: str | None, title: str | None = None) -> str:
@@ -451,7 +437,7 @@ class ZAPClient:
                     "source": "zap",
                     "port": int(port),
                     "protocol": protocol,
-                    "service": "http",
+                    "service": protocol,
                     "state": "open",
                     "cve_id": cve_id,
                     "cvss_score": normalized_score,

@@ -74,7 +74,7 @@ def _finding(
         "source": "mobsf",
         "port": 0,
         "protocol": "file",
-        "service": "mobile-binary",
+        "service": None,
         "state": "open",
         "cve_id": None,
         "cvss_score": cvss,

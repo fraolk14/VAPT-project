@@ -15,12 +15,14 @@ from sqlalchemy.orm import Session
 
 from app.models.vulnerability import Vulnerability
 from app.models.finding import Finding
+from app.services.severity import severity_from_score as _severity
 
 NVD_FEED_BASE_URL = os.getenv("NVD_FEED_BASE_URL", "https://nvd.nist.gov/feeds/json/cve/2.0")
 CVE_SYNC_START_YEAR = int(os.getenv("CVE_SYNC_START_YEAR", "2002"))
 CVE_SYNC_TIMEOUT = int(os.getenv("CVE_SYNC_TIMEOUT", "120"))
 CVE_MATCH_LIMIT = int(os.getenv("CVE_MATCH_LIMIT", "5"))
 TOKEN_PATTERN = re.compile(r"[a-z0-9][a-z0-9._+-]{2,}")
+GENERIC_SERVICE_VALUES = {"http", "https", "tcp", "ftp", "file", "web", "network", "mobile-binary"}
 
 
 def _current_year() -> int:
@@ -68,17 +70,6 @@ def _extract_cvss(metrics: dict[str, Any] | None) -> tuple[float, str | None]:
             return float(score), vector
     return 0.0, None
 
-
-def _severity(score: float) -> str:
-    if score >= 9:
-        return "critical"
-    if score >= 7:
-        return "high"
-    if score >= 4:
-        return "medium"
-    if score > 0:
-        return "low"
-    return "info"
 
 
 def _extract_weaknesses(weaknesses: list[dict[str, Any]] | None) -> list[str]:
@@ -249,7 +240,7 @@ def _similarity_score(item: dict[str, Any], vulnerability: Vulnerability) -> flo
         return 0.0
     score = overlap / max(4, len(item_tokens))
     service = (item.get("service") or "").lower().strip()
-    if service:
+    if service and service not in GENERIC_SERVICE_VALUES:
         if service in vuln_text:
             score += 0.35
         else:

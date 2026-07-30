@@ -84,7 +84,8 @@ def benchmark_for_os(os_family: str) -> str:
 
 def compliance_tags(*, os_family: str, service: str = "", extra: list[str] | None = None) -> list[str]:
     tags = ["NIST RA-5", "OWASP ASVS V1", "CIS Controls 7", benchmark_for_os(os_family)]
-    if service in {"apache", "nginx", "iis"}:
+    if service in {"apache", "nginx", "iis", "http", "https"}:
+        tags.append("OWASP ASVS V1")
         tags.append("CIS Web Server Benchmark")
     if service in {"postgresql", "mysql", "mssql", "oracle", "redis", "mongodb", "elasticsearch"}:
         tags.append("CIS Database Benchmark")

@@ -216,28 +216,59 @@ def _store_findings(db: Session, scan: Scan, normalized_findings: list[dict[str,
                 }
                 break
         asset = _upsert_asset_from_finding(db, scan, item, metadata)
-        db.add(
-            Finding(
-                scan_id=scan.id,
-                asset_id=asset.id if asset else None,
-                title=item["title"],
-                category=item["category"],
-                source=item["source"],
-                status=status,
-                port=item["port"],
-                protocol=item["protocol"],
-                service=item.get("service"),
-                state=item["state"],
-                cve_id=item.get("cve_id"),
-                cvss_score=item.get("cvss_score"),
-                severity=item.get("severity"),
-                confidence=item.get("confidence", 0.86),
-                evidence=item.get("evidence"),
-                remediation=item.get("remediation"),
-                compliance_map=item.get("compliance_map", []),
-                finding_metadata=metadata,
+
+        existing = None
+        if asset:
+            existing = (
+                db.query(Finding)
+                .filter(
+                    Finding.asset_id == asset.id,
+                    Finding.title == item["title"],
+                    Finding.port == item["port"],
+                    Finding.protocol == item["protocol"],
+                    Finding.status == "open",
+                )
+                .first()
             )
-        )
+
+        if existing:
+            # Same open finding seen again on a rescan: update it in place
+            # instead of creating a duplicate row. last_seen updates itself
+            # (the column has onupdate=func.now()).
+            existing.scan_id = scan.id
+            existing.status = status
+            existing.service = item.get("service")
+            existing.cve_id = item.get("cve_id")
+            existing.cvss_score = item.get("cvss_score")
+            existing.severity = item.get("severity")
+            existing.confidence = item.get("confidence", 0.86)
+            existing.evidence = item.get("evidence")
+            existing.remediation = item.get("remediation")
+            existing.compliance_map = item.get("compliance_map", [])
+            existing.finding_metadata = metadata
+        else:
+            db.add(
+                Finding(
+                    scan_id=scan.id,
+                    asset_id=asset.id if asset else None,
+                    title=item["title"],
+                    category=item["category"],
+                    source=item["source"],
+                    status=status,
+                    port=item["port"],
+                    protocol=item["protocol"],
+                    service=item.get("service"),
+                    state=item["state"],
+                    cve_id=item.get("cve_id"),
+                    cvss_score=item.get("cvss_score"),
+                    severity=item.get("severity"),
+                    confidence=item.get("confidence", 0.86),
+                    evidence=item.get("evidence"),
+                    remediation=item.get("remediation"),
+                    compliance_map=item.get("compliance_map", []),
+                    finding_metadata=metadata,
+                )
+            )
 
     scan.result_summary = {
         **scan.result_summary,
