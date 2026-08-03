@@ -1,3 +1,4 @@
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -101,6 +102,34 @@ def _finding_asset_name(scan: Scan, metadata: dict[str, Any], item: dict[str, An
         host = urlparse(str(metadata["url"])).hostname
         return host or str(metadata["url"])[:80]
     return scan.target
+
+
+def _normalize_dedup_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value).strip().lower())
+
+
+def _finding_deduplication_key(item: dict[str, Any] | Finding | Any, *, asset_key: str | None = None) -> tuple[Any, ...]:
+    if isinstance(item, Finding):
+        title = _normalize_dedup_text(item.title)
+        service = _normalize_dedup_text(item.service)
+        category = _normalize_dedup_text(item.category)
+        source = _normalize_dedup_text(item.source)
+        port = item.port or 0
+        protocol = _normalize_dedup_text(item.protocol)
+        state = _normalize_dedup_text(getattr(item, "state", None))
+    else:
+        title = _normalize_dedup_text(item.get("title"))
+        service = _normalize_dedup_text(item.get("service"))
+        category = _normalize_dedup_text(item.get("category"))
+        source = _normalize_dedup_text(item.get("source"))
+        port = item.get("port") or 0
+        protocol = _normalize_dedup_text(item.get("protocol"))
+        state = _normalize_dedup_text(item.get("state"))
+
+    asset_identifier = _normalize_dedup_text(asset_key)
+    return (asset_identifier, title, category, source, port, protocol, service, state)
 
 
 def _upsert_asset_from_finding(db: Session, scan: Scan, item: dict[str, Any], metadata: dict[str, Any]) -> Asset | None:
@@ -219,15 +248,27 @@ def _store_findings(db: Session, scan: Scan, normalized_findings: list[dict[str,
 
         existing = None
         if asset:
+            asset_key = asset.ip_address or asset.hostname or asset.url or asset.asset_name or str(asset.id)
+            candidates = (
+                db.query(Finding)
+                .filter(Finding.asset_id == asset.id, Finding.status == "open")
+                .order_by(Finding.last_seen.desc())
+                .all()
+            )
+            for candidate in candidates:
+                if _finding_deduplication_key(candidate, asset_key=asset_key) == _finding_deduplication_key(item, asset_key=asset_key):
+                    existing = candidate
+                    break
+        elif item.get("title"):
             existing = (
                 db.query(Finding)
                 .filter(
-                    Finding.asset_id == asset.id,
                     Finding.title == item["title"],
                     Finding.port == item["port"],
                     Finding.protocol == item["protocol"],
                     Finding.status == "open",
                 )
+                .order_by(Finding.last_seen.desc())
                 .first()
             )
 

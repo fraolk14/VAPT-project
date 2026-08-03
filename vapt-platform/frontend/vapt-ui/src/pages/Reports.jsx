@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import ReactECharts from "echarts-for-react";
 
 import api from "../api/client";
 import Card from "../components/Card";
@@ -69,6 +70,96 @@ function saveBlobDownload(blob, filename) {
   window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 60000);
 }
 
+function ComplianceDashboardPanel({ dashboard }) {
+  const frameworkEntries = Object.entries(dashboard?.frameworks || {});
+  const chartOption = {
+    backgroundColor: "transparent",
+    tooltip: {
+      trigger: "item",
+      backgroundColor: "rgba(7, 15, 25, 0.96)",
+      borderColor: "rgba(148, 163, 184, 0.18)",
+      textStyle: { color: "#f8fbff" },
+    },
+    legend: {
+      bottom: 0,
+      textStyle: { color: "#d7e3ef" },
+    },
+    series: [
+      {
+        type: "pie",
+        radius: ["48%", "78%"],
+        center: ["50%", "48%"],
+        data: frameworkEntries.map(([name, item]) => ({
+          name,
+          value: item?.covered_hosts || 0,
+          itemStyle: { color: name.includes("NIST") ? "#4fd1c5" : "#8fb8ff" },
+        })),
+        label: { color: "#f8fbff", fontSize: 12 },
+        labelLine: { length: 8, length2: 10 },
+      },
+    ],
+  };
+
+  return (
+    <div className="threat-grid" style={{ marginTop: "12px" }}>
+      <div className="panel panel--embedded">
+        <div className="panel__header">
+          <div>
+            <p className="eyebrow">Compliance posture</p>
+            <h2>Framework coverage</h2>
+          </div>
+        </div>
+        <ReactECharts option={chartOption} style={{ height: 260, width: "100%" }} opts={{ renderer: "svg" }} />
+        <div className="coverage-list">
+          {frameworkEntries.map(([name, item]) => (
+            <div className="coverage-row" key={name}>
+              <span>{name}</span>
+              <strong>{item?.covered_hosts || 0}/{item?.total_hosts || 0} hosts</strong>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="panel panel--embedded">
+        <div className="panel__header">
+          <div>
+            <p className="eyebrow">Host-level view</p>
+            <h2>Control mapping</h2>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table className="table table--dense">
+            <thead>
+              <tr>
+                <th>Host</th>
+                <th>Status</th>
+                <th>NIST</th>
+                <th>ISO</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(dashboard?.hosts || []).map((host) => (
+                <tr key={host.target}>
+                  <td data-label="Host"><strong>{host.target}</strong></td>
+                  <td data-label="Status">{host.status}</td>
+                  <td data-label="NIST">{(host.controls?.nist || []).join(", ") || "—"}</td>
+                  <td data-label="ISO">{(host.controls?.iso || []).join(", ") || "—"}</td>
+                </tr>
+              ))}
+              {!dashboard?.hosts?.length ? (
+                <tr>
+                  <td colSpan="4">
+                    <p className="empty-copy">Compliance posture data will appear here after the selected findings are previewed.</p>
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Reports({ findings, scans, compliance, incidents, alertRules, alertEvents }) {
   const completedScans = scans.filter((scan) => scan.status === "completed").length;
   const openFindings = findings.filter((finding) => finding.status === "open").length;
@@ -96,6 +187,7 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
   const [logoFile, setLogoFile] = useState(null);
   const [branding, setBranding] = useState({ logo_name: null, logo_uploaded: false, updated_at: null });
   const [reportTitle, setReportTitle] = useState("VAPTICOM Security Assessment Report");
+  const complianceDashboard = preview?.compliance_dashboard || null;
 
   useEffect(() => {
     api.get("/reports/summary").then((response) => setSummary(response.data)).catch(() => {});
@@ -311,11 +403,22 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
             <p className="eyebrow">Custom report workspace</p>
             <h2>Build and preview</h2>
           </div>
-          <select className="scan-select" value={reportType} onChange={(event) => setReportType(event.target.value)}>
-            <option value="executive">Executive</option>
-            <option value="technical">Technical</option>
-            <option value="compliance">Compliance</option>
-          </select>
+          <div className="scan-actions" style={{ marginTop: "8px", flexWrap: "wrap" }}>
+            {[
+              { value: "executive", label: "Executive" },
+              { value: "technical", label: "Technical" },
+              { value: "compliance", label: "Compliance" },
+            ].map((mode) => (
+              <button
+                key={mode.value}
+                type="button"
+                className={`scan-action ${reportType === mode.value ? "scan-action--resume" : ""}`}
+                onClick={() => setReportType(mode.value)}
+              >
+                {mode.label}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="threat-grid">
           <div className="panel panel--embedded">
@@ -433,6 +536,7 @@ export default function Reports({ findings, scans, compliance, incidents, alertR
                   ))}
                 </div>
               ) : null}
+              {complianceDashboard ? <ComplianceDashboardPanel dashboard={complianceDashboard} /> : null}
             </div>
             <div className="panel panel--embedded" style={{ minHeight: "720px" }}>
               <div className="panel__header">

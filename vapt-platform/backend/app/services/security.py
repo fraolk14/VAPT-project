@@ -24,6 +24,8 @@ if not _JWT_SECRET:
             "JWT_SECRET must be set when ENV is not 'development'. "
             "Refusing to start with a default signing key."
         )
+if _JWT_SECRET == "development-secret-change-me" and ENV != "development":
+    raise RuntimeError("JWT_SECRET must not use the development default outside local development")
 SECRET_KEY = _JWT_SECRET
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))

@@ -82,10 +82,24 @@ def benchmark_for_os(os_family: str) -> str:
     return OS_BENCHMARKS.get(os_family, "CIS Controls v8")
 
 
-def compliance_tags(*, os_family: str, service: str = "", extra: list[str] | None = None) -> list[str]:
-    tags = ["NIST RA-5", "OWASP ASVS V1", "CIS Controls 7", benchmark_for_os(os_family)]
+def compliance_tags(*, os_family: str, service: str = "", title: str = "", evidence: str = "", extra: list[str] | None = None) -> list[str]:
+    text = " ".join([title, evidence, service]).lower()
+    tags: list[str] = []
+
+    if any(token in text for token in ["tls", "ssl", "cipher", "protocol", "certificate", "deprecated"]):
+        tags.extend(["NIST SC-8", "NIST SC-13", "NIST SC-23", "ISO A.8.24", "ISO A.8.27", "ISO A.8.28"])
+    elif any(token in text for token in ["authentication", "credential", "password", "login", "bypass", "token", "session"]):
+        tags.extend(["NIST AC-2", "NIST AC-3", "NIST IA-2", "ISO A.5.15", "ISO A.5.16", "ISO A.5.17"])
+    elif any(token in text for token in ["xss", "sql", "injection", "cross-site", "deserialization", "command"]):
+        tags.extend(["NIST SI-10", "NIST SI-11", "NIST SC-7", "ISO A.8.15", "ISO A.8.28", "ISO A.8.27"])
+    elif any(token in text for token in ["patch", "outdated", "version", "vulnerable", "cve", "deprecated"]):
+        tags.extend(["NIST SI-2", "NIST RA-5", "NIST CM-6", "ISO A.8.8", "ISO A.8.9", "ISO A.8.19"])
+    elif any(token in text for token in ["port", "service", "exposed", "misconfig", "default", "open"]):
+        tags.extend(["NIST CM-6", "NIST SC-7", "NIST AC-4", "ISO A.8.20", "ISO A.8.21", "ISO A.8.22"])
+    else:
+        tags.extend(["NIST SI-2", "NIST RA-5", "ISO A.8.8", "ISO A.8.9"])
+
     if service in {"apache", "nginx", "iis", "http", "https"}:
-        tags.append("OWASP ASVS V1")
         tags.append("CIS Web Server Benchmark")
     if service in {"postgresql", "mysql", "mssql", "oracle", "redis", "mongodb", "elasticsearch"}:
         tags.append("CIS Database Benchmark")

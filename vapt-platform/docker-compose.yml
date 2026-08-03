@@ -7,6 +7,7 @@ services:
       DATABASE_URL: postgresql://vapt:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-vaptdb}
       REDIS_URL: redis://redis:6379/0
       ELASTICSEARCH_URL: http://elasticsearch:9200
+      JWT_SECRET: ${JWT_SECRET:-development-secret-change-me}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

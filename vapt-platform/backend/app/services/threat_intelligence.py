@@ -17,6 +17,8 @@ from app.models.finding import Finding
 from app.models.operations import MonitoringEvent, SecurityIncident
 from app.models.scan import Scan
 
+from functools import lru_cache
+
 SEVERITY_WEIGHT = {
     "critical": 5,
     "high": 4,
@@ -31,6 +33,28 @@ KEV_SAMPLE = {
     "CVE-2024-3400",
     "CVE-2023-3519",
 }
+
+ALL_COUNTRY_NAMES = [
+    "Afghanistan", "Albania", "Algeria", "Andorra", "Angola", "Antigua and Barbuda", "Argentina", "Armenia", "Australia", "Austria",
+    "Azerbaijan", "Bahamas", "Bahrain", "Bangladesh", "Barbados", "Belarus", "Belgium", "Belize", "Benin", "Bhutan", "Bolivia",
+    "Bosnia and Herzegovina", "Botswana", "Brazil", "Brunei", "Bulgaria", "Burkina Faso", "Burundi", "Cabo Verde", "Cambodia",
+    "Cameroon", "Canada", "Central African Republic", "Chad", "Chile", "China", "Colombia", "Comoros", "Congo", "Costa Rica",
+    "Croatia", "Cuba", "Cyprus", "Czechia", "Denmark", "Djibouti", "Dominica", "Dominican Republic", "Ecuador", "Egypt", "El Salvador",
+    "Equatorial Guinea", "Eritrea", "Estonia", "Eswatini", "Ethiopia", "Fiji", "Finland", "France", "Gabon", "Gambia", "Georgia",
+    "Germany", "Ghana", "Greece", "Grenada", "Guatemala", "Guinea", "Guinea-Bissau", "Guyana", "Haiti", "Honduras", "Hungary",
+    "Iceland", "India", "Indonesia", "Iran", "Iraq", "Ireland", "Israel", "Italy", "Jamaica", "Japan", "Jordan", "Kazakhstan",
+    "Kenya", "Kiribati", "Kosovo", "Kuwait", "Kyrgyzstan", "Laos", "Latvia", "Lebanon", "Lesotho", "Liberia", "Libya", "Liechtenstein",
+    "Lithuania", "Luxembourg", "Madagascar", "Malawi", "Malaysia", "Maldives", "Mali", "Malta", "Marshall Islands", "Mauritania",
+    "Mauritius", "Mexico", "Micronesia", "Moldova", "Monaco", "Mongolia", "Montenegro", "Morocco", "Mozambique", "Myanmar",
+    "Namibia", "Nauru", "Nepal", "Netherlands", "New Zealand", "Nicaragua", "Niger", "Nigeria", "North Korea", "North Macedonia",
+    "Norway", "Oman", "Pakistan", "Palau", "Panama", "Papua New Guinea", "Paraguay", "Peru", "Philippines", "Poland", "Portugal",
+    "Qatar", "Romania", "Russia", "Rwanda", "Saint Kitts and Nevis", "Saint Lucia", "Saint Vincent and the Grenadines", "Samoa",
+    "San Marino", "Sao Tome and Principe", "Saudi Arabia", "Senegal", "Serbia", "Seychelles", "Sierra Leone", "Singapore", "Slovakia",
+    "Slovenia", "Solomon Islands", "Somalia", "South Africa", "South Korea", "South Sudan", "Spain", "Sri Lanka", "Sudan", "Suriname",
+    "Sweden", "Switzerland", "Syria", "Taiwan", "Tajikistan", "Tanzania", "Thailand", "Timor-Leste", "Togo", "Tonga", "Trinidad and Tobago",
+    "Tunisia", "Turkey", "Turkmenistan", "Tuvalu", "Uganda", "Ukraine", "United Arab Emirates", "United Kingdom", "United States", "Uruguay",
+    "Uzbekistan", "Vanuatu", "Vatican City", "Venezuela", "Vietnam", "Yemen", "Zambia", "Zimbabwe",
+]
 
 COUNTRY_RULES = {
     "Russia": ["russia", "moscow", ".ru"],
@@ -69,6 +93,8 @@ COUNTRY_RULES = {
     "Philippines": ["philippines", "manila", ".ph"],
 }
 
+COUNTRY_RULES.update({country: [country.lower()] for country in ALL_COUNTRY_NAMES if country not in COUNTRY_RULES})
+
 COUNTRY_REGIONS = {
     "Russia": "Europe",
     "United States": "North America",
@@ -106,54 +132,7 @@ COUNTRY_REGIONS = {
     "Philippines": "Asia",
 }
 
-GLOBAL_TARGET_COUNTRIES = [
-    "United States",
-    "Germany",
-    "Japan",
-    "United Kingdom",
-    "India",
-    "Brazil",
-    "Canada",
-    "France",
-    "Netherlands",
-    "Australia",
-    "Singapore",
-    "South Korea",
-    "Italy",
-    "Spain",
-    "Sweden",
-    "Poland",
-    "Mexico",
-    "Argentina",
-    "Chile",
-    "South Africa",
-    "Kenya",
-    "Nigeria",
-    "Egypt",
-    "United Arab Emirates",
-    "Saudi Arabia",
-    "Turkey",
-    "Israel",
-    "Indonesia",
-    "Malaysia",
-    "Thailand",
-    "Philippines",
-    "Ethiopia",
-]
-
-SAMPLE_COMPANIES_BY_COUNTRY = {
-    "United States": ["Apex Health Cloud", "Northwind Bank", "Liberty Retail"],
-    "Germany": ["Rhine Industrial Systems", "Berlin CloudWorks"],
-    "Japan": ["Sakura Robotics", "Tokyo FinTech Exchange"],
-    "United Kingdom": ["Albion Insurance", "London SaaS Grid"],
-    "India": ["Bharat Payments", "Mumbai HealthNet"],
-    "Brazil": ["Sao Paulo Retail Group", "Atlas Telecom"],
-    "Canada": ["Maple Energy", "Toronto Data Exchange"],
-    "France": ["Paris Logistics Cloud", "HexaBank"],
-    "Netherlands": ["Amsterdam Hosting Cooperative", "Canal Health Systems"],
-    "Australia": ["Southern Cross Mining", "Sydney EduCloud"],
-    "Ethiopia": ["Addis Digital Services", "Ethio Retail Network"],
-}
+GLOBAL_TARGET_COUNTRIES = ALL_COUNTRY_NAMES
 
 SOURCE_COUNTRY_BY_ATTACK = {
     "SQL Injection": "China",
@@ -506,6 +485,9 @@ def infer_country(value: str | None, fallback: str = "United States") -> str:
     text = _text_blob(value)
     if not text:
         return fallback
+    for country in ALL_COUNTRY_NAMES:
+        if text == country.lower():
+            return country
     for country, markers in COUNTRY_RULES.items():
         if any(marker in text for marker in markers):
             return country
@@ -728,14 +710,65 @@ def _infer_industry(asset: Asset | None, target: str | None, metadata: dict | No
     return "Technology"
 
 
+@lru_cache(maxsize=512)
+def _lookup_company_from_rdap(target_label: str | None) -> str | None:
+    host = _extract_host(target_label)
+    if not host:
+        return None
+    candidate_domains = [host]
+    labels = [label for label in host.split(".") if label and label not in {"www", "api", "cdn", "mail"}]
+    if len(labels) > 1:
+        for index in range(1, len(labels)):
+            candidate_domains.append(".".join(labels[index:]))
+    for domain in dict.fromkeys(candidate_domains):
+        try:
+            response = requests.get(f"https://rdap.org/domain/{domain}", timeout=8)
+            response.raise_for_status()
+        except Exception:
+            continue
+        try:
+            payload = response.json()
+        except ValueError:
+            continue
+        if isinstance(payload, dict):
+            for key in ("name", "handle"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            results = payload.get("results") if isinstance(payload.get("results"), dict) else None
+            companies = results.get("companies") if isinstance(results, dict) else None
+            if isinstance(companies, list):
+                for company_entry in companies:
+                    if not isinstance(company_entry, dict):
+                        continue
+                    if isinstance(company_entry.get("company"), dict):
+                        company_name = company_entry["company"].get("name")
+                        if isinstance(company_name, str) and company_name.strip():
+                            return company_name.strip()
+                    for key in ("name", "company_name", "organization", "organization_name"):
+                        value = company_entry.get(key)
+                        if isinstance(value, str) and value.strip():
+                            return value.strip()
+            for entity in payload.get("entities") or []:
+                if not isinstance(entity, dict):
+                    continue
+                for key in ("name", "handle"):
+                    value = entity.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+    return None
+
+
 def _infer_company_name(target_label: str | None, country: str, index: int = 0) -> str:
     host = _extract_host(target_label)
     if host:
+        company = _lookup_company_from_rdap(host)
+        if company:
+            return company
         parts = [part for part in host.split(".") if part and part not in {"www", "api", "cdn", "mail"}]
         if parts:
             return parts[0].replace("-", " ").replace("_", " ").title()
-    options = SAMPLE_COMPANIES_BY_COUNTRY.get(country) or [f"{country} Critical Infrastructure", f"{country} Financial Services", f"{country} Cloud Tenant"]
-    return options[index % len(options)]
+    return f"{country} Organization"
 
 
 def _build_flow(
@@ -812,6 +845,7 @@ def build_attack_map_data(
                 ti_source="Enriched Findings",
                 references=[ref for ref in build_threat_feed([finding], scan_map)[0]["references"][:3]],
                 target_label=target_label,
+                company_name=_infer_company_name(target_label, target_country, len(flows)),
             )
         )
 
@@ -834,6 +868,7 @@ def build_attack_map_data(
                 ti_source=event.source,
                 references=payload.get("references") or [],
                 target_label=event.target,
+                company_name=_infer_company_name(event.target, target_country, len(flows)),
             )
         )
 
@@ -856,6 +891,7 @@ def build_attack_map_data(
                 ti_source=incident.source,
                 references=metadata.get("references") or [],
                 target_label=incident.target,
+                company_name=_infer_company_name(incident.target, target_country, len(flows)),
             )
         )
 
@@ -877,6 +913,7 @@ def build_attack_map_data(
                 ti_source="abuse.ch",
                 references=[event.get("url")] + list(event.get("references") or []),
                 target_label=event.get("name"),
+                company_name=_infer_company_name(event.get("name"), target_country, len(flows)),
             )
         )
 
@@ -929,7 +966,14 @@ def build_attack_map_data(
             grouped_by_country.setdefault(flow["source_country"], [])
 
     countries: dict[str, dict] = {}
-    for country, country_flows in grouped_by_country.items():
+    country_names = sorted(
+        set(ALL_COUNTRY_NAMES)
+        | set(flow["target_country"] for flow in flows)
+        | set(flow["source_country"] for flow in flows)
+        | set(COUNTRY_REGIONS.keys())
+    )
+    for country in country_names:
+        country_flows = grouped_by_country.get(country, [])
         incoming = [flow for flow in country_flows if flow["target_country"] == country]
         outgoing = [flow for flow in flows if flow["source_country"] == country]
         countries[country] = {

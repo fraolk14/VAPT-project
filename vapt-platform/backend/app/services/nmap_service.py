@@ -1,28 +1,13 @@
-import subprocess
-import uuid
 import re
+import uuid
 
 from sqlalchemy.orm import Session
 
 from app.models.finding import Finding
 from app.models.risk import Risk
 from app.services.cve_lookup import lookup_cve_for_service
+from app.services.nmap import run_nmap
 from app.services.risk_engine import calculate_risk
-
-
-# -------------------------
-# Run Nmap
-# -------------------------
-def run_nmap(target: str) -> str:
-    """
-    Executes an Nmap scan and returns raw output
-    """
-    result = subprocess.run(
-        ["nmap", "-sV", target],
-        capture_output=True,
-        text=True
-    )
-    return result.stdout
 
 
 # -------------------------

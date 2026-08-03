@@ -6,7 +6,12 @@ import re
 import socket
 import ssl
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+try:
+    from datetime import UTC
+except ImportError:  # pragma: no cover
+    UTC = timezone.utc
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -265,7 +270,7 @@ def _base_finding(
         "confidence": 0.9,
         "evidence": evidence,
         "remediation": remediation or hardening_recommendation,
-        "compliance_map": compliance_tags(os_family=os_family, service=service),
+        "compliance_map": compliance_tags(os_family=os_family, service=service, title=title, evidence=evidence),
         "metadata": merged_metadata,
     }
 

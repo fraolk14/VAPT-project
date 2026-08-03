@@ -241,6 +241,110 @@ def _scope_targets(items: list[dict]) -> list[str]:
     return ordered
 
 
+def _control_mappings_for_finding(finding: Finding) -> dict[str, list[str]]:
+    title = (finding.title or "").lower()
+    evidence = (finding.evidence or "").lower()
+    text = f"{title} {evidence}".lower()
+    if any(token in text for token in ["tls", "ssl", "cipher", "protocol", "certificate", "deprecated"]):
+        return {
+            "nist": ["SC-8", "SC-13", "SC-23"],
+            "iso": ["A.8.24", "A.8.27", "A.8.28"],
+        }
+    if any(token in text for token in ["authentication", "credential", "password", "login", "bypass", "token", "session"]):
+        return {
+            "nist": ["AC-2", "AC-3", "IA-2"],
+            "iso": ["A.5.15", "A.5.16", "A.5.17"],
+        }
+    if any(token in text for token in ["xss", "sql", "injection", "cross-site", "deserialization", "command"]):
+        return {
+            "nist": ["SI-10", "SI-11", "SC-7"],
+            "iso": ["A.8.15", "A.8.28", "A.8.27"],
+        }
+    if any(token in text for token in ["patch", "outdated", "version", "vulnerable", "cve", "deprecated"]):
+        return {
+            "nist": ["SI-2", "RA-5", "CM-6"],
+            "iso": ["A.8.8", "A.8.9", "A.8.19"],
+        }
+    if any(token in text for token in ["port", "service", "exposed", "misconfig", "default", "open"]):
+        return {
+            "nist": ["CM-6", "SC-7", "AC-4"],
+            "iso": ["A.8.20", "A.8.21", "A.8.22"],
+        }
+    return {
+        "nist": ["SI-2", "RA-5"],
+        "iso": ["A.8.8", "A.8.9"],
+    }
+
+
+def _unique_controls(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            ordered.append(value)
+    return ordered
+
+
+def build_compliance_dashboard(findings: Iterable[Finding], *, selected_targets: list[str] | None = None) -> dict:
+    filtered_findings = filter_findings(findings, selected_targets)
+    grouped: dict[str, list[Finding]] = defaultdict(list)
+    for finding in filtered_findings:
+        target = _finding_target(finding)
+        grouped[target].append(finding)
+
+    hosts = []
+    aggregated_nist: list[str] = []
+    aggregated_iso: list[str] = []
+    for target in sorted(grouped):
+        entries = grouped[target]
+        host_nist: list[str] = []
+        host_iso: list[str] = []
+        for entry in entries:
+            mapping = _control_mappings_for_finding(entry)
+            host_nist.extend(mapping.get("nist") or [])
+            host_iso.extend(mapping.get("iso") or [])
+        host_nist = _unique_controls(host_nist)
+        host_iso = _unique_controls(host_iso)
+        aggregated_nist.extend(host_nist)
+        aggregated_iso.extend(host_iso)
+        hosts.append(
+            {
+                "target": target,
+                "status": "Non-compliant" if entries else "Compliant",
+                "finding_count": len(entries),
+                "open_findings": sum(1 for entry in entries if (entry.status or "open").lower() == "open"),
+                "highest_severity": max((entry.severity or "info" for entry in entries), key=_severity_rank, default="info"),
+                "controls": {"nist": host_nist, "iso": host_iso},
+            }
+        )
+
+    compliant_hosts = sum(1 for host in hosts if host["status"] == "Compliant")
+    non_compliant_hosts = len(hosts) - compliant_hosts
+    frameworks = {
+        "NIST SP 800-53 Rev. 5": {
+            "controls": _unique_controls(aggregated_nist),
+            "covered_hosts": sum(1 for host in hosts if host["controls"]["nist"]),
+            "total_hosts": len(hosts),
+        },
+        "ISO/IEC 27001:2022 Annex A": {
+            "controls": _unique_controls(aggregated_iso),
+            "covered_hosts": sum(1 for host in hosts if host["controls"]["iso"]),
+            "total_hosts": len(hosts),
+        },
+    }
+    return {
+        "summary": {
+            "total_hosts": len(hosts),
+            "compliant_hosts": compliant_hosts,
+            "non_compliant_hosts": non_compliant_hosts,
+            "open_findings": sum(host["open_findings"] for host in hosts),
+        },
+        "frameworks": frameworks,
+        "hosts": hosts,
+    }
+
+
 def _styles():
     styles = getSampleStyleSheet()
     return {
@@ -701,6 +805,7 @@ def build_report_preview(findings: Iterable[Finding], *, mode: str = "executive"
         grouped_by_asset[item.get("target") or "Unknown target"].append(item)
     branding = load_report_branding()
     executive_summary = _build_executive_summary(serialized, summary)
+    compliance_dashboard = build_compliance_dashboard(filtered, selected_targets=selected_targets)
     return {
         "mode": (mode or "executive").lower(),
         "report_title": report_title or f"{branding['company_name']} Security Assessment Report",
@@ -721,6 +826,7 @@ def build_report_preview(findings: Iterable[Finding], *, mode: str = "executive"
         "top_findings": serialized[:10],
         "executive_summary": executive_summary,
         "recommendations": executive_summary["recommendations"],
+        "compliance_dashboard": compliance_dashboard,
     }
 
 
@@ -756,6 +862,7 @@ def export_findings_docx(
     )
     summary = summarize_findings(filtered_findings)
     executive_summary = _build_executive_summary(serialized_findings, summary)
+    compliance_dashboard = build_compliance_dashboard(filtered_findings, selected_targets=selected_targets)
     branding = load_report_branding()
     header_name = company_name or branding["company_name"]
     title = report_title or f"{header_name} Security Assessment Report"
@@ -899,6 +1006,25 @@ def export_findings_docx(
         for item in entries[:3]:
             document.add_paragraph(f"• {item.get('title')} — {item.get('severity') or 'info'}")
 
+    document.add_heading("8.1 Compliance posture", level=3)
+    if compliance_dashboard["hosts"]:
+        _add_docx_table(
+            document,
+            [["Host", "Status", "Open findings", "NIST controls", "ISO controls"]]
+            + [
+                [
+                    host["target"],
+                    host["status"],
+                    str(host["open_findings"]),
+                    ", ".join(host["controls"]["nist"]),
+                    ", ".join(host["controls"]["iso"]),
+                ]
+                for host in compliance_dashboard["hosts"]
+            ],
+        )
+    else:
+        document.add_paragraph("No host-level compliance posture information was available for the selected scope.")
+
     document.add_heading("9. Compliance impact and re-test guidance", level=2)
     compliance_counts = Counter(tag for item in serialized_findings for tag in (item.get("compliance_map") or []))
     if compliance_counts:
@@ -940,6 +1066,7 @@ def export_findings_pdf(
     )
     summary = summarize_findings(filtered_findings)
     executive_summary = _build_executive_summary(serialized_findings, summary)
+    compliance_dashboard = build_compliance_dashboard(filtered_findings, selected_targets=selected_targets)
     styles = _styles()
     buffer = io.BytesIO()
     branding = load_report_branding()
@@ -1166,6 +1293,22 @@ def export_findings_pdf(
 
         story.append(PageBreak())
 
+    story.append(Paragraph("8.1 Compliance posture", styles["section"]))
+    if compliance_dashboard["hosts"]:
+        rows = [["Host", "Status", "Open findings", "NIST controls", "ISO controls"]]
+        for host in compliance_dashboard["hosts"]:
+            rows.append([
+                host["target"],
+                host["status"],
+                str(host["open_findings"]),
+                ", ".join(host["controls"]["nist"]),
+                ", ".join(host["controls"]["iso"]),
+            ])
+        story.append(_table(rows, [1.2 * inch, 0.85 * inch, 0.8 * inch, 1.4 * inch, 1.4 * inch]))
+    else:
+        story.append(Paragraph("No host-level compliance posture information was available for the selected scope.", styles["body"]))
+
+    story.append(Spacer(1, 8))
     story.append(Paragraph("9. Compliance impact and re-test guidance", styles["title"]))
     compliance_counts = Counter(tag for item in serialized_findings for tag in (item.get("compliance_map") or []))
     if compliance_counts:

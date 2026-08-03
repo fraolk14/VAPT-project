@@ -5,7 +5,12 @@ import io
 import json
 import os
 import re
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+try:
+    from datetime import UTC
+except ImportError:  # pragma: no cover
+    UTC = timezone.utc
 from typing import Any
 
 import requests
