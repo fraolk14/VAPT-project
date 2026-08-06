@@ -1,20 +1,30 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { geoCentroid, geoInterpolate, geoOrthographic, geoPath } from "d3-geo";
+import Globe from "react-globe.gl";
 import { feature } from "topojson-client";
 import worldAtlas from "world-atlas/countries-110m.json";
 
 import api from "../api/client";
 import Card from "../components/Card";
 
-const DEFAULT_WIDTH = 980;
-const DEFAULT_HEIGHT = 520;
 const worldFeatures = feature(worldAtlas, worldAtlas.objects.countries).features;
 
-function severityClass(severity) {
-  if (severity === "critical" || severity === "high") return "critical";
-  if (severity === "medium") return "medium";
-  if (severity === "low") return "low";
-  return "info";
+// Quick centroid lookup for all countries using topojson features
+function geoCentroid(feature) {
+  let cx = 0;
+  let cy = 0;
+  let len = 0;
+  if (!feature.geometry) return [0, 0];
+  const processPolygon = (polygon) => {
+    polygon.forEach(ring => {
+      ring.forEach(pt => { cx += pt[0]; cy += pt[1]; len++; });
+    });
+  }
+  if (feature.geometry.type === 'Polygon') {
+    processPolygon(feature.geometry.coordinates);
+  } else if (feature.geometry.type === 'MultiPolygon') {
+    feature.geometry.coordinates.forEach(processPolygon);
+  }
+  return len ? [cx/len, cy/len] : [0,0];
 }
 
 function buildCountryLookup() {
@@ -39,18 +49,11 @@ function backendCountryName(name) {
   return name;
 }
 
-function globeArcPath(projection, fromLonLat, toLonLat) {
-  if (!projection || !fromLonLat || !toLonLat) return "";
-  const interpolate = geoInterpolate(fromLonLat, toLonLat);
-  const points = [];
-  for (let step = 0; step <= 1.00001; step += 1 / 42) {
-    const value = interpolate(step);
-    const projected = projection(value);
-    if (!projected) continue;
-    points.push(projected);
-  }
-  if (points.length < 2) return "";
-  return points.reduce((path, [x, y], index) => (index === 0 ? `M ${x} ${y}` : `${path} L ${x} ${y}`), "");
+function severityClass(severity) {
+  if (severity === "critical" || severity === "high") return "critical";
+  if (severity === "medium") return "medium";
+  if (severity === "low") return "low";
+  return "info";
 }
 
 function parseFlowTime(value) {
@@ -76,18 +79,10 @@ export default function GlobalAttackMap() {
   const [windowKey, setWindowKey] = useState("24h");
   const [selectedCountry, setSelectedCountry] = useState("");
   const [detailOpen, setDetailOpen] = useState(false);
-  const [activeFlowIndex, setActiveFlowIndex] = useState(0);
-  const [rotation, setRotation] = useState([-18, -14]);
-  const [zoom, setZoom] = useState(1.18);
-  const [autoRotate, setAutoRotate] = useState(true);
   const [sourceFilter, setSourceFilter] = useState("");
   const [destinationFilter, setDestinationFilter] = useState("");
-  const [mapSize, setMapSize] = useState({ width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
-  const mapShellRef = useRef(null);
-  const dragStateRef = useRef(null);
-  const movedRef = useRef(false);
-  const pointerIdRef = useRef(null);
-  const pointerElementRef = useRef(null);
+
+  const globeRef = useRef();
 
   useEffect(() => {
     let ignore = false;
@@ -118,19 +113,11 @@ export default function GlobalAttackMap() {
   }, []);
 
   useEffect(() => {
-    if (!mapShellRef.current) return undefined;
-    if (typeof ResizeObserver === "undefined") return undefined;
-    const element = mapShellRef.current;
-    const ro = new ResizeObserver((entries) => {
-      const rect = entries?.[0]?.contentRect;
-      if (!rect) return;
-      const width = Math.max(540, Math.floor(rect.width));
-      const height = Math.max(420, Math.floor(rect.height));
-      setMapSize((current) => (current.width === width && current.height === height ? current : { width, height }));
-    });
-    ro.observe(element);
-    return () => ro.disconnect();
-  }, []);
+      if (globeRef.current) {
+          globeRef.current.controls().autoRotate = true;
+          globeRef.current.controls().autoRotateSpeed = 1.2;
+      }
+  }, [state.status])
 
   const flows = state.data?.flows || [];
 
@@ -145,21 +132,6 @@ export default function GlobalAttackMap() {
     return Array.from(unique).sort((a, b) => a.localeCompare(b));
   }, [state.data, flows]);
 
-  useEffect(() => {
-    if (!flows.length) return undefined;
-    const interval = window.setInterval(() => {
-      setActiveFlowIndex((current) => (current + 1) % flows.length);
-    }, 2200);
-    return () => window.clearInterval(interval);
-  }, [flows]);
-
-  useEffect(() => {
-    if (!autoRotate) return undefined;
-    const interval = window.setInterval(() => {
-      setRotation((current) => [((current[0] || 0) + 0.35) % 360, current[1]]);
-    }, 70);
-    return () => window.clearInterval(interval);
-  }, [autoRotate]);
 
   const leaderboard = useMemo(() => {
     if (!state.data) return [];
@@ -198,77 +170,28 @@ export default function GlobalAttackMap() {
       .map(([attack_type, attacks]) => ({ attack_type, attacks }));
   }, [filteredFlows, sourceFilter, destinationFilter]);
 
-  const projection = useMemo(
-    () =>
-      geoOrthographic()
-        .scale((mapSize.width / 2.35) * zoom)
-        .translate([mapSize.width / 2, mapSize.height / 2])
-        .rotate([-(rotation[0] || 0), rotation[1] || -14, 0])
-        .clipAngle(90)
-        .precision(0.5),
-    [rotation, zoom, mapSize]
-  );
+  // Construct links for react-globe.gl based on the filtered flows
+  const globeLinks = useMemo(() => {
+    return filteredFlows.map(flow => {
+       const sourceCoords = countryLookup[normalizeCountryName(flow.source_country)]?.centroid;
+       const targetCoords = countryLookup[normalizeCountryName(flow.target_country)]?.centroid;
+       if (!sourceCoords || !targetCoords) return null;
 
-  const pathGenerator = useMemo(() => geoPath(projection), [projection]);
+       let color = "rgba(54, 174, 255, 0.8)"; // Default low/info
+       if (flow.severity === "critical" || flow.severity === "high") color = "rgba(255, 76, 76, 0.9)";
+       else if (flow.severity === "medium") color = "rgba(255, 170, 0, 0.9)";
 
-  const renderedFlows = useMemo(
-    () =>
-      filteredFlows
-        .map((flow, index) => {
-          const sourceCoords = countryLookup[normalizeCountryName(flow.source_country)]?.centroid;
-          const targetCoords = countryLookup[normalizeCountryName(flow.target_country)]?.centroid;
-          if (!sourceCoords || !targetCoords) return null;
-          const arc = globeArcPath(projection, sourceCoords, targetCoords);
-          const source = projection(sourceCoords);
-          const target = projection(targetCoords);
-          if (!source || !target || !arc) return null;
-          return { ...flow, arc, sourcePoint: source, targetPoint: target, isActive: index === activeFlowIndex };
-        })
-        .filter(Boolean)
-        .slice(0, 220),
-    [filteredFlows, activeFlowIndex, projection]
-  );
+       return {
+           startLat: sourceCoords[1],
+           startLng: sourceCoords[0],
+           endLat: targetCoords[1],
+           endLng: targetCoords[0],
+           color: color,
+           flow: flow
+       };
+    }).filter(Boolean).slice(0, 300); // Limit rendered links
+  }, [filteredFlows]);
 
-  const handlePointerDown = (event) => {
-    movedRef.current = false;
-    pointerIdRef.current = event.pointerId;
-    pointerElementRef.current = event.currentTarget;
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // ignore capture issues
-    }
-    dragStateRef.current = {
-      x: event.clientX,
-      y: event.clientY,
-      rotation,
-    };
-    setAutoRotate(false);
-  };
-
-  const handlePointerMove = (event) => {
-    if (!dragStateRef.current) return;
-    const dx = event.clientX - dragStateRef.current.x;
-    const dy = event.clientY - dragStateRef.current.y;
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) movedRef.current = true;
-    setRotation([
-      dragStateRef.current.rotation[0] + dx * 0.28,
-      Math.max(-60, Math.min(60, dragStateRef.current.rotation[1] + dy * 0.18)),
-    ]);
-  };
-
-  const handlePointerUp = () => {
-    if (pointerIdRef.current !== null) {
-      try {
-        pointerElementRef.current?.releasePointerCapture(pointerIdRef.current);
-      } catch {
-        // ignore
-      }
-    }
-    pointerIdRef.current = null;
-    pointerElementRef.current = null;
-    dragStateRef.current = null;
-  };
 
   const countryDetail = selectedCountry
     ? state.data?.countries?.[selectedCountry] || {
@@ -283,7 +206,7 @@ export default function GlobalAttackMap() {
         latest_flows: [],
       }
     : null;
-  const activeFlow = renderedFlows.find((flow) => flow.isActive) || renderedFlows[0];
+
 
   return (
     <section className="attack-map-workspace">
@@ -306,96 +229,45 @@ export default function GlobalAttackMap() {
               <button type="button" className="scan-action" onClick={() => { setSourceFilter(""); setDestinationFilter(""); }}>
                 Clear filter
               </button>
-              <button type="button" className={`scan-action ${autoRotate ? "scan-action--active" : ""}`} onClick={() => setAutoRotate((current) => !current)}>
-                {autoRotate ? "Pause rotate" : "Auto rotate"}
-              </button>
-              <button type="button" className="scan-action" onClick={() => setZoom((current) => Math.max(0.8, Number((current - 0.1).toFixed(2))))}>Zoom out</button>
-              <button type="button" className="scan-action" onClick={() => setZoom((current) => Math.min(2.2, Number((current + 0.1).toFixed(2))))}>Zoom in</button>
-              <button type="button" className="scan-action" onClick={() => { setRotation([-18, -14]); setAutoRotate(false); }}>Reset view</button>
             </div>
           </div>
-          <div ref={mapShellRef} className="world-map-shell world-map-shell--immersive" onWheel={(event) => {
-            event.preventDefault();
-            setZoom((current) => {
-              const next = event.deltaY > 0 ? current - 0.08 : current + 0.08;
-              return Math.max(0.8, Math.min(2.2, Number(next.toFixed(2))));
-            });
-          }}>
-            <svg
-              className="world-map world-map--immersive"
-              viewBox={`0 0 ${mapSize.width} ${mapSize.height}`}
-              role="img"
-              aria-label="Global live attack globe"
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={handlePointerUp}
-              onPointerLeave={handlePointerUp}
-            >
-              <defs>
-                <radialGradient id="globeGlow" cx="50%" cy="42%" r="64%">
-                  <stop offset="0%" stopColor="rgba(54, 174, 255, 0.18)" />
-                  <stop offset="100%" stopColor="rgba(6, 15, 25, 0)" />
-                </radialGradient>
-              </defs>
-              <circle cx={mapSize.width / 2} cy={mapSize.height / 2} r={Math.min(mapSize.width, mapSize.height) / 2.32} className="world-map__sphere" />
-              <circle cx={mapSize.width / 2} cy={mapSize.height / 2} r={Math.min(mapSize.width, mapSize.height) / 2.29} fill="url(#globeGlow)" />
-              <g className="world-map__countries">
-                {worldFeatures.map((country) => {
-                  const countryName = backendCountryName(country.properties.name);
-                  const detail = state.data?.countries?.[countryName];
-                  const isSelected = selectedCountry === countryName;
-                  const tone = detail?.target_count ? "has-attacks" : "";
-                  return (
-                    <path
-                      key={country.id}
-                      d={pathGenerator(country)}
-                      className={`world-map__country ${tone} ${isSelected ? "is-selected" : ""}`}
-                      onPointerDown={handlePointerDown}
-                      onPointerMove={handlePointerMove}
-                      onPointerUp={handlePointerUp}
-                      onPointerLeave={handlePointerUp}
-                      onClick={() => {
-                        if (movedRef.current) return;
-                        setSelectedCountry(countryName);
-                        setDetailOpen(true);
-                      }}
-                    />
-                  );
-                })}
-              </g>
-              <g className="world-map__flows">
-                {renderedFlows.map((flow, index) => (
-                  <path
-                    key={flow.id}
-                    d={flow.arc}
-                    className={`world-map__flow world-map__flow--${severityClass(flow.severity)} ${flow.isActive ? "is-active" : ""}`}
-                    style={{ "--flow-delay": `${index * 42}ms` }}
-                  />
-                ))}
-              </g>
-              <g className="world-map__points">
-                {renderedFlows.flatMap((flow) => [
-                  <circle
-                    key={`${flow.id}-source`}
-                    cx={flow.sourcePoint[0]}
-                    cy={flow.sourcePoint[1]}
-                    r="2.7"
-                    className={`world-map__point world-map__point--source ${flow.isActive ? "is-active" : ""}`}
-                  />,
-                  <circle
-                    key={`${flow.id}-target`}
-                    cx={flow.targetPoint[0]}
-                    cy={flow.targetPoint[1]}
-                    r="3.1"
-                    className={`world-map__point world-map__point--target ${flow.isActive ? "is-active" : ""}`}
-                  />,
-                ])}
-              </g>
-            </svg>
-            <div className="world-map__overlay world-map__overlay--left">
+
+          <div className="world-map-shell world-map-shell--immersive" style={{ height: "600px", position: "relative" }}>
+              <Globe
+                  ref={globeRef}
+                  globeImageUrl="//unpkg.com/three-globe/example/img/earth-night.jpg"
+                  arcsData={globeLinks}
+                  arcColor={'color'}
+                  arcDashLength={() => Math.random()}
+                  arcDashGap={() => Math.random()}
+                  arcDashAnimateTime={() => Math.random() * 4000 + 500}
+                  onGlobeClick={({ lat, lng }) => {
+                     // Simple heuristic: if clicking generally close to a country
+                     // Real implementations might do raycasting or click detection on polygons.
+                     // For now, we will just stop rotation when interacted with.
+                     if (globeRef.current) globeRef.current.controls().autoRotate = false;
+                  }}
+                  polygonsData={worldFeatures}
+                  polygonCapColor={() => 'rgba(20, 20, 30, 0.6)'}
+                  polygonSideColor={() => 'rgba(10, 10, 20, 0.4)'}
+                  polygonStrokeColor={() => '#111'}
+                  onPolygonClick={(polygon) => {
+                     const name = backendCountryName(polygon.properties.name);
+                     setSelectedCountry(name);
+                     setDetailOpen(true);
+                     if (globeRef.current) globeRef.current.controls().autoRotate = false;
+                  }}
+                  polygonLabel={({ properties: d }) => `
+                    <div style="background: rgba(0,0,0,0.8); padding: 5px; border-radius: 4px; color: white;">
+                       <b>${d.name}</b>
+                    </div>
+                  `}
+              />
+
+            <div className="world-map__overlay world-map__overlay--left" style={{ position: "absolute", top: 20, left: 20, zIndex: 10 }}>
               <div className="world-map__overlay-card">
                 <span>Visible flows</span>
-                <strong>{renderedFlows.length}</strong>
+                <strong>{globeLinks.length}</strong>
                 <small>{windowKey} view</small>
               </div>
               <div className="world-map__overlay-card">
@@ -404,24 +276,13 @@ export default function GlobalAttackMap() {
                 <small>Continuously refreshed</small>
               </div>
             </div>
-            <div className="world-map__overlay world-map__overlay--right">
-              <div className="world-map__overlay-card">
-                <span>Data sources</span>
-                <strong>{[...new Set(renderedFlows.map((flow) => flow.ti_source || "Internal"))].slice(0, 3).join(", ") || "Internal"}</strong>
-                <small>Hybrid threat intelligence</small>
-              </div>
-              <div className="world-map__overlay-card">
-                <span>Interaction</span>
-                <strong>Drag to rotate</strong>
-                <small>Wheel to zoom, click countries for drill-down</small>
-              </div>
-            </div>
-            <div className="world-map__ticker">
-              {activeFlow ? (
+
+            <div className="world-map__ticker" style={{ position: "absolute", bottom: 20, left: 20, right: 20, zIndex: 10 }}>
+              {globeLinks.length > 0 ? (
                 <div className="world-map__ticker-card">
-                  <span>{activeFlow.attack_type}</span>
-                  <strong>{activeFlow.source_country} to {activeFlow.target_country}</strong>
-                  <small>{activeFlow.company_name ? `${activeFlow.company_name}: ` : ""}{activeFlow.title}</small>
+                  <span>{globeLinks[0].flow.attack_type}</span>
+                  <strong>{globeLinks[0].flow.source_country} to {globeLinks[0].flow.target_country}</strong>
+                  <small>{globeLinks[0].flow.company_name ? `${globeLinks[0].flow.company_name}: ` : ""}{globeLinks[0].flow.title}</small>
                 </div>
               ) : (
                 <div className="world-map__ticker-card">
@@ -501,20 +362,6 @@ export default function GlobalAttackMap() {
             </div>
             <div className="coverage-list">
               {metricRows((state.data?.top_malware_types || []).map((item) => ({ ...item, country: item.malware_type })), "country")}
-            </div>
-          </div>
-          <div className="panel panel--embedded">
-            <div className="panel__header">
-              <div>
-                <p className="eyebrow">Operational summary</p>
-                <h2>Live counter</h2>
-              </div>
-            </div>
-            <div className="coverage-list">
-              <div className="coverage-row"><span>Visible country flows</span><strong>{renderedFlows.length}</strong></div>
-              <div className="coverage-row"><span>Total attack records</span><strong>{state.data?.active_flow_count || 0}</strong></div>
-              <div className="coverage-row"><span>Selected country</span><strong>{selectedCountry || "None"}</strong></div>
-              <div className="coverage-row"><span>Rotation</span><strong>{Math.round(rotation[0])} / {Math.round(rotation[1])}</strong></div>
             </div>
           </div>
         </div>

@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import ReactECharts from "echarts-for-react";
+import { AreaChart, BarChart } from "@tremor/react";
+import { PieChart, barElementClasses } from "@mui/x-charts";
 
 import Card from "../components/Card";
+import GlobalAttackMap from "./GlobalAttackMap";
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
 const STORAGE_KEY = "vapt_dashboard_views_v1";
 
 function severityColor(severity) {
-  if (severity === "critical" || severity === "high") return "var(--severity-critical)";
-  if (severity === "medium") return "var(--severity-medium)";
-  if (severity === "low") return "var(--severity-low)";
-  return "var(--severity-info)";
+  if (severity === "critical" || severity === "high") return "#ff4c4c"; // Tremor Rose/Red
+  if (severity === "medium") return "#ffaa00"; // Tremor Amber/Orange
+  if (severity === "low") return "#4fd1c5"; // Tremor Emerald/Teal
+  return "#8fb8ff"; // Tremor Blue
 }
 
 function severityLabel(severity) {
@@ -81,73 +83,67 @@ function sanitizeViews(views, allowedWidgetIds) {
   return Object.keys(sanitized).length ? sanitized : defaultViews();
 }
 
+
 function TargetSeverityPie({ breakdown }) {
-  const values = SEVERITY_ORDER.map((severity) => ({
-    severity,
-    count: breakdown?.[severity] || 0,
-  }));
-  const total = values.reduce((sum, item) => sum + item.count, 0);
-  let currentAngle = 0;
-  const segments = values.map((item) => {
-    const start = currentAngle;
-    const angle = total ? (item.count / total) * 360 : 0;
-    currentAngle += angle;
-    return `${severityColor(item.severity)} ${start}deg ${currentAngle}deg`;
-  });
+  const data = SEVERITY_ORDER.map((severity, index) => ({
+    id: index,
+    value: breakdown?.[severity] || 0,
+    label: severityLabel(severity),
+    color: severityColor(severity)
+  })).filter(item => item.value > 0);
+
+  if (!data.length) return <p className="empty-copy">No severity data available.</p>;
 
   return (
-    <div className="pie-card">
-      <div
-        className="severity-pie"
-        style={{
-          background: total ? `conic-gradient(${segments.join(", ")})` : "rgba(148, 163, 184, 0.16)",
-        }}
-      >
-        <div className="severity-pie__center">
-          <strong>{total}</strong>
-          <span>targets</span>
-        </div>
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', minHeight: '200px' }}>
+         <PieChart
+          series={[
+            {
+              data: data,
+              innerRadius: 30,
+              outerRadius: 80,
+              paddingAngle: 5,
+              cornerRadius: 5,
+            },
+          ]}
+          width={400}
+          height={200}
+        />
       </div>
-      <div className="chart-legend">
-        {values.map((item) => (
-          <div className="chart-legend__item" key={item.severity}>
-            <span className="chart-legend__swatch" style={{ background: severityColor(item.severity) }} />
-            <span>{severityLabel(item.severity)}: {item.count}</span>
-          </div>
-        ))}
-      </div>
-    </div>
   );
 }
 
 function SeverityBars({ breakdown }) {
-  const values = SEVERITY_ORDER.map((severity) => ({
-    severity,
-    count: breakdown?.[severity] || 0,
+  const data = SEVERITY_ORDER.map((severity) => ({
+    name: severityLabel(severity),
+    value: breakdown?.[severity] || 0,
+    severity: severity
   }));
-  const maxCount = Math.max(1, ...values.map((item) => item.count));
+
   return (
-    <div className="severity-bars">
-      {values.map((item) => (
-        <div className="severity-bars__row" key={item.severity}>
-          <div className="severity-bars__label">
-            <span className={`pill pill--${item.severity}`}>{severityLabel(item.severity)}</span>
-            <strong>{item.count}</strong>
-          </div>
-          <div className="severity-bars__track">
-            <div
-              className="severity-bars__fill"
-              style={{
-                width: `${(item.count / maxCount) * 100}%`,
-                background: severityColor(item.severity),
-              }}
-            />
-          </div>
-        </div>
-      ))}
+    <div style={{ height: '250px' }}>
+      <BarChart
+        data={data}
+        index="name"
+        categories={["value"]}
+        colors={["blue"]} // Tremor requires standard color names, we override with custom colors via CSS or map
+        valueFormatter={(number) => Intl.NumberFormat("us").format(number).toString()}
+        yAxisWidth={48}
+        showAnimation={true}
+        customTooltip={({ payload, active }) => {
+            if (!active || !payload || payload.length === 0) return null;
+            return (
+                <div className="custom-tooltip" style={{ background: 'rgba(0,0,0,0.8)', padding: '10px', borderRadius: '5px', color: 'white'}}>
+                    <p>{payload[0].payload.name}</p>
+                    <p>Count: {payload[0].value}</p>
+                </div>
+            )
+        }}
+      />
     </div>
   );
 }
+
 
 function LinkedCoverageList({ items, emptyMessage }) {
   if (!items.length) return <p className="empty-copy">{emptyMessage}</p>;
@@ -197,6 +193,7 @@ function SignalGraphList({ items, emptyMessage, tone = "var(--severity-info)" })
   );
 }
 
+
 function TimelineGraph({ items, emptyMessage }) {
   if (!items.length) return <p className="empty-copy">{emptyMessage}</p>;
   return (
@@ -215,64 +212,33 @@ function TimelineGraph({ items, emptyMessage }) {
 }
 
 function AnimatedBarChart({ title, subtitle, items, emptyMessage }) {
-  if (!items.length) return <p className="empty-copy">{emptyMessage}</p>;
-  const option = {
-    backgroundColor: "transparent",
-    animationDuration: 900,
-    animationEasing: "cubicOut",
-    grid: { left: 8, right: 8, top: 18, bottom: 8, containLabel: true },
-    tooltip: {
-      trigger: "axis",
-      axisPointer: { type: "shadow" },
-      backgroundColor: "rgba(7, 15, 25, 0.96)",
-      borderColor: "rgba(148, 163, 184, 0.18)",
-      textStyle: { color: "#f8fbff" },
-    },
-    xAxis: {
-      type: "value",
-      axisLabel: { color: "#8ca0b3", fontSize: 11 },
-      splitLine: { lineStyle: { color: "rgba(148, 163, 184, 0.08)" } },
-    },
-    yAxis: {
-      type: "category",
-      data: items.map((item) => item.label),
-      axisLabel: { color: "#d7e3ef", fontSize: 11, width: 120, overflow: "truncate" },
-      axisTick: { show: false },
-      axisLine: { show: false },
-    },
-    series: [
-      {
-        type: "bar",
-        data: items.map((item) => ({
-          value: item.numeric || 0,
-          itemStyle: {
-            color: item.tone || "#8fb8ff",
-            borderRadius: [0, 10, 10, 0],
-          },
-        })),
-        label: {
-          show: true,
-          position: "right",
-          color: "#f8fbff",
-          fontSize: 11,
-          formatter: ({ dataIndex }) => items[dataIndex]?.value || "",
-        },
-        barWidth: 14,
-      },
-    ],
-  };
+    if (!items.length) return <p className="empty-copy">{emptyMessage}</p>;
 
-  return (
-    <div className="chart-block chart-block--echarts">
-      {title || subtitle ? (
-        <div className="chart-block__header">
-          {title ? <h3>{title}</h3> : null}
-          {subtitle ? <p>{subtitle}</p> : null}
+    const data = items.map(item => ({
+        name: item.label,
+        value: item.numeric || 0
+    }));
+
+    return (
+        <div className="chart-block" style={{ height: '260px' }}>
+            {title || subtitle ? (
+                <div className="chart-block__header">
+                    {title ? <h3>{title}</h3> : null}
+                    {subtitle ? <p>{subtitle}</p> : null}
+                </div>
+            ) : null}
+            <BarChart
+                data={data}
+                index="name"
+                categories={["value"]}
+                colors={["teal"]}
+                valueFormatter={(number) => Intl.NumberFormat("us").format(number).toString()}
+                yAxisWidth={120}
+                layout="horizontal"
+                showAnimation={true}
+            />
         </div>
-      ) : null}
-      <ReactECharts option={option} style={{ height: 260, width: "100%" }} opts={{ renderer: "svg" }} />
-    </div>
-  );
+    );
 }
 
 function HorizontalBarGraph({ items, emptyMessage }) {
@@ -304,173 +270,6 @@ function HorizontalBarGraph({ items, emptyMessage }) {
   );
 }
 
-const GLOBAL_POINTS = {
-  "North America": { x: 19, y: 32 },
-  "South America": { x: 28, y: 69 },
-  Europe: { x: 50, y: 24 },
-  Africa: { x: 51, y: 55 },
-  "Middle East": { x: 59, y: 39 },
-  Asia: { x: 73, y: 35 },
-  Oceania: { x: 84, y: 73 },
-};
-
-function inferRegionFromText(value) {
-  const text = String(value || "").toLowerCase();
-  if (!text) return "Europe";
-  if (text.includes("usa") || text.includes("canada") || text.includes("new york") || text.includes("california")) return "North America";
-  if (text.includes("brazil") || text.includes("argentina") || text.includes("colombia") || text.includes("latam")) return "South America";
-  if (text.includes("uk") || text.includes("london") || text.includes("germany") || text.includes("france") || text.includes("europe")) return "Europe";
-  if (text.includes("ethiopia") || text.includes("kenya") || text.includes("nigeria") || text.includes("africa")) return "Africa";
-  if (text.includes("uae") || text.includes("dubai") || text.includes("saudi") || text.includes("middle east")) return "Middle East";
-  if (text.includes("india") || text.includes("singapore") || text.includes("japan") || text.includes("china") || text.includes("asia")) return "Asia";
-  if (text.includes("australia") || text.includes("oceania")) return "Oceania";
-  return "Europe";
-}
-
-function regionForFinding(finding) {
-  return inferRegionFromText(
-    [finding?.asset_name, finding?.asset_identifier, finding?.target, finding?.source, finding?.title].filter(Boolean).join(" ")
-  );
-}
-
-function curvedPath(from, to) {
-  const curveX = (from.x + to.x) / 2;
-  const curveY = Math.min(from.y, to.y) - Math.abs(to.x - from.x) * 0.18 - 6;
-  return `M ${from.x} ${from.y} Q ${curveX} ${curveY} ${to.x} ${to.y}`;
-}
-
-function buildAttackMapItems({ incidents, monitoringEvents, findings }) {
-  const eventItems = (monitoringEvents || []).slice(0, 8).map((event, index) => ({
-    key: `event-${event.id || index}`,
-    label: event?.description || event?.rule_name || "Suspicious activity observed",
-    sourceRegion: inferRegionFromText(event?.source || event?.rule_name || event?.description || `source-${index}`),
-    targetRegion: inferRegionFromText(event?.asset_identifier || event?.asset_name || event?.description || `target-${index}`),
-    severity: String(event?.severity || "medium").toLowerCase(),
-    to: "/scans",
-    type: "Monitoring event",
-  }));
-
-  const incidentItems = (incidents || []).slice(0, 6).map((incident, index) => ({
-    key: `incident-${incident.id || index}`,
-    label: incident?.title || incident?.summary || "Escalated incident",
-    sourceRegion: inferRegionFromText(incident?.title || incident?.summary || incident?.status || `incident-${index}`),
-    targetRegion: inferRegionFromText(incident?.affected_asset || incident?.summary || incident?.title || `incident-target-${index}`),
-    severity: String(incident?.severity || "high").toLowerCase(),
-    to: "/findings",
-    type: "Incident",
-  }));
-
-  const findingItems = (findings || [])
-    .filter((finding) => ["critical", "high"].includes(String(finding?.severity || "").toLowerCase()))
-    .slice(0, 8)
-    .map((finding, index) => ({
-      key: `finding-${finding.id || index}`,
-      label: finding?.title || "High-risk finding",
-      sourceRegion: finding?.source === "zap" ? "North America" : inferRegionFromText(finding?.source),
-      targetRegion: regionForFinding(finding),
-      severity: String(finding?.severity || "high").toLowerCase(),
-      to: "/findings",
-      type: sourceLabel(finding?.source),
-    }));
-
-  return [...eventItems, ...incidentItems, ...findingItems].slice(0, 12);
-}
-
-function GlobalAttackMap({ incidents, monitoringEvents, findings }) {
-  const [activeIndex, setActiveIndex] = useState(0);
-  const items = useMemo(
-    () => buildAttackMapItems({ incidents, monitoringEvents, findings }),
-    [incidents, monitoringEvents, findings]
-  );
-
-  useEffect(() => {
-    if (!items.length) return undefined;
-    const interval = window.setInterval(() => {
-      setActiveIndex((current) => (current + 1) % items.length);
-    }, 2600);
-    return () => window.clearInterval(interval);
-  }, [items]);
-
-  const activeItem = items[activeIndex] || null;
-  const regionCounts = items.reduce((accumulator, item) => {
-    accumulator[item.targetRegion] = (accumulator[item.targetRegion] || 0) + 1;
-    return accumulator;
-  }, {});
-
-  return (
-    <div className="attack-map">
-      <div className="attack-map__visual">
-        <div className="attack-map__frame">
-          <svg className="attack-map__svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-            <path className="attack-map__land" d="M8 28 C14 20, 22 18, 28 20 C30 27, 25 35, 18 37 C12 36, 9 32, 8 28 Z" />
-            <path className="attack-map__land" d="M22 48 C28 44, 34 48, 35 57 C33 68, 28 75, 24 80 C20 74, 19 59, 22 48 Z" />
-            <path className="attack-map__land" d="M41 18 C48 14, 58 15, 64 19 C63 26, 55 31, 48 30 C44 27, 42 23, 41 18 Z" />
-            <path className="attack-map__land" d="M46 37 C51 34, 58 38, 60 47 C56 58, 50 66, 45 71 C42 63, 43 48, 46 37 Z" />
-            <path className="attack-map__land" d="M59 20 C69 15, 82 18, 89 25 C88 35, 78 40, 70 39 C64 35, 60 29, 59 20 Z" />
-            <path className="attack-map__land" d="M77 64 C81 61, 87 64, 90 71 C87 77, 82 80, 77 78 C75 74, 75 68, 77 64 Z" />
-            {items.map((item, index) => {
-              const from = GLOBAL_POINTS[item.sourceRegion];
-              const to = GLOBAL_POINTS[item.targetRegion];
-              if (!from || !to) return null;
-              return (
-                <path
-                  key={item.key}
-                  className={`attack-map__arc ${index === activeIndex ? "is-active" : ""} attack-map__arc--${item.severity}`}
-                  d={curvedPath(from, to)}
-                  style={{ "--attack-delay": `${index * 180}ms` }}
-                />
-              );
-            })}
-            {Object.entries(GLOBAL_POINTS).map(([region, point]) => (
-              <g key={region}>
-                <circle
-                  className={`attack-map__node ${activeItem?.targetRegion === region || activeItem?.sourceRegion === region ? "is-active" : ""}`}
-                  cx={point.x}
-                  cy={point.y}
-                  r="1.8"
-                />
-                <text className="attack-map__label" x={point.x + 1.6} y={point.y - 1.8}>
-                  {region}
-                </text>
-              </g>
-            ))}
-          </svg>
-          <div className="attack-map__ticker">
-            {activeItem ? (
-              <Link className="attack-map__ticker-card" to={activeItem.to}>
-                <span>{activeItem.type}</span>
-                <strong>{activeItem.label}</strong>
-                <small>
-                  {activeItem.sourceRegion} to {activeItem.targetRegion}
-                </small>
-              </Link>
-            ) : (
-              <div className="attack-map__ticker-card">
-                <span>Live activity</span>
-                <strong>No active attack telemetry yet</strong>
-                <small>New monitoring events and findings will appear here automatically.</small>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-      <div className="attack-map__sidebar">
-        <h3>Regional pressure</h3>
-        <div className="attack-map__regions">
-          {Object.entries(regionCounts)
-            .sort((a, b) => b[1] - a[1])
-            .map(([region, count]) => (
-              <div className="attack-map__region-row" key={region}>
-                <span>{region}</span>
-                <strong>{count}</strong>
-              </div>
-            ))}
-          {!Object.keys(regionCounts).length ? <p className="empty-copy">No active regional activity to render.</p> : null}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function AnimatedRiskWidget({ riskScore, openFindings, activeScans }) {
   const [animatedScore, setAnimatedScore] = useState(0);
@@ -602,7 +401,11 @@ export default function Dashboard({
     "vuln-trends": { title: "Vulnerability Trends Over Time", render: () => <TargetSeverityPie breakdown={summary.target_severity_breakdown} /> },
     "global-attack-map": {
       title: "Global Live Attack Map",
-      render: () => <GlobalAttackMap incidents={incidents} monitoringEvents={monitoringEvents} findings={findings} />,
+      render: () => (
+          <div style={{ height: '600px', width: '100%', overflow: 'hidden' }}>
+              <GlobalAttackMap />
+          </div>
+      ),
     },
     "owasp-top10": {
       title: "OWASP Top 10",
