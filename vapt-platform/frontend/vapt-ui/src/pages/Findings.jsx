@@ -59,7 +59,7 @@ const IS_NETWORK_SOURCE = (src) => TAB_SOURCE_MAP.openvas.includes(src) || (src 
 
 function targetLabel(finding) {
   const src = finding.source;
-  if (IS_ENDPOINT_SOURCE(src)) return finding.finding_metadata?.hostname || finding.target || "Endpoint Host";
+  if (IS_ENDPOINT_SOURCE(src)) return finding.finding_metadata?.ip_address || finding.target || finding.finding_metadata?.hostname || "n/a";
   if (IS_WEB_SOURCE(src)) return finding.finding_metadata?.url || finding.finding_metadata?.host || finding.target || "n/a";
   if (IS_NETWORK_SOURCE(src)) return finding.finding_metadata?.host || finding.target || (finding.port ? `${finding.port}/${finding.protocol}` : "n/a");
   return finding.finding_metadata?.file || finding.target || "n/a";
@@ -68,9 +68,11 @@ function targetLabel(finding) {
 function targetSummary(finding) {
   const src = finding.source;
   if (IS_ENDPOINT_SOURCE(src)) {
+    const ip = finding.finding_metadata?.ip_address || finding.target || "n/a";
+    const host = finding.finding_metadata?.hostname;
     return {
-      primary: finding.finding_metadata?.hostname || finding.target || "Endpoint Host",
-      secondary: finding.finding_metadata?.ip_address ? `VAP Agent (${finding.finding_metadata.ip_address})` : "VAP Agent Device",
+      primary: ip,
+      secondary: host ? `Host: ${host}` : "VAP Agent Device",
     };
   }
 
