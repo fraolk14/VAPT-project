@@ -66,7 +66,7 @@ export default function Admin({ user, integrations, threatIntel, authStatus, aut
     configured: false,
     host: "mailpit",
     port: 1025,
-    from_address: "noreply@vapticom.local",
+    from_address: "noreply@vap.local",
     tls: false,
   });
   const [feedback, setFeedback] = useState("");

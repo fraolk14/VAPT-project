@@ -156,7 +156,7 @@ def login(
         verify_captcha_token(captcha_token)
     else:
         verify_captcha_token(None)
-    user = db.query(User).filter(User.username == username).first()
+    user = db.query(User).filter((User.username == username) | (User.email == username)).first()
     if user:
         ensure_account_not_locked(user)
 

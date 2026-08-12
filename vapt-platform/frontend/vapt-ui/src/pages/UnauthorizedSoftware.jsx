@@ -2,76 +2,99 @@ import { useEffect, useMemo, useState } from "react";
 
 import api from "../api/client";
 
-function severityWeight(severity) {
-  return { critical: 4, high: 3, medium: 2, low: 1, info: 0 }[severity] || 0;
-}
-
 export default function UnauthorizedSoftware({ summary, assets = [] }) {
+  const [softwareList, setSoftwareList] = useState([]);
+  const [whitelist, setWhitelist] = useState([]);
   const [riskFilter, setRiskFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
   const [query, setQuery] = useState("");
-  const [selectedKey, setSelectedKey] = useState("");
-  const [inventory, setInventory] = useState([]);
-  const [ingestForm, setIngestForm] = useState({
-    endpoint_name: "",
-    hostname: "",
-    ip_address: "",
-    os_name: "",
-    installed_apps: "",
-    approved_baseline: "",
-  });
+  const [ipFilter, setIpFilter] = useState("");
+  const [selectedId, setSelectedId] = useState(null);
+  
+  // Whitelist form state
+  const [whitelistForm, setWhitelistForm] = useState({ name: "", vendor: "", reason: "Approved by Security Team" });
+  
+  // Discovery trigger state
+  const [discoverTarget, setDiscoverTarget] = useState("");
+  const [isDiscovering, setIsDiscovering] = useState(false);
   const [feedback, setFeedback] = useState("");
 
+  const fetchSoftwareData = () => {
+    api.get("/software")
+      .then((res) => setSoftwareList(res.data))
+      .catch(() => setSoftwareList([]));
+
+    api.get("/software/whitelist")
+      .then((res) => setWhitelist(res.data))
+      .catch(() => setWhitelist([]));
+  };
+
   useEffect(() => {
-    api.get("/posture/unauthorized-software/inventory").then((response) => setInventory(response.data)).catch(() => {});
+    fetchSoftwareData();
   }, []);
 
   const rows = useMemo(() => {
-    return [...(summary?.detected_apps || [])]
-      .filter((item) => riskFilter === "all" || item.severity === riskFilter)
-      .filter((item) => `${item.label} ${item.value} ${item.metadata?.hostname || ""} ${item.metadata?.reason || ""}`.toLowerCase().includes(query.trim().toLowerCase()))
-      .sort((a, b) => severityWeight(b.severity) - severityWeight(a.severity));
-  }, [summary?.detected_apps, riskFilter, query]);
+    return softwareList
+      .filter((item) => riskFilter === "all" || item.status.toLowerCase() === riskFilter.toLowerCase())
+      .filter((item) => statusFilter === "all" || item.status === statusFilter)
+      .filter((item) => {
+        const itemIp = item.ip_address || item.metadata?.ip_address || "";
+        return !ipFilter.trim() || itemIp.includes(ipFilter.trim());
+      })
+      .filter((item) => `${item.name} ${item.vendor || ""} ${item.category || ""} ${item.version || ""}`.toLowerCase().includes(query.trim().toLowerCase()))
+      .sort((a, b) => b.risk_score - a.risk_score);
+  }, [softwareList, riskFilter, statusFilter, ipFilter, query]);
 
-  const selected = useMemo(() => rows.find((item) => `${item.label}-${item.value}` === selectedKey) || rows[0] || null, [rows, selectedKey]);
-  const recommendedActions = useMemo(() => {
-    if (!selected) return [];
-    const actions = [];
-    if (severityWeight(selected.severity) >= 3) actions.push("Contain the endpoint or remove the software before returning the host to normal operations.");
-    if (selected.metadata?.baseline_status === "not_in_baseline" || selected.metadata?.baseline_status === "not_approved") {
-      actions.push("Compare the detected software against the approved baseline and document an explicit approval or removal decision.");
-    }
-    if (selected.metadata?.source === "manual-agent-import") {
-      actions.push("Re-run endpoint inventory after remediation to confirm the application is no longer present.");
-    }
-    actions.push(selected.metadata?.recommended_action || "Validate ownership and close the software drift through approval or removal.");
-    return [...new Set(actions)];
-  }, [selected]);
+  const selected = useMemo(() => softwareList.find((item) => item.id === selectedId) || rows[0] || null, [softwareList, selectedId, rows]);
 
-  const relatedAsset = useMemo(() => {
-    if (!selected) return null;
-    const needle = `${selected.value} ${selected.metadata?.hostname || ""}`.toLowerCase();
-    return (assets || []).find((asset) => `${asset.asset_name} ${asset.hostname || ""} ${asset.ip_address || ""}`.toLowerCase().includes(needle) || needle.includes(`${asset.hostname || asset.ip_address || ""}`.toLowerCase())) || null;
-  }, [assets, selected]);
-
-  const ingestInventory = async (event) => {
+  const handleAddWhitelist = async (event) => {
     event.preventDefault();
+    if (!whitelistForm.name.trim()) return;
     try {
-      const response = await api.post("/posture/unauthorized-software/ingest", {
-        endpoint_name: ingestForm.endpoint_name,
-        hostname: ingestForm.hostname || null,
-        ip_address: ingestForm.ip_address || null,
-        os_name: ingestForm.os_name || null,
-        source: "manual-agent-import",
-        installed_apps: ingestForm.installed_apps.split("\n").map((item) => item.trim()).filter(Boolean),
-        approved_baseline: ingestForm.approved_baseline.split("\n").map((item) => item.trim()).filter(Boolean),
+      await api.post("/software/whitelist", {
+        name: whitelistForm.name.trim(),
+        vendor: whitelistForm.vendor.trim() || null,
+        reason: whitelistForm.reason.trim() || "Approved by Security Team",
       });
-      setInventory((current) => [response.data, ...current]);
-      setIngestForm({ endpoint_name: "", hostname: "", ip_address: "", os_name: "", installed_apps: "", approved_baseline: "" });
-      setFeedback(`Inventory analyzed for ${response.data.endpoint_name}.`);
+      setWhitelistForm({ name: "", vendor: "", reason: "Approved by Security Team" });
+      setFeedback(`Added '${whitelistForm.name}' to approved whitelist.`);
+      fetchSoftwareData();
     } catch (error) {
-      setFeedback(error?.response?.data?.detail || "Unable to ingest endpoint inventory right now.");
+      setFeedback(error?.response?.data?.detail || "Failed to whitelist software.");
     }
   };
+
+  const handleRemoveWhitelist = async (id, name) => {
+    try {
+      await api.delete(`/software/whitelist/${id}`);
+      setFeedback(`Removed '${name}' from whitelist.`);
+      fetchSoftwareData();
+    } catch (error) {
+      setFeedback("Failed to remove whitelist entry.");
+    }
+  };
+
+  const handleRunDiscovery = async (event) => {
+    event.preventDefault();
+    if (!discoverTarget.trim()) return;
+    setIsDiscovering(true);
+    setFeedback(`Running WMI / Nmap -sV discovery on ${discoverTarget}...`);
+    try {
+      const res = await api.post("/software/discover", { target: discoverTarget.trim() });
+      setFeedback(`Discovery complete for ${discoverTarget}. Found ${res.data.length} software entries.`);
+      setIsDiscovering(false);
+      setIpFilter(discoverTarget.trim());
+      setDiscoverTarget("");
+      fetchSoftwareData();
+    } catch (error) {
+      setIsDiscovering(false);
+      setFeedback(error?.response?.data?.detail || "Discovery failed for target host.");
+    }
+  };
+
+  const approvedCount = softwareList.filter((s) => s.status === "APPROVED").length;
+  const vulnerableCount = softwareList.filter((s) => s.status === "VULNERABLE").length;
+  const unauthorizedCount = softwareList.filter((s) => s.status === "UNAUTHORIZED").length;
 
   return (
     <section className="section-grid">
@@ -83,27 +106,51 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
           </div>
         </div>
         <div className="metrics-grid">
-          <article className="metric-card"><span>Managed endpoints</span><strong>{summary?.managed_endpoints || 0}</strong><small>Endpoints with inventory context</small></article>
-          <article className="metric-card"><span>Unauthorized apps</span><strong>{summary?.unauthorized_apps || 0}</strong><small>Software outside the approved baseline</small></article>
-          <article className="metric-card"><span>High-risk tools</span><strong>{summary?.high_risk_apps || 0}</strong><small>Remote access or offensive tooling</small></article>
-          <article className="metric-card"><span>Baseline coverage</span><strong>{summary?.baseline_coverage || 0}</strong><small>Endpoints with approved software lists</small></article>
+          <article className="metric-card"><span>Total Discovered</span><strong>{softwareList.length}</strong><small>Discovered in PostgreSQL</small></article>
+          <article className="metric-card"><span>Approved Software</span><strong>{approvedCount}</strong><small>Whitelisted by policy</small></article>
+          <article className="metric-card"><span>Vulnerable Apps</span><strong>{vulnerableCount}</strong><small>Known CVE vulnerabilities</small></article>
+          <article className="metric-card"><span>Unauthorized Drift</span><strong>{unauthorizedCount}</strong><small>Requires review / containment</small></article>
         </div>
       </div>
 
+      {/* Discovery Subprocess Section */}
       <div className="panel">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Detection queue</p>
-            <h2>Detected software</h2>
+            <p className="eyebrow">Target IP Discovery</p>
+            <h2>Run Endpoint Software Discovery (WMI / Nmap -sV / Lynis)</h2>
+          </div>
+        </div>
+        <form className="form-grid" onSubmit={handleRunDiscovery}>
+          <input
+            className="scan-input"
+            placeholder="Target IP Address or Hostname (e.g. 192.168.1.50, 127.0.0.1)"
+            value={discoverTarget}
+            onChange={(e) => setDiscoverTarget(e.target.value)}
+            required
+          />
+          <button type="submit" className="scan-action scan-action--resume" disabled={isDiscovering}>
+            {isDiscovering ? "Discovering Target..." : "Run Discovery by IP"}
+          </button>
+        </form>
+        {feedback ? <p className="scan-feedback scan-feedback--success">{feedback}</p> : null}
+      </div>
+
+      {/* Software Inventory Table */}
+      <div className="panel">
+        <div className="panel__header">
+          <div>
+            <p className="eyebrow">Discovered software inventory</p>
+            <h2>Discovered Software ({rows.length})</h2>
           </div>
           <div className="table-controls">
-            <input className="scan-input" placeholder="Search application, endpoint, reason" value={query} onChange={(event) => setQuery(event.target.value)} />
-            <select className="scan-select" value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)}>
-              <option value="all">All risk levels</option>
-              <option value="critical">Critical</option>
-              <option value="high">High</option>
-              <option value="medium">Medium</option>
-              <option value="low">Low</option>
+            <input className="scan-input" placeholder="Filter by target IP (e.g. 192.168.1.50)" value={ipFilter} onChange={(e) => setIpFilter(e.target.value)} />
+            <input className="scan-input" placeholder="Filter by software name, vendor..." value={query} onChange={(e) => setQuery(e.target.value)} />
+            <select className="scan-select" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+              <option value="all">All statuses</option>
+              <option value="UNAUTHORIZED">UNAUTHORIZED</option>
+              <option value="VULNERABLE">VULNERABLE</option>
+              <option value="APPROVED">APPROVED</option>
             </select>
           </div>
         </div>
@@ -111,119 +158,130 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
           <table className="table table--dense">
             <thead>
               <tr>
-                <th>Application</th>
-                <th>Endpoint</th>
-                <th>Severity</th>
-                <th>Baseline</th>
-                <th>Reason</th>
+                <th>Software Name</th>
+                <th>Target IP</th>
                 <th>Source</th>
+                <th>Vendor</th>
+                <th>Category</th>
+                <th>Status</th>
+                <th>Risk Score</th>
+                <th>CVEs</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((item) => (
-                <tr key={`${item.label}-${item.value}`} className={selected?.label === item.label && selected?.value === item.value ? "finding-row--selected" : ""} onClick={() => setSelectedKey(`${item.label}-${item.value}`)} style={{ cursor: "pointer" }}>
-                  <td data-label="Application"><strong>{item.label}</strong></td>
-                  <td data-label="Endpoint">{item.value}</td>
-                  <td data-label="Severity"><span className={`pill pill--${item.severity}`}>{item.severity}</span></td>
-                  <td data-label="Baseline">{item.metadata?.baseline_status || "review_required"}</td>
-                  <td data-label="Reason">{item.metadata?.reason || "Baseline drift or risky software detected."}</td>
-                  <td data-label="Source">{item.metadata?.source || "Asset tag / scan telemetry"}</td>
+              {rows.map((item) => {
+                const targetIp = item.ip_address || item.metadata?.ip_address || "127.0.0.1";
+                const sourceLabel = item.source || item.metadata?.source || "Nmap -sV";
+                return (
+                  <tr
+                    key={item.id}
+                    className={selected?.id === item.id ? "finding-row--selected" : ""}
+                    onClick={() => setSelectedId(item.id)}
+                    style={{ cursor: "pointer" }}
+                  >
+                    <td data-label="Software Name"><strong>{item.name}</strong></td>
+                    <td data-label="Target IP"><code>{targetIp}</code></td>
+                    <td data-label="Source"><span className="pill pill--info">{sourceLabel}</span></td>
+                    <td data-label="Vendor">{item.vendor || "n/a"}</td>
+                    <td data-label="Category">{item.category}</td>
+                    <td data-label="Status">
+                      <span className={`pill pill--${item.status === "APPROVED" ? "low" : item.status === "VULNERABLE" ? "critical" : "high"}`}>
+                        {item.status}
+                      </span>
+                    </td>
+                    <td data-label="Risk Score"><strong>{item.risk_score.toFixed(1)}</strong></td>
+                    <td data-label="CVEs">{item.cves?.length ? item.cves.join(", ") : "None"}</td>
+                  </tr>
+                );
+              })}
+              {!rows.length ? (
+                <tr>
+                  <td colSpan="8">
+                    <p className="empty-copy">No software discovered for specified IP address in PostgreSQL database.</p>
+                  </td>
                 </tr>
-              ))}
-              {!rows.length ? <tr><td colSpan="6"><p className="empty-copy">No unauthorized software matched the current filter.</p></td></tr> : null}
+              ) : null}
             </tbody>
           </table>
         </div>
       </div>
 
+      {/* Selected Software Details & Network Source Mapping */}
       <div className="panel">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Selected application</p>
-            <h2>{selected?.label || "No application selected"}</h2>
+            <p className="eyebrow">Network Source Mapping & Remediation</p>
+            <h2>{selected ? selected.name : "No software selected"}</h2>
           </div>
         </div>
         {selected ? (
           <div className="finding-detail-grid finding-detail-grid--single">
             <article className="panel panel--embedded">
               <div className="coverage-list">
-                <div className="coverage-row"><span>Application</span><strong>{selected.label}</strong></div>
-                <div className="coverage-row"><span>Endpoint</span><strong>{selected.value}</strong></div>
-                <div className="coverage-row"><span>Severity</span><strong>{selected.severity}</strong></div>
-                <div className="coverage-row"><span>Baseline status</span><strong>{selected.metadata?.baseline_status || "review_required"}</strong></div>
-                <div className="coverage-row"><span>Hostname</span><strong>{selected.metadata?.hostname || relatedAsset?.hostname || "n/a"}</strong></div>
-                <div className="coverage-row"><span>Owner</span><strong>{selected.metadata?.owner || relatedAsset?.owner || "Unassigned"}</strong></div>
-                <div className="coverage-row"><span>Reason</span><strong>{selected.metadata?.reason || "Baseline drift detected"}</strong></div>
-              </div>
-            </article>
-            <article className="panel panel--embedded">
-              <div className="coverage-list">
-                <div className="coverage-row"><span>Endpoint asset</span><strong>{relatedAsset?.asset_name || "No matching asset"}</strong></div>
-                <div className="coverage-row"><span>Asset address</span><strong>{relatedAsset?.hostname || relatedAsset?.ip_address || "n/a"}</strong></div>
-                <div className="coverage-row"><span>Criticality</span><strong>{relatedAsset?.criticality || "n/a"}</strong></div>
-              </div>
-              <p className="eyebrow" style={{ marginTop: "16px" }}>Recommended actions</p>
-              <div className="coverage-list">
-                {recommendedActions.map((action) => (
-                  <div className="coverage-row" key={action}>
-                    <span>{action}</span>
-                    <strong>Action</strong>
-                  </div>
-                ))}
+                <div className="coverage-row"><span>Discovered Target IP</span><code>{selected.ip_address || selected.metadata?.ip_address || "127.0.0.1"}</code></div>
+                <div className="coverage-row"><span>Discovery Network Source</span><strong>{selected.source || selected.metadata?.source || "Nmap -sV Subprocess"}</strong></div>
+                <div className="coverage-row"><span>Endpoint / Hostname</span><strong>{selected.metadata?.hostname || selected.value || "Unassigned / Target Host"}</strong></div>
+                <div className="coverage-row"><span>Software Name</span><strong>{selected.name}</strong></div>
+                <div className="coverage-row"><span>Vendor</span><strong>{selected.vendor || "n/a"}</strong></div>
+                <div className="coverage-row"><span>Category</span><strong>{selected.category}</strong></div>
+                <div className="coverage-row"><span>Governance Status</span><strong>{selected.status}</strong></div>
+                <div className="coverage-row"><span>Calculated Risk Score</span><strong>{selected.risk_score}</strong></div>
+                <div className="coverage-row"><span>Associated CVEs</span><strong>{selected.cves?.length ? selected.cves.join(", ") : "None"}</strong></div>
               </div>
             </article>
           </div>
-        ) : <p className="empty-copy">Select a software finding to review its endpoint context and response action.</p>}
+        ) : (
+          <p className="empty-copy">Select a software entry to view network source mapping.</p>
+        )}
       </div>
 
+      {/* Whitelist Governance Section */}
       <div className="panel">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Agent or manual intake</p>
-            <h2>Submit endpoint inventory</h2>
+            <p className="eyebrow">Approved baseline policy</p>
+            <h2>Manage Approved Whitelist ({whitelist.length})</h2>
           </div>
         </div>
-        <form className="form-grid" onSubmit={ingestInventory}>
-          <input className="scan-input" placeholder="Endpoint name" value={ingestForm.endpoint_name} onChange={(event) => setIngestForm((current) => ({ ...current, endpoint_name: event.target.value }))} required />
-          <input className="scan-input" placeholder="Hostname" value={ingestForm.hostname} onChange={(event) => setIngestForm((current) => ({ ...current, hostname: event.target.value }))} />
-          <input className="scan-input" placeholder="IP address" value={ingestForm.ip_address} onChange={(event) => setIngestForm((current) => ({ ...current, ip_address: event.target.value }))} />
-          <input className="scan-input" placeholder="Operating system" value={ingestForm.os_name} onChange={(event) => setIngestForm((current) => ({ ...current, os_name: event.target.value }))} />
-          <textarea className="scan-input" rows="5" placeholder="Installed applications, one per line" value={ingestForm.installed_apps} onChange={(event) => setIngestForm((current) => ({ ...current, installed_apps: event.target.value }))} required />
-          <textarea className="scan-input" rows="5" placeholder="Approved baseline, one per line" value={ingestForm.approved_baseline} onChange={(event) => setIngestForm((current) => ({ ...current, approved_baseline: event.target.value }))} />
-          <button type="submit" className="scan-action scan-action--resume">Analyze Inventory</button>
+        <form className="form-grid" onSubmit={handleAddWhitelist}>
+          <input className="scan-input" placeholder="Software Name (e.g. Apache HTTP Server)" value={whitelistForm.name} onChange={(e) => setWhitelistForm((prev) => ({ ...prev, name: e.target.value }))} required />
+          <input className="scan-input" placeholder="Vendor (e.g. Apache)" value={whitelistForm.vendor} onChange={(e) => setWhitelistForm((prev) => ({ ...prev, vendor: e.target.value }))} />
+          <input className="scan-input" placeholder="Approval Reason" value={whitelistForm.reason} onChange={(e) => setWhitelistForm((prev) => ({ ...prev, reason: e.target.value }))} />
+          <button type="submit" className="scan-action scan-action--resume">Add to Whitelist</button>
         </form>
-        {feedback ? <p className="scan-feedback scan-feedback--success">{feedback}</p> : null}
-      </div>
 
-      <div className="panel">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Recent submissions</p>
-            <h2>Endpoint inventories</h2>
-          </div>
-        </div>
-        <div className="table-wrap">
+        <div className="table-wrap" style={{ marginTop: "20px" }}>
           <table className="table table--dense">
             <thead>
               <tr>
-                <th>Endpoint</th>
-                <th>OS</th>
-                <th>Installed apps</th>
-                <th>Flagged apps</th>
-                <th>Status</th>
+                <th>Software Name</th>
+                <th>Vendor</th>
+                <th>Reason</th>
+                <th>Added At</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {inventory.slice(0, 12).map((entry) => (
-                <tr key={entry.id}>
-                  <td data-label="Endpoint"><strong>{entry.endpoint_name}</strong><p>{entry.hostname || entry.ip_address || "n/a"}</p></td>
-                  <td data-label="OS">{entry.os_name || "n/a"}</td>
-                  <td data-label="Installed apps">{entry.installed_apps?.length || 0}</td>
-                  <td data-label="Flagged apps">{entry.detected_apps?.length || 0}</td>
-                  <td data-label="Status">{entry.status}</td>
+              {whitelist.map((w) => (
+                <tr key={w.id}>
+                  <td data-label="Software Name"><strong>{w.name}</strong></td>
+                  <td data-label="Vendor">{w.vendor || "n/a"}</td>
+                  <td data-label="Reason">{w.reason}</td>
+                  <td data-label="Added At">{new Date(w.created_at).toLocaleDateString()}</td>
+                  <td data-label="Action">
+                    <button type="button" className="scan-action scan-action--pause" onClick={() => handleRemoveWhitelist(w.id, w.name)}>
+                      Remove
+                    </button>
+                  </td>
                 </tr>
               ))}
-              {!inventory.length ? <tr><td colSpan="5"><p className="empty-copy">Endpoint inventories will appear here after submission.</p></td></tr> : null}
+              {!whitelist.length ? (
+                <tr>
+                  <td colSpan="5">
+                    <p className="empty-copy">No whitelisted software entries configured in database.</p>
+                  </td>
+                </tr>
+              ) : null}
             </tbody>
           </table>
         </div>

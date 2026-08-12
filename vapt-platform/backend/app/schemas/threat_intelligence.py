@@ -83,6 +83,12 @@ class AttackMapFlow(BaseModel):
     references: list[str] = Field(default_factory=list)
     target_label: str | None = None
     company_name: str | None = None
+    threat_url: str | None = None
+    malware_family: str | None = None
+    destination_ip: str | None = None
+    destination_port: int | None = None
+    source_ip: str | None = None
+    ip_reputation: int | None = None
 
 
 class AttackMapCountryStat(BaseModel):
@@ -121,5 +127,7 @@ class AttackMapResponse(BaseModel):
     most_attacked_12h: list[AttackMapCountryStat] = Field(default_factory=list)
     most_attacked_24h: list[AttackMapCountryStat] = Field(default_factory=list)
     most_targeted_industries: list[AttackMapIndustryStat] = Field(default_factory=list)
+    companies_by_industry: dict[str, list[dict]] = Field(default_factory=dict)
     top_malware_types: list[AttackMapMalwareStat] = Field(default_factory=list)
+    indicators_by_malware: dict[str, list[dict]] = Field(default_factory=dict)
     countries: dict[str, AttackMapCountryDetail] = Field(default_factory=dict)

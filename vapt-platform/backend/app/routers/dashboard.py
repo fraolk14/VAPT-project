@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.models.asset import Asset
 from app.models.finding import Finding
 from app.models.scan import Scan
 from app.schemas.dashboard import (
@@ -167,15 +168,18 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
             )
         )
 
+    ACTIVE_SCAN_STATUSES = {"running", "waiting", "queued", "in_progress", "pending", "starting", "executing", "active"}
+    active_scans_count = sum(1 for scan in scans if str(scan.status or "").lower() in ACTIVE_SCAN_STATUSES)
+
     metrics = [
-        DashboardMetric(label="Assets Monitored", value="2", trend="+12%"),
+        DashboardMetric(label="Assets Monitored", value=str(len(db.query(Asset).all()) or 2), trend="+12%"),
         DashboardMetric(
             label="Active Campaigns",
-            value=str(sum(1 for scan in scans if scan.status == "running")),
-            trend="+2",
+            value=str(active_scans_count),
+            trend=f"+{active_scans_count}" if active_scans_count > 0 else "0",
         ),
         DashboardMetric(label="Open Findings", value=str(risk["open_findings"]), trend="-8%"),
-        DashboardMetric(label="Risk Score", value=str(risk["risk_score"]), trend="-4.3%"),
+        DashboardMetric(label="Risk Score", value=str(risk["risk_score"]), trend="+12%" if risk["risk_score"] > 50 else "-4.3%"),
     ]
 
     return DashboardSummary(
@@ -206,6 +210,6 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
             )[:6]
         ],
         open_findings=risk["open_findings"],
-        active_scans=sum(1 for scan in scans if scan.status == "running"),
+        active_scans=active_scans_count,
         risk_score=risk["risk_score"],
     )

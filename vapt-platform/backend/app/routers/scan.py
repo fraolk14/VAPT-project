@@ -264,3 +264,107 @@ def reprocess_scan_record(
         return reprocess_scan_results(db, scan)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# -------------------------------------------------------------------------
+# ScanJob Engine Endpoints (Network, Web, Mobile)
+# -------------------------------------------------------------------------
+from app.models.scan import ScanJobModel
+from app.schemas.scan import ScanJobCreateSchema, ScanJobResponseSchema
+from app.services.misconfig_scanner import run_scan_job_engine
+
+
+@router.get("/jobs", response_model=list[ScanJobResponseSchema])
+@router.get("/v1/jobs", response_model=list[ScanJobResponseSchema])
+def list_scan_jobs(db: Session = Depends(get_db)):
+    return db.query(ScanJobModel).order_by(ScanJobModel.created_at.desc()).all()
+
+
+@router.post("/jobs", response_model=ScanJobResponseSchema)
+@router.post("/v1/jobs", response_model=ScanJobResponseSchema)
+def create_scan_job(
+    payload: ScanJobCreateSchema,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    job = ScanJobModel(
+        name=payload.name,
+        engine=payload.engine,
+        target=payload.target,
+        target_type=payload.target_type,
+        status="PENDING",
+        progress=0,
+        scheduled_at=payload.scheduled_at,
+        schedule_interval=payload.schedule_interval,
+        user_id=None,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    background_tasks.add_task(run_scan_job_engine, job.id)
+    return job
+
+
+@router.get("/jobs/{job_id}", response_model=ScanJobResponseSchema)
+@router.get("/v1/jobs/{job_id}", response_model=ScanJobResponseSchema)
+def get_scan_job(job_id: int, db: Session = Depends(get_db)):
+    job = db.get(ScanJobModel, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan job not found")
+    return job
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=ScanJobResponseSchema)
+@router.post("/v1/jobs/{job_id}/cancel", response_model=ScanJobResponseSchema)
+def cancel_scan_job(job_id: int, db: Session = Depends(get_db)):
+    job = db.get(ScanJobModel, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan job not found")
+    job.status = "CANCELLED"
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+@router.delete("/jobs/{job_id}")
+@router.delete("/v1/jobs/{job_id}")
+def delete_scan_job(job_id: int, db: Session = Depends(get_db)):
+    job = db.get(ScanJobModel, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan job not found")
+    db.delete(job)
+    db.commit()
+    return {"message": "Scan job deleted successfully"}
+
+
+@router.post("/jobs/{job_id}/rescan", response_model=ScanJobResponseSchema)
+@router.post("/v1/jobs/{job_id}/rescan", response_model=ScanJobResponseSchema)
+def rescan_scan_job(
+    job_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    job = db.get(ScanJobModel, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan job not found")
+
+    new_job = ScanJobModel(
+        name=f"{job.name} (Rescan)" if not job.name.endswith("(Rescan)") else job.name,
+        engine=job.engine,
+        target=job.target,
+        target_type=job.target_type,
+        status="PENDING",
+        progress=0,
+        schedule_interval=job.schedule_interval,
+        asset_id=job.asset_id,
+        user_id=job.user_id,
+    )
+    db.add(new_job)
+    db.commit()
+    db.refresh(new_job)
+
+    background_tasks.add_task(run_scan_job_engine, new_job.id)
+    return new_job
+
+

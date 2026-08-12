@@ -48,7 +48,7 @@ def ensure_report_storage() -> None:
         REPORT_BRANDING_PATH.write_text(
             json.dumps(
                 {
-                    "company_name": "VAPTICOM",
+                    "company_name": "VAP",
                     "logo_path": None,
                     "logo_name": None,
                     "updated_at": None,
@@ -66,7 +66,7 @@ def load_report_branding() -> dict:
     except Exception:
         payload = {}
     return {
-        "company_name": payload.get("company_name") or "VAPTICOM",
+        "company_name": payload.get("company_name") or "VAP",
         "logo_path": payload.get("logo_path"),
         "logo_name": payload.get("logo_name"),
         "updated_at": payload.get("updated_at"),
@@ -888,38 +888,62 @@ def export_findings_docx(
     document.add_paragraph(f"Findings in scope: {summary['total_findings']}")
     document.add_paragraph(mode_intro)
 
-    document.add_heading("Document control", level=2)
-    _add_docx_table(
-        document,
-        [
-            ["Field", "Value"],
-            ["Document type", title],
-            ["Document owner", header_name],
-            ["Assessment type", f"{normalized_mode.title()} security assessment"],
-            ["Report date", datetime.now(timezone.utc).strftime("%d-%m-%Y")],
-            ["Targets in scope", str(len(_scope_targets(serialized_findings)))],
-            ["Findings in scope", str(summary["total_findings"])],
-        ],
-    )
+    crit_cnt = summary["severity_counts"].get("critical", 0)
+    high_cnt = summary["severity_counts"].get("high", 0)
+    med_cnt = summary["severity_counts"].get("medium", 0)
+    low_cnt = summary["severity_counts"].get("low", 0)
+    targets_cnt = max(1, len(_scope_targets(serialized_findings)))
+    penalty = (crit_cnt * 25 + high_cnt * 12 + med_cnt * 5 + low_cnt * 1) / (targets_cnt * 2)
+    posture_score = min(100, max(20, round(100 - penalty)))
 
-    document.add_heading("Notice of confidentiality", level=2)
-    document.add_paragraph(
-        "This document contains sensitive security assessment information and should be shared only with stakeholders responsible for risk acceptance, remediation, validation, or governance oversight."
-    )
+    document.add_heading("1. Executive Summary & Risk Overview", level=2)
+    document.add_paragraph(executive_summary["summary_text"])
+    document.add_paragraph(f"Security Posture Score: {posture_score}%")
+    _add_docx_table(document, [
+        ["Total Assets", "Total Findings", "Critical", "High Severity"],
+        [str(targets_cnt), str(summary["total_findings"]), str(crit_cnt), str(high_cnt)]
+    ])
 
-    document.add_heading("Table of contents", level=2)
-    for section in [
-        "1. Introduction",
-        "2. Methodology and approach",
-        "3. Assessment scope",
-        "4. Risk level and description",
-        "5. Tools used during assessment",
-        "6. Disclaimer and assumptions",
-        "7. Executive summary report",
-        "8. Detailed report",
-        "9. Compliance impact and re-test guidance",
-    ]:
-        document.add_paragraph(section, style="List Bullet")
+    if normalized_mode == "executive":
+        document.add_heading("2. Executive Priority Findings & Recommendations", level=2)
+        for item in executive_summary["top_priority_findings"]:
+            document.add_paragraph(
+                f"• {item['title']} ({item['severity']}, CVSS {item['cvss_score']}) on {item['target']} — {item['remediation']}"
+            )
+        document.add_heading("Management Actions", level=3)
+        for rec in executive_summary["recommendations"]:
+            document.add_paragraph(f"• {rec}")
+
+    elif normalized_mode == "technical":
+        document.add_heading("2. Detailed Technical Findings", level=2)
+        tech_rows = [["Target", "Issue Description", "Type", "CVE", "Severity", "Remediation"]]
+        for item in serialized_findings:
+            tech_rows.append([
+                item.get("target") or "n/a",
+                item.get("title") or "Finding",
+                item.get("source") or "OS",
+                item.get("cve_id") or "n/a",
+                (item.get("severity") or "info").upper(),
+                item.get("remediation") or "Apply updates.",
+            ])
+        _add_docx_table(document, tech_rows)
+
+    elif normalized_mode == "compliance":
+        document.add_heading("2. Regulatory Compliance Control Matrix", level=2)
+        comp_rows = [["Finding Issue", "CIS", "NIST", "GDPR", "HIPAA", "SOC 2", "ISO 27001"]]
+        for item in serialized_findings:
+            issue = item.get("title") or ""
+            sev = (item.get("severity") or "").upper()
+            comp_rows.append([
+                issue,
+                "X",
+                "X" if sev in {"CRITICAL", "HIGH"} else "-",
+                "X" if "Password" in issue or "Exposed" in issue else "-",
+                "X" if sev == "CRITICAL" else "-",
+                "X" if "CORS" in issue or "Credentials" in issue else "-",
+                "X"
+            ])
+        _add_docx_table(document, comp_rows)
 
     document.add_heading("1. Introduction", level=2)
     document.add_paragraph(
@@ -1053,6 +1077,7 @@ def export_findings_pdf(
     selected_targets: list[str] | None = None,
     report_title: str | None = None,
     company_name: str | None = None,
+    author_name: str | None = None,
     logo_path: str | None = None,
 ) -> bytes:
     if colors is None:
@@ -1066,268 +1091,138 @@ def export_findings_pdf(
     )
     summary = summarize_findings(filtered_findings)
     executive_summary = _build_executive_summary(serialized_findings, summary)
-    compliance_dashboard = build_compliance_dashboard(filtered_findings, selected_targets=selected_targets)
     styles = _styles()
     buffer = io.BytesIO()
     branding = load_report_branding()
     header_name = company_name or branding["company_name"]
-    header_logo_path = logo_path or branding.get("logo_path")
+    normalized_mode = (mode or "executive").lower()
+    title_name = report_title or f"Vulnerability Assessment {normalized_mode.title()} Report"
+    author_str = author_name or "Lead Security Auditor"
 
     doc = SimpleDocTemplate(
         buffer,
         pagesize=letter,
-        leftMargin=40,
-        rightMargin=40,
-        topMargin=86,
-        bottomMargin=38,
-        title=report_title or f"{header_name} Security Report",
-        author=header_name,
+        leftMargin=36,
+        rightMargin=36,
+        topMargin=40,
+        bottomMargin=36,
+        title=title_name,
+        author=author_str,
     )
 
-    normalized_mode = (mode or "executive").lower()
-    mode_title = {
-        "executive": "Executive Report",
-        "technical": "Technical Report",
-        "compliance": "Compliance Report",
-    }.get(normalized_mode, "Security Report")
-    mode_intro = {
-        "executive": "This report provides a management-ready view of the most important risks, the affected targets, and the remediation priorities that require near-term action.",
-        "technical": "This report provides detailed technical findings, validation evidence, and remediation guidance for engineering and security operations teams.",
-        "compliance": "This report explains the control impact of the identified findings, the relevant benchmark references, and the evidence needed for remediation and re-test closure.",
-    }.get(normalized_mode, "This report summarizes the assessed findings and recommended next steps.")
-    grouped_by_severity: dict[str, list[dict]] = defaultdict(list)
-    grouped_by_asset = _group_by_target(serialized_findings)
-    for item in serialized_findings:
-        grouped_by_severity[(item.get("severity") or "info").lower()].append(item)
+    crit_cnt = summary["severity_counts"].get("critical", 0)
+    high_cnt = summary["severity_counts"].get("high", 0)
+    med_cnt = summary["severity_counts"].get("medium", 0)
+    low_cnt = summary["severity_counts"].get("low", 0)
+    targets_cnt = max(1, len(_scope_targets(serialized_findings)))
+    penalty = (crit_cnt * 25 + high_cnt * 12 + med_cnt * 5 + low_cnt * 1) / (targets_cnt * 2)
+    posture_score = min(100, max(20, round(100 - penalty)))
 
-    targets = _scope_targets(serialized_findings)
     story = []
 
-    story.extend(
-        [
-            Spacer(1, 60),
-            Paragraph(header_name, styles["section"]),
-            Paragraph(report_title or f"{header_name} Security Assessment Report", styles["cover_title"]),
-            Paragraph("Vulnerability Assessment and Penetration Testing Report", styles["section"]),
-            Spacer(1, 20),
-            Paragraph(f"Report mode: {mode_title}", styles["body"]),
-            Paragraph(f"Generated on {datetime.now(timezone.utc).strftime('%B %d, %Y at %H:%M UTC')}", styles["body"]),
-            Paragraph(f"Targets in scope: {len(targets)}", styles["body"]),
-            Paragraph(f"Findings in scope: {summary['total_findings']}", styles["body"]),
-            Spacer(1, 24),
-            Paragraph(mode_intro, styles["body"]),
-            PageBreak(),
-            Paragraph("Document control", styles["title"]),
-            _document_control_table(header_name, report_title or f"{header_name} Security Assessment Report", serialized_findings, normalized_mode),
-            Spacer(1, 14),
-            Paragraph("Notice of confidentiality", styles["section"]),
-            Paragraph(
-                "This document contains sensitive security assessment information. It should be shared only with stakeholders who are directly responsible for risk acceptance, remediation, validation, or governance oversight.",
-                styles["body"],
-            ),
-            Spacer(1, 10),
-            Paragraph("Table of contents", styles["section"]),
-            _toc_table(),
-            PageBreak(),
-            Paragraph("1. Introduction", styles["title"]),
-            Paragraph(
-                "This report summarizes the vulnerability assessment and penetration testing results for the selected in-scope assets. It presents the assessment outcome in a communication format suitable for technical stakeholders, operational owners, and management review.",
-                styles["body"],
-            ),
-            Paragraph(
-                "The objective of the assessment is to identify exploitable weaknesses, explain their business and technical impact, and provide clear remediation guidance that can be validated during re-test.",
-                styles["body"],
-            ),
-            Spacer(1, 8),
-            Paragraph("2. Methodology and approach", styles["title"]),
-            Paragraph(
-                "The assessment combines network, web, mobile, and platform-originated telemetry where available. Findings are normalized, correlated, and severity-ranked using source evidence, CVSS context, and platform enrichment.",
-                styles["body"],
-            ),
-            Paragraph(
-                "The workflow typically includes discovery, fingerprinting, vulnerability validation, evidence capture, enrichment, reporting, and re-test preparation.",
-                styles["body"],
-            ),
-            Spacer(1, 8),
-            Paragraph("3. Assessment scope", styles["title"]),
-        ]
-    )
+    # 1. Document Header (Matches Live Preview Paper View Top Banner)
+    story.append(Paragraph(header_name, ParagraphStyle("CompHeader", fontName="Helvetica-Bold", fontSize=22, leading=26, textColor=colors.HexColor("#0f172a"))))
+    story.append(Paragraph(title_name, ParagraphStyle("ReportSubTitle", fontName="Helvetica-Bold", fontSize=14, leading=18, textColor=colors.HexColor("#2563eb"), spaceAfter=8)))
+    story.append(Paragraph(f"<b>Author:</b> {author_str} &nbsp;&nbsp;|&nbsp;&nbsp; <b>Generated:</b> {datetime.now(timezone.utc).strftime('%d/%m/%Y')} &nbsp;&nbsp;|&nbsp;&nbsp; <b>Mode:</b> {normalized_mode.upper()}", styles["small"]))
+    story.append(Spacer(1, 14))
 
-    if not targets:
-        story.append(Paragraph("No targets were selected for this report scope.", styles["body"]))
-    else:
-        scope_rows = [["Sl. No.", "Target", "OS / Platform"]]
-        for index, target in enumerate(targets, start=1):
-            entries = grouped_by_asset.get(target, [])
-            sample = entries[0] if entries else {}
-            scope_rows.append([
-                str(index),
-                target,
-                sample.get("os_family") or "n/a",
-            ])
-        story.append(_table(scope_rows, [0.55 * inch, 3.3 * inch, 2.2 * inch]))
-
-    story.extend(
-        [
-            Spacer(1, 8),
-            Paragraph("4. Risk level and description", styles["title"]),
-            _risk_level_table(),
-            Spacer(1, 8),
-            Paragraph("5. Tools used during assessment", styles["title"]),
-            _tools_table(serialized_findings),
-            Spacer(1, 8),
-            Paragraph("6. Disclaimer and assumptions", styles["title"]),
-            Paragraph(
-                "This report reflects the state of the assessed assets at the time of testing and within the limits of the configured scan depth, selected validation routines, available credentials, and reachable services.",
-                styles["body"],
-            ),
-            Paragraph(
-                "Before implementing remediation, confirm that the affected service is required for business use, prepare backup and rollback plans, and schedule any disruptive changes through the appropriate operational process.",
-                styles["body"],
-            ),
-            Paragraph(
-                "Some vulnerabilities may remain undetected if they require authenticated testing, deeper application context, environmental preconditions, or exploit paths intentionally excluded to avoid service disruption.",
-                styles["body"],
-            ),
-            PageBreak(),
-            Paragraph("7. Executive summary report", styles["title"]),
-            Paragraph(executive_summary["summary_text"], styles["body"]),
-            Paragraph(
-                f"A total of <b>{summary['total_findings']}</b> findings are in scope. "
-                f"<b>{summary['open_findings']}</b> findings remain open. "
-                "Priority should be given to critical and high-severity weaknesses affecting exposed or business-critical targets.",
-                styles["body"],
-            ),
-            Spacer(1, 8),
-            Paragraph("Priority findings", styles["section"]),
-            Paragraph(
-                "The report highlights the most urgent issues that should be addressed first by the responsible stakeholders.",
-                styles["body"],
-            ),
-        ]
-    )
-    for item in executive_summary["top_priority_findings"]:
-        story.append(
-            Paragraph(
-                f"• {item['title']} ({item['severity']}, CVSS {item['cvss_score']}) on {item['target']} — {item['remediation']}",
-                styles["body"],
-            )
-        )
-    story.extend(
-        [
-            Spacer(1, 8),
-            Paragraph("Management actions", styles["section"]),
-        ]
-    )
-    for recommendation in executive_summary["recommendations"]:
-        story.append(Paragraph(f"• {recommendation}", styles["body"]))
-    story.extend(
-        [
-            Spacer(1, 8),
-            _severity_table(serialized_findings),
-            Spacer(1, 10),
-            Paragraph("7.1 Target-wise vulnerability count", styles["section"]),
-            _target_summary_table(grouped_by_asset),
-            Spacer(1, 10),
-            Paragraph("Key observations", styles["section"]),
-        ]
-    )
-
-    for severity in ("critical", "high", "medium"):
-        entries = grouped_by_severity.get(severity, [])
-        if entries:
-            story.append(
-                Paragraph(
-                    f"• {severity.title()} findings: {len(entries)}. Example: {entries[0].get('title')} on {entries[0].get('target')}.",
-                    styles["body"],
-                )
-            )
-
-    story.append(PageBreak())
-    story.append(Paragraph("8. Detailed report", styles["title"]))
-    for target_index, (target, entries) in enumerate(grouped_by_asset.items(), start=1):
-        entries = sorted(entries, key=lambda item: (_severity_rank(item.get("severity")), item.get("cvss_score") or 0), reverse=True)
-        story.append(Paragraph(f"{target_index}. Target: {target}", styles["section"]))
-        story.append(Paragraph("Summary of findings", styles["subsection"]))
-        story.append(_table(_finding_summary_rows(entries), [0.55 * inch, 3.35 * inch, 0.75 * inch, 0.55 * inch, 1.0 * inch]))
-        open_port_rows = _open_port_rows(entries)
-        if len(open_port_rows) > 1:
-            story.append(Spacer(1, 6))
-            story.append(Paragraph("Open port details", styles["subsection"]))
-            story.append(_table(open_port_rows, [0.8 * inch, 0.8 * inch, 2.1 * inch, 2.3 * inch]))
-
-        limit = len(entries) if normalized_mode == "technical" else min(len(entries), 6)
-        for finding_index, item in enumerate(entries[:limit], start=1):
-            story.append(Spacer(1, 8))
-            story.append(Paragraph(f"{finding_index}. Vulnerability name: {item['title']}", styles["subsection"]))
-            story.append(_detail_table(item))
-            if item.get("evidence"):
-                story.append(Paragraph("<b>Vulnerability description</b>", styles["body"]))
-                story.append(Paragraph(item["evidence"], styles["body"]))
-            story.append(Paragraph("<b>Impact</b>", styles["body"]))
-            story.append(
-                Paragraph(
-                    f"This issue is classified as {(item.get('severity') or 'info').title()} with CVSS {item.get('cvss_score') or 'n/a'}. "
-                    "If left unresolved, it can increase the likelihood of compromise, disclosure, misuse, or operational disruption on the affected target.",
-                    styles["body"],
-                )
-            )
-            if item.get("evidence"):
-                story.append(Paragraph("<b>Proof of concept / validation evidence</b>", styles["body"]))
-                story.append(Paragraph(item["evidence"], styles["body"]))
-            story.append(Paragraph("<b>Remediation</b>", styles["body"]))
-            story.append(
-                Paragraph(
-                    item.get("remediation")
-                    or item.get("hardening_recommendation")
-                    or "Review the exposed service, apply the vendor fix or configuration change, and validate the outcome with a re-test.",
-                    styles["body"],
-                )
-            )
-            refs = _reference_lines(item)
-            if refs:
-                story.append(Paragraph("<b>Reference links</b>", styles["body"]))
-                for ref in refs:
-                    story.append(Paragraph(f"• {ref}", styles["small"]))
-            story.append(Paragraph(f"<b>Closure / verification state</b>: {item.get('verification_state') or 'pending'}", styles["body"]))
-
-        story.append(PageBreak())
-
-    story.append(Paragraph("8.1 Compliance posture", styles["section"]))
-    if compliance_dashboard["hosts"]:
-        rows = [["Host", "Status", "Open findings", "NIST controls", "ISO controls"]]
-        for host in compliance_dashboard["hosts"]:
-            rows.append([
-                host["target"],
-                host["status"],
-                str(host["open_findings"]),
-                ", ".join(host["controls"]["nist"]),
-                ", ".join(host["controls"]["iso"]),
-            ])
-        story.append(_table(rows, [1.2 * inch, 0.85 * inch, 0.8 * inch, 1.4 * inch, 1.4 * inch]))
-    else:
-        story.append(Paragraph("No host-level compliance posture information was available for the selected scope.", styles["body"]))
-
+    # 2. Section 1: Executive Summary & Risk Overview
+    story.append(Paragraph("1. Executive Summary & Risk Overview", styles["section"]))
+    story.append(Paragraph(executive_summary["summary_text"], styles["body"]))
     story.append(Spacer(1, 8))
-    story.append(Paragraph("9. Compliance impact and re-test guidance", styles["title"]))
-    compliance_counts = Counter(tag for item in serialized_findings for tag in (item.get("compliance_map") or []))
-    if compliance_counts:
-        story.append(Paragraph("Compliance impact", styles["section"]))
-        for tag, count in compliance_counts.most_common(15):
-            story.append(Paragraph(f"• {tag}: {count} related finding(s)", styles["body"]))
-    else:
-        story.append(Paragraph("No compliance mappings were available for the current report scope.", styles["body"]))
 
-    story.append(Spacer(1, 8))
-    story.append(Paragraph("Re-test guidance", styles["section"]))
-    for line in [
-        "Re-test each affected target after remediation is completed.",
-        "Validate that the vulnerability is no longer reproducible and that the service matches the intended secure state.",
-        "Capture screenshots, configuration outputs, patch evidence, or scanner proof for closure.",
-        "Where a fix cannot be implemented immediately, document the compensating control, risk owner, and next review date.",
-    ]:
-        story.append(Paragraph(f"• {line}", styles["body"]))
+    # 4 Metric Cards Table (Matches Live Preview Grid Cards)
+    metric_table_data = [
+        ["TOTAL ASSETS", "TOTAL FINDINGS", "CRITICAL", "HIGH SEVERITY"],
+        [str(targets_cnt), str(summary["total_findings"]), str(crit_cnt), str(high_cnt)],
+    ]
+    metric_table = Table(metric_table_data, colWidths=[1.75 * inch, 1.75 * inch, 1.75 * inch, 1.75 * inch])
+    metric_table.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (1, -1), colors.HexColor("#f8fafc")),
+            ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#fef2f2")),
+            ("BACKGROUND", (3, 0), (3, -1), colors.HexColor("#fffbe0")),
+            ("TEXTCOLOR", (0, 0), (1, 0), colors.HexColor("#64748b")),
+            ("TEXTCOLOR", (2, 0), (2, 0), colors.HexColor("#dc2626")),
+            ("TEXTCOLOR", (3, 0), (3, 0), colors.HexColor("#d97706")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 8),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 1), (-1, 1), 16),
+            ("TEXTCOLOR", (0, 1), (1, 1), colors.HexColor("#0f172a")),
+            ("TEXTCOLOR", (2, 1), (2, 1), colors.HexColor("#991b1b")),
+            ("TEXTCOLOR", (3, 1), (3, 1), colors.HexColor("#92400e")),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ])
+    )
+    story.append(metric_table)
+    story.append(Spacer(1, 10))
 
-    drawer = _header_drawer(header_name, header_logo_path)
-    doc.build(story, onFirstPage=drawer, onLaterPages=drawer)
+    # Security Posture Gauge Score Box
+    score_box_data = [
+        [f"Security Posture Score: {posture_score}%\nEvaluated across active infrastructure, web applications, and network endpoints."]
+    ]
+    score_table = Table(score_box_data, colWidths=[7.0 * inch])
+    score_table.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+            ("BORDER", (0, 0), (-1, -1), 1, colors.HexColor("#cbd5e1")),
+            ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#0f172a")),
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 10),
+            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+            ("TOPPADDING", (0, 0), (-1, -1), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+            ("LEFTPADDING", (0, 0), (-1, -1), 14),
+        ])
+    )
+    story.append(score_table)
+    story.append(Spacer(1, 16))
+
+    # Mode-specific sections:
+    if normalized_mode == "technical" or normalized_mode == "executive":
+        story.append(Paragraph(f"2. Detailed Technical Findings ({len(serialized_findings)})", styles["section"]))
+        if serialized_findings:
+            tech_rows = [["Target", "Issue Description", "Type", "CVE", "Severity", "Remediation"]]
+            for item in serialized_findings:
+                tech_rows.append([
+                    item.get("target") or item.get("asset_name") or "n/a",
+                    item.get("title") or "Finding",
+                    item.get("source") or "OS",
+                    item.get("cve_id") or "n/a",
+                    (item.get("severity") or "info").upper(),
+                    item.get("remediation") or "Apply updates.",
+                ])
+            tech_table = _table(tech_rows, [1.3 * inch, 2.0 * inch, 0.7 * inch, 0.9 * inch, 0.8 * inch, 1.3 * inch])
+            story.append(tech_table)
+        else:
+            story.append(Paragraph("No findings discovered for this report.", styles["body"]))
+        story.append(Spacer(1, 16))
+
+    if normalized_mode == "compliance" or normalized_mode == "executive":
+        story.append(Paragraph("3. Regulatory Compliance Control Matrix", styles["section"]))
+        if serialized_findings:
+            comp_rows = [["Finding Issue", "CIS", "NIST", "GDPR", "HIPAA", "SOC 2", "ISO 27001"]]
+            for item in serialized_findings:
+                issue = item.get("title") or ""
+                sev = (item.get("severity") or "").upper()
+                comp_rows.append([
+                    issue,
+                    "X",
+                    "X" if sev in {"CRITICAL", "HIGH"} else "-",
+                    "X" if "Password" in issue or "Exposed" in issue else "-",
+                    "X" if sev == "CRITICAL" else "-",
+                    "X" if "CORS" in issue or "Credentials" in issue else "-",
+                    "X"
+                ])
+            comp_table = _table(comp_rows, [2.2 * inch, 0.8 * inch, 0.8 * inch, 0.8 * inch, 0.8 * inch, 0.8 * inch, 0.8 * inch])
+            story.append(comp_table)
+        else:
+            story.append(Paragraph("No compliance violations identified in the current scope.", styles["body"]))
+
+    doc.build(story)
     return buffer.getvalue()

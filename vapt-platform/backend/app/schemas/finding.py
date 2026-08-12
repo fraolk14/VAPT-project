@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 class FindingOut(BaseModel):
     id: UUID
-    scan_id: UUID
+    scan_id: Optional[UUID] = None
     asset_id: Optional[UUID] = None
     vulnerability_id: Optional[UUID] = None
     title: str

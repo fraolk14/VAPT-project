@@ -120,7 +120,7 @@ def _http_request(host: str, port: int, path: str, tls: bool) -> dict[str, Any]:
         f"Host: {host}\r\n"
         f"Connection: close\r\n"
         f"Accept: */*\r\n"
-        f"User-Agent: VAPTICOM\r\n\r\n"
+        f"User-Agent: VAP\r\n\r\n"
     )
     sock: socket.socket | None = None
     conn: socket.socket | ssl.SSLSocket | None = None

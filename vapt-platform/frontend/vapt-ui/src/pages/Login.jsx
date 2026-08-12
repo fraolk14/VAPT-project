@@ -1,13 +1,22 @@
 import { useState } from "react";
 
-export default function Login({ onLogin, onStartSso, isSubmitting, errorMessage, awaitingMfa, authConfig }) {
+export default function Login({ onLogin, onStartSso, isSubmitting, errorMessage, awaitingMfa, authConfig, onSubmit, publicAuthConfig, submitting, error }) {
   const [form, setForm] = useState({ username: "", password: "", otpCode: "", captchaToken: "", deviceName: "Primary browser" });
-  const policy = authConfig?.policy || {};
-  const providers = authConfig?.providers || [];
+  
+  // Resolve props cleanly regardless of caller naming
+  const loginHandler = onLogin || onSubmit;
+  const config = authConfig || publicAuthConfig || {};
+  const policy = config?.policy || {};
+  const allowLocal = policy.allow_local_login !== false; // Default to true if not explicitly false
+  const isPending = isSubmitting || submitting || false;
+  const errMsg = errorMessage || error || "";
+  const providers = config?.providers || [];
 
   const handleSubmit = async (event) => {
     event.preventDefault();
-    await onLogin(form);
+    if (loginHandler) {
+      await loginHandler(form);
+    }
   };
 
   return (
@@ -16,7 +25,7 @@ export default function Login({ onLogin, onStartSso, isSubmitting, errorMessage,
       <section className="auth-card">
         <div className="auth-card__hero">
           <p className="eyebrow">Enterprise Security Operations</p>
-          <h1>Sign in to VAPTICOM</h1>
+          <h1>Sign in to VAP</h1>
           <p>
             Access network assessments, findings, threat context, and operator workflows from a
             single control plane.
@@ -24,7 +33,7 @@ export default function Login({ onLogin, onStartSso, isSubmitting, errorMessage,
         </div>
 
         <form className="auth-form" onSubmit={handleSubmit}>
-          {!policy.allow_local_login ? (
+          {!allowLocal ? (
             <p className="scan-feedback scan-feedback--loading">
               Local sign-in is disabled by policy. Use one of the configured SSO providers.
             </p>
@@ -37,7 +46,7 @@ export default function Login({ onLogin, onStartSso, isSubmitting, errorMessage,
               value={form.username}
               onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))}
               placeholder="admin"
-              disabled={!policy.allow_local_login}
+              disabled={!allowLocal}
             />
           </label>
 
@@ -49,7 +58,7 @@ export default function Login({ onLogin, onStartSso, isSubmitting, errorMessage,
               value={form.password}
               onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
               placeholder="Enter your password"
-              disabled={!policy.allow_local_login}
+              disabled={!allowLocal}
             />
           </label>
 
@@ -60,7 +69,7 @@ export default function Login({ onLogin, onStartSso, isSubmitting, errorMessage,
               value={form.otpCode}
               onChange={(event) => setForm((current) => ({ ...current, otpCode: event.target.value }))}
               placeholder="123456"
-              disabled={!policy.allow_local_login}
+              disabled={!allowLocal}
             />
           </label>
 
@@ -70,7 +79,7 @@ export default function Login({ onLogin, onStartSso, isSubmitting, errorMessage,
               value={form.deviceName}
               onChange={(event) => setForm((current) => ({ ...current, deviceName: event.target.value }))}
               placeholder="Primary browser"
-              disabled={!policy.allow_local_login}
+              disabled={!allowLocal}
             />
           </label>
 
@@ -80,11 +89,11 @@ export default function Login({ onLogin, onStartSso, isSubmitting, errorMessage,
               value={form.captchaToken}
               onChange={(event) => setForm((current) => ({ ...current, captchaToken: event.target.value }))}
               placeholder="Only required when captcha protection is enabled"
-              disabled={!policy.allow_local_login}
+              disabled={!allowLocal}
             />
           </label>
 
-          {errorMessage ? <p className="auth-error">{errorMessage}</p> : null}
+          {errMsg ? <p className="auth-error">{errMsg}</p> : null}
 
           {awaitingMfa ? (
             <p className="scan-feedback scan-feedback--loading">
@@ -92,8 +101,8 @@ export default function Login({ onLogin, onStartSso, isSubmitting, errorMessage,
             </p>
           ) : null}
 
-          <button className="auth-submit" type="submit" disabled={isSubmitting || !policy.allow_local_login}>
-            {isSubmitting ? "Signing in..." : awaitingMfa ? "Verify MFA" : "Sign In"}
+          <button className="auth-submit" type="submit" disabled={isPending || !allowLocal}>
+            {isPending ? "Signing in..." : awaitingMfa ? "Verify MFA" : "Sign In"}
           </button>
 
           {providers.length ? (

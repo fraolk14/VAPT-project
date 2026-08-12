@@ -30,7 +30,7 @@ def should_fire(rule: AlertRule, finding: Finding) -> bool:
 def _alert_body(event: AlertEvent) -> str:
     payload = event.payload or {}
     return (
-        f"{payload.get('message') or 'VAPTICOM security alert'}\n\n"
+        f"{payload.get('message') or 'VAP security alert'}\n\n"
         f"Finding: {payload.get('finding_title') or 'n/a'}\n"
         f"Severity: {payload.get('severity') or 'n/a'}\n"
         f"Source: {payload.get('source') or 'n/a'}\n"
@@ -53,7 +53,7 @@ def deliver_alert_event(db: Session, event: AlertEvent) -> AlertEvent:
         if channel == "email":
             send_email(
                 to_address=event.destination,
-                subject=f"VAPTICOM alert: {(event.payload or {}).get('finding_title') or event.rule_name}",
+                subject=f"VAP alert: {(event.payload or {}).get('finding_title') or event.rule_name}",
                 body=_alert_body(event),
             )
             event.status = "sent"

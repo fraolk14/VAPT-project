@@ -105,7 +105,7 @@ def _serialize_finding(finding: Finding, scan_finished_at, asset: Asset | None =
 def list_findings(db: Session = Depends(get_db)):
     rows = (
         db.query(Finding, Scan.finished_at, Asset)
-        .join(Scan, Scan.id == Finding.scan_id)
+        .outerjoin(Scan, Scan.id == Finding.scan_id)
         .outerjoin(Asset, Asset.id == Finding.asset_id)
         .all()
     )

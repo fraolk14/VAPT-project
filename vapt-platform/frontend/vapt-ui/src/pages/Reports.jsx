@@ -1,772 +1,724 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
-import ReactECharts from "echarts-for-react";
+import React, { useState, useMemo, useCallback } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useDropzone } from "react-dropzone";
+import { motion, AnimatePresence } from "framer-motion";
+import axios from "axios";
+import {
+  FiFileText,
+  FiDownload,
+  FiUploadCloud,
+  FiSliders,
+  FiEye,
+  FiCheck,
+  FiAlertTriangle,
+  FiShield,
+  FiX,
+  FiCalendar,
+  FiCheckSquare,
+  FiGlobe,
+  FiServer,
+  FiCpu,
+  FiRefreshCw,
+  FiFile,
+  FiLock,
+} from "react-icons/fi";
 
-import api from "../api/client";
-import Card from "../components/Card";
+const fetchReportDataApi = async (scanJobId = "latest") => {
+  const res = await axios.get(`/api/reports/data/${scanJobId}`);
+  return res.data;
+};
 
-function buildDownloadUrl(path) {
-  const baseURL = api.defaults.baseURL || "/api";
-  if (/^https?:\/\//i.test(path)) return path;
-  if (baseURL.endsWith("/") && path.startsWith("/")) return `${baseURL.slice(0, -1)}${path}`;
-  if (!baseURL.endsWith("/") && !path.startsWith("/")) return `${baseURL}/${path}`;
-  return `${baseURL}${path}`;
-}
+export default function Reports() {
+  const [scanJobId, setScanJobId] = useState("latest");
+  const [reportType, setReportType] = useState("executive"); // executive | technical | compliance
+  const [companyName, setCompanyName] = useState("VAP");
+  const [reportTitle, setReportTitle] = useState("Vulnerability & Penetration Testing Executive Summary");
+  const [authorName, setAuthorName] = useState("Lead Security Auditor");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [logoPreview, setLogoPreview] = useState(null);
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
 
-async function fetchBlob(path, { method = "GET", body, fallbackMimeType } = {}) {
-  const token = window.localStorage.getItem("vapt_token");
-  const headers = token ? { Authorization: `Bearer ${token}` } : {};
-  if (!(body instanceof FormData)) {
-    headers["Content-Type"] = "application/json";
-  }
-  const response = await fetch(buildDownloadUrl(path), {
-    method,
-    headers,
-    body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
+  // Toggle Switches
+  const [includeCves, setIncludeCves] = useState(true);
+  const [includeRemediation, setIncludeRemediation] = useState(true);
+  const [includeRawScan, setIncludeRawScan] = useState(true);
+  const [includeComplianceMap, setIncludeComplianceMap] = useState(true);
+
+  // Preview Modal
+  const [isPreviewModalOpen, setIsPreviewModalOpen] = useState(false);
+  const [downloadingFormat, setDownloadingFormat] = useState(null);
+
+  // Fetch Real Scan Data
+  const { data: rawReportData, isLoading, isError, refetch } = useQuery({
+    queryKey: ["report-data", scanJobId],
+    queryFn: () => fetchReportDataApi(scanJobId),
+    staleTime: 30000,
   });
-  if (!response.ok) {
-    let detail = `Download failed with status ${response.status}.`;
+
+  // Dropzone Logo Upload
+  const onDrop = useCallback(async (acceptedFiles) => {
+    if (acceptedFiles.length === 0) return;
+    const file = acceptedFiles[0];
+    const previewUrl = URL.createObjectURL(file);
+    setLogoPreview(previewUrl);
+
+    setIsUploadingLogo(true);
     try {
-      const text = await response.text();
-      if (text) detail = text;
-    } catch {
-      // ignore parse issues
-    }
-    throw new Error(detail);
-  }
-  const buffer = await response.arrayBuffer();
-  return new Blob([buffer], { type: response.headers.get("content-type") || fallbackMimeType || "application/octet-stream" });
-}
-
-async function fetchJson(path, { method = "GET", body } = {}) {
-  const token = window.localStorage.getItem("vapt_token");
-  const headers = { Accept: "application/json" };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  if (!(body instanceof FormData)) headers["Content-Type"] = "application/json";
-  const response = await fetch(buildDownloadUrl(path), {
-    method,
-    headers,
-    body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
-  });
-  if (!response.ok) {
-    throw new Error(`Request failed with status ${response.status}.`);
-  }
-  return response.json();
-}
-
-function saveBlobDownload(blob, filename) {
-  if (window.navigator?.msSaveOrOpenBlob) {
-    window.navigator.msSaveOrOpenBlob(blob, filename);
-    return;
-  }
-  const objectUrl = window.URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = objectUrl;
-  anchor.download = filename;
-  anchor.style.display = "none";
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 60000);
-}
-
-function ComplianceDashboardPanel({ dashboard }) {
-  const frameworkEntries = Object.entries(dashboard?.frameworks || {});
-  const chartOption = {
-    backgroundColor: "transparent",
-    tooltip: {
-      trigger: "item",
-      backgroundColor: "rgba(7, 15, 25, 0.96)",
-      borderColor: "rgba(148, 163, 184, 0.18)",
-      textStyle: { color: "#f8fbff" },
-    },
-    legend: {
-      bottom: 0,
-      textStyle: { color: "#d7e3ef" },
-    },
-    series: [
-      {
-        type: "pie",
-        radius: ["48%", "78%"],
-        center: ["50%", "48%"],
-        data: frameworkEntries.map(([name, item]) => ({
-          name,
-          value: item?.covered_hosts || 0,
-          itemStyle: { color: name.includes("NIST") ? "#4fd1c5" : "#8fb8ff" },
-        })),
-        label: { color: "#f8fbff", fontSize: 12 },
-        labelLine: { length: 8, length2: 10 },
-      },
-    ],
-  };
-
-  return (
-    <div className="threat-grid" style={{ marginTop: "12px" }}>
-      <div className="panel panel--embedded">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Compliance posture</p>
-            <h2>Framework coverage</h2>
-          </div>
-        </div>
-        <ReactECharts option={chartOption} style={{ height: 260, width: "100%" }} opts={{ renderer: "svg" }} />
-        <div className="coverage-list">
-          {frameworkEntries.map(([name, item]) => (
-            <div className="coverage-row" key={name}>
-              <span>{name}</span>
-              <strong>{item?.covered_hosts || 0}/{item?.total_hosts || 0} hosts</strong>
-            </div>
-          ))}
-        </div>
-      </div>
-      <div className="panel panel--embedded">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Host-level view</p>
-            <h2>Control mapping</h2>
-          </div>
-        </div>
-        <div className="table-wrap">
-          <table className="table table--dense">
-            <thead>
-              <tr>
-                <th>Host</th>
-                <th>Status</th>
-                <th>NIST</th>
-                <th>ISO</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(dashboard?.hosts || []).map((host) => (
-                <tr key={host.target}>
-                  <td data-label="Host"><strong>{host.target}</strong></td>
-                  <td data-label="Status">{host.status}</td>
-                  <td data-label="NIST">{(host.controls?.nist || []).join(", ") || "—"}</td>
-                  <td data-label="ISO">{(host.controls?.iso || []).join(", ") || "—"}</td>
-                </tr>
-              ))}
-              {!dashboard?.hosts?.length ? (
-                <tr>
-                  <td colSpan="4">
-                    <p className="empty-copy">Compliance posture data will appear here after the selected findings are previewed.</p>
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export default function Reports({ findings, scans, compliance, incidents, alertRules, alertEvents }) {
-  const completedScans = scans.filter((scan) => scan.status === "completed").length;
-  const openFindings = findings.filter((finding) => finding.status === "open").length;
-  const [summary, setSummary] = useState({
-    total_findings: 0,
-    open_findings: 0,
-    severity_counts: {},
-    source_counts: {},
-    compliance_counts: {},
-    top_findings: [],
-  });
-  const [reportType, setReportType] = useState("executive");
-  const [selectedAssessment, setSelectedAssessment] = useState(null);
-  const [downloadState, setDownloadState] = useState("idle");
-  const [localAssessments, setLocalAssessments] = useState(compliance?.assessments || []);
-  const [localIncidents, setLocalIncidents] = useState(incidents || []);
-  const [assessmentDetail, setAssessmentDetail] = useState(null);
-  const [actionFeedback, setActionFeedback] = useState("");
-  const [reportTargets, setReportTargets] = useState([]);
-  const [selectedTargets, setSelectedTargets] = useState([]);
-  const [targetFilter, setTargetFilter] = useState("");
-  const [preview, setPreview] = useState(null);
-  const [previewPdfUrl, setPreviewPdfUrl] = useState(null);
-  const [companyName, setCompanyName] = useState("VAPTICOM");
-  const [logoFile, setLogoFile] = useState(null);
-  const [branding, setBranding] = useState({ logo_name: null, logo_uploaded: false, updated_at: null });
-  const [reportTitle, setReportTitle] = useState("VAPTICOM Security Assessment Report");
-  const complianceDashboard = preview?.compliance_dashboard || null;
-
-  useEffect(() => {
-    api.get("/reports/summary").then((response) => setSummary(response.data)).catch(() => {});
-    api.get("/reports/targets").then((response) => setReportTargets(response.data || [])).catch(() => {});
-    api.get("/reports/branding").then((response) => {
-      setBranding(response.data || {});
-      setCompanyName(response.data?.company_name || "VAPTICOM");
-      setReportTitle(`${response.data?.company_name || "VAPTICOM"} Security Assessment Report`);
-    }).catch(() => {});
-  }, []);
-
-  useEffect(() => setLocalAssessments(compliance?.assessments || []), [compliance?.assessments]);
-  useEffect(() => setLocalIncidents(incidents || []), [incidents]);
-  useEffect(() => {
-    return () => {
-      if (previewPdfUrl) {
-        window.URL.revokeObjectURL(previewPdfUrl);
-      }
-    };
-  }, [previewPdfUrl]);
-
-  useEffect(() => {
-    if (!selectedAssessment?.id) {
-      setAssessmentDetail(null);
-      return;
-    }
-    api.get(`/operations/compliance/assessments/${selectedAssessment.id}`).then((response) => setAssessmentDetail(response.data)).catch(() => setAssessmentDetail(null));
-  }, [selectedAssessment]);
-
-  const strongestSeverity = useMemo(() => {
-    if ((summary.severity_counts?.critical || 0) > 0) return "critical";
-    if ((summary.severity_counts?.high || 0) > 0) return "high";
-    if ((summary.severity_counts?.medium || 0) > 0) return "medium";
-    return "low";
-  }, [summary.severity_counts]);
-
-  const stakeholderNarrative = useMemo(() => {
-    if (reportType === "technical") return "Technical reporting keeps evidence, CVEs, finding detail, and remediation state ready for engineering teams.";
-    if (reportType === "compliance") return "Compliance reporting emphasizes mapped controls, assessment scorecards, and exportable evidence packs for audits.";
-    return "Executive reporting emphasizes top risk, affected targets, business impact, and remediation priorities.";
-  }, [reportType]);
-
-  const visibleTargets = useMemo(() => {
-    const query = targetFilter.trim().toLowerCase();
-    if (!query) return reportTargets;
-    return reportTargets.filter((item) =>
-      [item.target, item.asset_name, item.hostname, item.ip_address, item.url, item.os_family]
-        .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(query))
-    );
-  }, [reportTargets, targetFilter]);
-
-  const requestPayload = useMemo(
-    () => ({
-      mode: reportType,
-      selected_targets: selectedTargets,
-      report_title: reportTitle,
-    }),
-    [reportType, selectedTargets, reportTitle]
-  );
-
-  const toggleTarget = (target) => {
-    setSelectedTargets((current) => (current.includes(target) ? current.filter((item) => item !== target) : [...current, target]));
-  };
-
-  const previewReport = async () => {
-    setDownloadState("preview");
-    try {
-      const [response, pdfBlob] = await Promise.all([
-        fetchJson("/reports/preview", { method: "POST", body: requestPayload }),
-        fetchBlob("/reports/findings.pdf", { method: "POST", body: requestPayload, fallbackMimeType: "application/pdf" }),
-      ]);
-      setPreview(response);
-      if (previewPdfUrl) {
-        window.URL.revokeObjectURL(previewPdfUrl);
-      }
-      const pdfUrl = window.URL.createObjectURL(pdfBlob);
-      setPreviewPdfUrl(pdfUrl);
-      setActionFeedback("PDF preview refreshed in the browser.");
-    } catch (error) {
-      setActionFeedback(error?.message || "Unable to build the preview right now.");
-    } finally {
-      setDownloadState("idle");
-    }
-  };
-
-  const downloadPdf = async () => {
-    setDownloadState("pdf");
-    try {
-      const blob = await fetchBlob("/reports/findings.pdf", { method: "POST", body: requestPayload, fallbackMimeType: "application/pdf" });
-      if (!blob.size) {
-        throw new Error("The generated report is empty.");
-      }
-      saveBlobDownload(blob, "findings-report.pdf");
-      setActionFeedback("PDF download started in the browser.");
-    } catch (error) {
-      setActionFeedback(error?.message || "Unable to download the PDF report right now.");
-    } finally {
-      setDownloadState("idle");
-    }
-  };
-
-  const downloadDocx = async () => {
-    setDownloadState("docx");
-    try {
-      const blob = await fetchBlob("/reports/findings.docx", { method: "POST", body: requestPayload, fallbackMimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
-      if (!blob.size) {
-        throw new Error("The generated report is empty.");
-      }
-      saveBlobDownload(blob, "findings-report.docx");
-      setActionFeedback("DOCX download started in the browser.");
-    } catch (error) {
-      setActionFeedback(error?.message || "Unable to download the DOCX report right now.");
-    } finally {
-      setDownloadState("idle");
-    }
-  };
-
-  const downloadReport = async (path, filename, mimeType) => {
-    setDownloadState(path);
-    try {
-      const blob = await fetchBlob(path, { fallbackMimeType: mimeType });
-      if (!blob.size) throw new Error("The generated report is empty.");
-      saveBlobDownload(blob, filename);
-      setActionFeedback(`Downloaded ${filename}.`);
-    } catch (error) {
-      setActionFeedback(error?.message || "Unable to download the report right now.");
-    } finally {
-      setDownloadState("idle");
-    }
-  };
-
-  const uploadLogo = async () => {
-    if (!logoFile) {
-      setActionFeedback("Choose a PNG or JPG logo first.");
-      return;
-    }
-    setDownloadState("branding");
-    try {
-      const form = new FormData();
-      form.append("company_name", companyName);
-      form.append("file", logoFile);
-      const response = await fetchJson("/reports/branding/logo", { method: "POST", body: form });
-      setBranding(response);
-      if (response?.company_name) {
-        setCompanyName(response.company_name);
-      }
-      setActionFeedback("Report branding updated.");
-    } catch (error) {
-      setActionFeedback(error?.message || "Unable to upload the logo right now.");
-    } finally {
-      setDownloadState("idle");
-    }
-  };
-
-  const downloadAssessment = async (assessment) => {
-    setDownloadState(`assessment-${assessment.id}`);
-    try {
-      const blob = await fetchBlob(`/operations/compliance/assessments/${assessment.id}/download`, { fallbackMimeType: "application/json" });
-      if (!blob.size) throw new Error("The generated scorecard is empty.");
-      saveBlobDownload(blob, `${assessment.name.replace(/\s+/g, "-").toLowerCase()}-scorecard.json`);
-      setActionFeedback(`Downloaded ${assessment.name} scorecard.`);
-    } catch (error) {
-      setActionFeedback(error?.message || "Unable to download the scorecard right now.");
-    } finally {
-      setDownloadState("idle");
-    }
-  };
-
-  const refreshAssessments = async () => {
-    try {
-      const response = await api.post("/operations/compliance/refresh");
-      setLocalAssessments(response.data.assessments || []);
-      setActionFeedback("Compliance scorecards refreshed.");
-    } catch {
-      setActionFeedback("Unable to refresh compliance scorecards right now.");
-    }
-  };
-
-  const updateIncidentStatus = async (incidentId, status) => {
-    try {
-      const current = localIncidents.find((incident) => incident.id === incidentId);
-      const response = await api.post(`/operations/incidents/${incidentId}/status`, {
-        status,
-        summary: current?.summary || null,
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("company_name", companyName);
+      await axios.post("/api/reports/logo", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
       });
-      setLocalIncidents((items) => items.map((incident) => (incident.id === incidentId ? response.data : incident)));
-    } catch {
-      setActionFeedback("Unable to update incident status right now.");
+    } catch (err) {
+      console.error("Logo upload failed", err);
+    } finally {
+      setIsUploadingLogo(false);
+    }
+  }, [companyName]);
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: { "image/*": [".png", ".jpg", ".jpeg", ".svg"] },
+    maxSize: 5 * 1024 * 1024,
+    multiple: false,
+  });
+
+  // Filtered Findings based on Date Range
+  const filteredMisconfigs = useMemo(() => {
+    if (!rawReportData?.misconfigurations) return [];
+    return rawReportData.misconfigurations.filter((item) => {
+      if (!item.discovered_at) return true;
+      const itemDate = new Date(item.discovered_at).getTime();
+      if (startDate) {
+        const start = new Date(startDate).getTime();
+        if (itemDate < start) return false;
+      }
+      if (endDate) {
+        const end = new Date(endDate).getTime() + 86400000;
+        if (itemDate > end) return false;
+      }
+      return true;
+    });
+  }, [rawReportData, startDate, endDate]);
+
+  const summaryMetrics = useMemo(() => {
+    const totalAssets = Math.max(1, rawReportData?.summary?.total_assets || rawReportData?.assets?.length || 1);
+    const totalFindings = filteredMisconfigs.length;
+    const critical = filteredMisconfigs.filter((m) => m.severity?.toUpperCase() === "CRITICAL").length;
+    const high = filteredMisconfigs.filter((m) => m.severity?.toUpperCase() === "HIGH").length;
+    const medium = filteredMisconfigs.filter((m) => m.severity?.toUpperCase() === "MEDIUM").length;
+    const low = filteredMisconfigs.filter((m) => m.severity?.toUpperCase() === "LOW").length;
+
+    const penalty = (critical * 25 + high * 12 + medium * 5 + low * 1) / (totalAssets * 2);
+    const complianceScore = Math.min(100, Math.max(20, Math.round(100 - penalty)));
+
+    return { totalAssets, totalFindings, critical, high, medium, low, complianceScore };
+  }, [filteredMisconfigs, rawReportData]);
+
+  // Download File Handler
+  const handleDownload = async (format) => {
+    setDownloadingFormat(format);
+    try {
+      const jobId = rawReportData?.scan_job_id || "latest";
+      const payload = {
+        mode: reportType,
+        format,
+        company_name: companyName,
+        report_title: reportTitle,
+        author_name: authorName,
+        start_date: startDate,
+        end_date: endDate,
+        include_cves: includeCves,
+        include_remediation: includeRemediation,
+        include_raw_scan: includeRawScan,
+        include_compliance_map: includeComplianceMap,
+      };
+
+      const res = await axios.post(`/api/reports/download/${jobId}`, payload, {
+        responseType: "blob",
+      });
+
+      const blob = new Blob([res.data]);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `VAPT_${companyName.replace(/\s+/g, "_")}_${reportType.toUpperCase()}_Report.${format}`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error(`Failed to download ${format} report`, err);
+    } finally {
+      setDownloadingFormat(null);
     }
   };
 
   return (
-    <section className="section-grid">
-      <div className="panel panel--metrics">
-        <div className="panel__header">
+    <div style={{ display: "flex", flexDirection: "column", gap: "24px", padding: "8px 0" }}>
+      {/* Header Studio Banner */}
+      <div
+        className="panel"
+        style={{
+          background: "linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.85))",
+          border: "1px solid rgba(148, 163, 184, 0.15)",
+          borderRadius: "16px",
+          padding: "20px 24px",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: "16px",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
+          <div style={{ background: "rgba(56, 189, 248, 0.1)", padding: "12px", borderRadius: "12px", border: "1px solid rgba(56, 189, 248, 0.2)" }}>
+            <FiFileText style={{ color: "#38bdf8", fontSize: "24px" }} />
+          </div>
           <div>
-            <p className="eyebrow">Reporting center</p>
-            <h2>Reports</h2>
-          </div>
-        </div>
-        <div className="metrics-grid">
-          <Card title="Completed Scans" value={completedScans} trend="Ready for evidence packaging" />
-          <Card title="Open Findings" value={openFindings} trend="Current remediation reporting scope" />
-          <Card title="Alert Rules" value={alertRules?.length || 0} trend="Email and webhook delivery automation" />
-          <Card title="Compliance Packs" value={compliance?.templates?.length || Object.keys(summary.compliance_counts || {}).length || 0} trend="Mapped frameworks and evidence sets" />
-        </div>
-      </div>
-
-      <div className="panel panel--metrics">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Custom report workspace</p>
-            <h2>Build and preview</h2>
-          </div>
-          <div className="scan-actions" style={{ marginTop: "8px", flexWrap: "wrap" }}>
-            {[
-              { value: "executive", label: "Executive" },
-              { value: "technical", label: "Technical" },
-              { value: "compliance", label: "Compliance" },
-            ].map((mode) => (
-              <button
-                key={mode.value}
-                type="button"
-                className={`scan-action ${reportType === mode.value ? "scan-action--resume" : ""}`}
-                onClick={() => setReportType(mode.value)}
-              >
-                {mode.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="threat-grid">
-          <div className="panel panel--embedded">
-            <div className="panel__header">
-              <div>
-                <p className="eyebrow">Branding</p>
-                <h2>Company identity</h2>
-              </div>
-            </div>
-            <label className="scan-target-label">Company name</label>
-            <input className="scan-input" value={companyName} onChange={(event) => setCompanyName(event.target.value)} />
-            <label className="scan-target-label">Report title</label>
-            <input className="scan-input" value={reportTitle} onChange={(event) => setReportTitle(event.target.value)} />
-            <label className="scan-target-label">Upload logo</label>
-            <input type="file" accept=".png,.jpg,.jpeg" onChange={(event) => setLogoFile(event.target.files?.[0] || null)} />
-            <p className="scan-target-hint">
-              Current logo: <strong>{branding?.logo_uploaded ? branding.logo_name : "No custom logo uploaded"}</strong>
+            <h1 style={{ fontSize: "1.5rem", fontWeight: "700", color: "#f8fafc", margin: 0 }}>
+              Report Studio & Document Generator
+            </h1>
+            <p style={{ color: "#94a3b8", fontSize: "0.88rem", margin: 0 }}>
+              Real-time report aggregation, compliance mapping, and custom PDF / DOCX / CSV downloads.
             </p>
-            <div className="scan-actions">
-              <button type="button" className="scan-action" onClick={uploadLogo}>
-                {downloadState === "branding" ? "Uploading..." : "Upload logo"}
-              </button>
-            </div>
           </div>
+        </div>
 
-          <div className="panel panel--embedded">
-            <div className="panel__header">
-              <div>
-                <p className="eyebrow">Scope</p>
-                <h2>Select targets</h2>
-              </div>
-            </div>
-            <input
-              className="scan-input"
-              placeholder="Filter targets by IP, hostname, URL, asset, or OS"
-              value={targetFilter}
-              onChange={(event) => setTargetFilter(event.target.value)}
-            />
-            <div className="scan-actions" style={{ marginTop: "10px" }}>
-              <button type="button" className="scan-action" onClick={() => setSelectedTargets(visibleTargets.map((item) => item.target))}>Select visible</button>
-              <button type="button" className="scan-action" onClick={() => setSelectedTargets([])}>Clear selection</button>
-            </div>
-            <div className="coverage-list" style={{ maxHeight: "260px", overflowY: "auto", marginTop: "12px" }}>
-              {visibleTargets.map((item) => (
-                <label key={item.target} className="coverage-row" style={{ gap: "12px", alignItems: "flex-start" }}>
-                  <input type="checkbox" checked={selectedTargets.includes(item.target)} onChange={() => toggleTarget(item.target)} />
-                  <span>
-                    {item.target}
-                    <p>{item.asset_name || item.hostname || item.ip_address || item.url || "Target"}</p>
-                    <p>{item.os_family || "OS not fingerprinted"} • {item.finding_count} finding(s) • {(item.highest_severity || "info").toUpperCase()}</p>
-                  </span>
-                </label>
-              ))}
-              {!visibleTargets.length ? <p className="empty-copy">No targets available yet. Complete scans first so report scope can be selected.</p> : null}
-            </div>
-          </div>
+        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+          <span style={{ fontSize: "0.85rem", color: "#94a3b8" }}>Target Scan ID:</span>
+          <select
+            className="scan-select"
+            value={scanJobId}
+            onChange={(e) => setScanJobId(e.target.value)}
+            style={{ width: "130px", height: "38px" }}
+          >
+            <option value="latest">Latest Scan</option>
+            <option value="1">Scan #1</option>
+            <option value="2">Scan #2</option>
+          </select>
+
+          <button
+            onClick={() => refetch()}
+            className="btn btn--secondary"
+            style={{ height: "38px", padding: "0 14px", display: "flex", alignItems: "center", gap: "6px" }}
+          >
+            <FiRefreshCw className={isLoading ? "spin" : ""} /> Refresh
+          </button>
         </div>
-        <div className="risk-hero" style={{ marginTop: "16px" }}>
-          <div className="risk-hero__badge">
-            <span>Primary report mode</span>
-            <strong>{reportType}</strong>
-          </div>
-          <div>
-            <p className="hero__lede">{stakeholderNarrative}</p>
-            <p className="scan-target-hint"><strong>Selected targets:</strong> {selectedTargets.length || "All targets"}</p>
-            <div className="scan-actions">
-              <button type="button" className="scan-action" onClick={previewReport}>
-                {downloadState === "preview" ? "Building preview..." : "Preview report"}
-              </button>
-              <button type="button" className="scan-action scan-action--resume" onClick={downloadPdf}>
-                {downloadState === "pdf" ? "Preparing PDF..." : "Download PDF"}
-              </button>
-              <button type="button" className="scan-action" onClick={downloadDocx}>
-                {downloadState === "docx" ? "Preparing DOCX..." : "Download DOCX (editable)"}
-              </button>
-              <button type="button" className="scan-action" onClick={() => downloadReport("/reports/findings.csv", "findings-report.csv", "text/csv")}>
-                {downloadState === "/reports/findings.csv" ? "Preparing CSV..." : "Export CSV"}
-              </button>
-              <button type="button" className="scan-action" onClick={() => downloadReport("/reports/findings.json", "findings-report.json", "application/json")}>
-                {downloadState === "/reports/findings.json" ? "Preparing JSON..." : "Export JSON"}
-              </button>
-            </div>
-            <p className="scan-target-hint"><strong>Highest active severity:</strong> {strongestSeverity}</p>
-          </div>
-        </div>
-        {actionFeedback ? <p className="scan-target-hint">{actionFeedback}</p> : null}
       </div>
 
-      <div className="panel">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Preview</p>
-            <h2>Before download</h2>
-          </div>
-        </div>
-        {preview ? (
-          <div className="threat-grid">
-            <div className="panel panel--embedded">
-              <div className="coverage-list">
-                <div className="coverage-row"><span>Report title</span><strong>{preview.report_title}</strong></div>
-                <div className="coverage-row"><span>Company</span><strong>{preview.company_name}</strong></div>
-                <div className="coverage-row"><span>Targets in scope</span><strong>{preview.targets?.length || 0}</strong></div>
-                <div className="coverage-row"><span>Total findings</span><strong>{preview.summary?.total_findings || 0}</strong></div>
-                <div className="coverage-row"><span>Open findings</span><strong>{preview.summary?.open_findings || 0}</strong></div>
-                <div className="coverage-row"><span>Logo</span><strong>{preview.logo_name || "Default text branding"}</strong></div>
-              </div>
-              {preview.executive_summary?.summary_text ? (
-                <div className="coverage-list" style={{ marginTop: "12px" }}>
-                  <div className="coverage-row"><span>Executive summary</span><strong>{preview.executive_summary.summary_text}</strong></div>
-                  {(preview.recommendations || []).slice(0, 3).map((recommendation, index) => (
-                    <div className="coverage-row" key={`recommendation-${index}`}>
-                      <span>Action {index + 1}</span>
-                      <strong>{recommendation}</strong>
-                    </div>
-                  ))}
+      {/* Main 2-Column Grid (30% / 70%) */}
+      <div style={{ display: "grid", gridTemplateColumns: "3.2fr 6.8fr", gap: "24px" }}>
+        
+        {/* LEFT COLUMN: Report Configuration Panel (30%) */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+          
+          {/* 1. Organization Branding Card */}
+          <div className="panel" style={{ padding: "20px" }}>
+            <h3 style={{ fontSize: "0.95rem", fontWeight: "600", color: "#f8fafc", marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+              <FiUploadCloud style={{ color: "#38bdf8" }} /> Organization Branding
+            </h3>
+
+            <div
+              {...getRootProps()}
+              style={{
+                border: "2px dashed " + (isDragActive ? "#38bdf8" : "rgba(148, 163, 184, 0.25)"),
+                borderRadius: "12px",
+                padding: "20px",
+                textAlign: "center",
+                background: isDragActive ? "rgba(56, 189, 248, 0.05)" : "rgba(15, 23, 42, 0.5)",
+                cursor: "pointer",
+                transition: "all 0.2s ease",
+              }}
+            >
+              <input {...getInputProps()} />
+              {logoPreview ? (
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "10px" }}>
+                  <img src={logoPreview} alt="Company Logo" style={{ maxHeight: "60px", maxWidth: "100%", objectFit: "contain" }} />
+                  <span style={{ fontSize: "0.78rem", color: "#10b981", display: "flex", alignItems: "center", gap: "4px" }}>
+                    <FiCheck /> Logo uploaded
+                  </span>
                 </div>
-              ) : null}
-              {complianceDashboard ? <ComplianceDashboardPanel dashboard={complianceDashboard} /> : null}
-            </div>
-            <div className="panel panel--embedded" style={{ minHeight: "720px" }}>
-              <div className="panel__header">
-                <div>
-                  <p className="eyebrow">Browser PDF preview</p>
-                  <h2>Executive report</h2>
-                </div>
-              </div>
-              {previewPdfUrl ? (
-                <iframe
-                  title="Executive report preview"
-                  src={previewPdfUrl}
-                  style={{ width: "100%", minHeight: "640px", border: "none", borderRadius: "8px" }}
-                />
               ) : (
-                <p className="empty-copy">The PDF preview will appear here after you click Preview report.</p>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "8px", color: "#94a3b8" }}>
+                  <FiUploadCloud style={{ fontSize: "28px", color: "#64748b" }} />
+                  <p style={{ margin: 0, fontSize: "0.85rem", fontWeight: "500", color: "#cbd5e1" }}>
+                    Drag & drop logo or click to browse
+                  </p>
+                  <small style={{ fontSize: "0.75rem", color: "#64748b" }}>Supports PNG, JPG, SVG (Max 5MB)</small>
+                </div>
               )}
             </div>
           </div>
-        ) : (
-          <p className="empty-copy">Choose one or more targets, then use Preview report to inspect the report scope before downloading.</p>
-        )}
-      </div>
 
-      <div className="panel">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Compliance automation</p>
-            <h2>Assessment scorecards</h2>
+          {/* 2. Company Information */}
+          <div className="panel" style={{ padding: "20px" }}>
+            <h3 style={{ fontSize: "0.95rem", fontWeight: "600", color: "#f8fafc", marginBottom: "14px" }}>
+              Company Information
+            </h3>
+            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div>
+                <label style={{ fontSize: "0.78rem", color: "#94a3b8", display: "block", marginBottom: "4px" }}>Company Name</label>
+                <input
+                  className="scan-input"
+                  value={companyName}
+                  onChange={(e) => setCompanyName(e.target.value)}
+                  placeholder="e.g. Acme Corporation"
+                  style={{ width: "100%" }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: "0.78rem", color: "#94a3b8", display: "block", marginBottom: "4px" }}>Report Title</label>
+                <input
+                  className="scan-input"
+                  value={reportTitle}
+                  onChange={(e) => setReportTitle(e.target.value)}
+                  placeholder="e.g. Technical Assessment Audit"
+                  style={{ width: "100%" }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: "0.78rem", color: "#94a3b8", display: "block", marginBottom: "4px" }}>Author Name</label>
+                <input
+                  className="scan-input"
+                  value={authorName}
+                  onChange={(e) => setAuthorName(e.target.value)}
+                  placeholder="e.g. Security Engineering Team"
+                  style={{ width: "100%" }}
+                />
+              </div>
+            </div>
           </div>
-        </div>
-        <div className="coverage-list">
-          {localAssessments.map((assessment) => (
-            <button type="button" className={`coverage-row coverage-row--button ${selectedAssessment?.id === assessment.id ? "is-active" : ""}`} key={assessment.id} onClick={() => setSelectedAssessment(assessment)}>
-              <span>{assessment.name}</span>
-              <strong>{assessment.score}% / {assessment.status}</strong>
+
+          {/* 3. Report Type Selector (Toggle Tabs) */}
+          <div className="panel" style={{ padding: "20px" }}>
+            <h3 style={{ fontSize: "0.95rem", fontWeight: "600", color: "#f8fafc", marginBottom: "14px" }}>
+              Report Format Type
+            </h3>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px" }}>
+              {[
+                { id: "executive", label: "Executive" },
+                { id: "technical", label: "Technical" },
+                { id: "compliance", label: "Compliance" },
+              ].map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => setReportType(tab.id)}
+                  style={{
+                    padding: "10px 8px",
+                    borderRadius: "8px",
+                    border: reportType === tab.id ? "1px solid #38bdf8" : "1px solid rgba(148, 163, 184, 0.15)",
+                    background: reportType === tab.id ? "rgba(56, 189, 248, 0.15)" : "rgba(15, 23, 42, 0.6)",
+                    color: reportType === tab.id ? "#38bdf8" : "#94a3b8",
+                    fontSize: "0.85rem",
+                    fontWeight: "600",
+                    cursor: "pointer",
+                    transition: "all 0.2s ease",
+                  }}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 4. Date Range Filter */}
+          <div className="panel" style={{ padding: "20px" }}>
+            <h3 style={{ fontSize: "0.95rem", fontWeight: "600", color: "#f8fafc", marginBottom: "14px", display: "flex", alignItems: "center", gap: "6px" }}>
+              <FiCalendar style={{ color: "#38bdf8" }} /> Date Range Filter
+            </h3>
+            <div style={{ display: "flex", gap: "10px" }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: "0.75rem", color: "#94a3b8", display: "block", marginBottom: "4px" }}>Start Date</label>
+                <input
+                  type="date"
+                  className="scan-input"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  style={{ width: "100%", fontSize: "0.8rem" }}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: "0.75rem", color: "#94a3b8", display: "block", marginBottom: "4px" }}>End Date</label>
+                <input
+                  type="date"
+                  className="scan-input"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  style={{ width: "100%", fontSize: "0.8rem" }}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* 5. Report Settings (Toggle Switches) */}
+          <div className="panel" style={{ padding: "20px" }}>
+            <h3 style={{ fontSize: "0.95rem", fontWeight: "600", color: "#f8fafc", marginBottom: "14px", display: "flex", alignItems: "center", gap: "6px" }}>
+              <FiSliders style={{ color: "#38bdf8" }} /> Report Sections
+            </h3>
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              {[
+                { label: "Include CVE Mapping", state: includeCves, set: setIncludeCves },
+                { label: "Include Remediation Steps", state: includeRemediation, set: setIncludeRemediation },
+                { label: "Include Raw Scan Output", state: includeRawScan, set: setIncludeRawScan },
+                { label: "Include Compliance Matrix", state: includeComplianceMap, set: setIncludeComplianceMap },
+              ].map((opt, i) => (
+                <label key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontSize: "0.85rem", color: "#cbd5e1" }}>
+                  <span>{opt.label}</span>
+                  <input
+                    type="checkbox"
+                    checked={opt.state}
+                    onChange={(e) => opt.set(e.target.checked)}
+                    style={{ width: "16px", height: "16px", accentColor: "#38bdf8" }}
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* 6. Download Actions Button Group */}
+          <div className="panel" style={{ padding: "20px", display: "flex", flexDirection: "column", gap: "10px" }}>
+            <button
+              onClick={() => setIsPreviewModalOpen(true)}
+              className="btn btn--secondary"
+              style={{ width: "100%", height: "42px", display: "flex", justifyContent: "center", alignItems: "center", gap: "8px" }}
+            >
+              <FiEye /> Full Screen Preview
             </button>
-          ))}
-          {!localAssessments.length ? <p className="empty-copy">Continuous compliance assessments will appear here after data refresh.</p> : null}
-        </div>
-      </div>
 
-      <div className="panel">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Assessment workspace</p>
-            <h2>{selectedAssessment?.name || "Select a scorecard"}</h2>
-          </div>
-          {selectedAssessment ? (
-            <div className="scan-actions">
-              <button type="button" className="scan-action scan-action--resume" onClick={() => downloadAssessment(selectedAssessment)}>
-                {downloadState === `assessment-${selectedAssessment.id}` ? "Preparing..." : "Download scorecard"}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+              <button
+                onClick={() => handleDownload("pdf")}
+                disabled={downloadingFormat === "pdf"}
+                className="btn btn--primary"
+                style={{ height: "40px", display: "flex", justifyContent: "center", alignItems: "center", gap: "6px", fontSize: "0.82rem" }}
+              >
+                <FiDownload /> {downloadingFormat === "pdf" ? "Exporting..." : "Download PDF"}
+              </button>
+
+              <button
+                onClick={() => handleDownload("docx")}
+                disabled={downloadingFormat === "docx"}
+                className="btn btn--secondary"
+                style={{ height: "40px", display: "flex", justifyContent: "center", alignItems: "center", gap: "6px", fontSize: "0.82rem" }}
+              >
+                <FiFile /> {downloadingFormat === "docx" ? "Exporting..." : "Download DOCX"}
               </button>
             </div>
-          ) : null}
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+              <button
+                onClick={() => handleDownload("csv")}
+                disabled={downloadingFormat === "csv"}
+                style={{
+                  height: "36px",
+                  background: "rgba(30, 41, 59, 0.6)",
+                  border: "1px solid rgba(148, 163, 184, 0.15)",
+                  color: "#cbd5e1",
+                  borderRadius: "8px",
+                  fontSize: "0.78rem",
+                  cursor: "pointer",
+                  display: "flex",
+                  justifyContent: "center",
+                  alignItems: "center",
+                  gap: "4px",
+                }}
+              >
+                <FiDownload /> Export CSV
+              </button>
+
+              <button
+                onClick={() => handleDownload("json")}
+                disabled={downloadingFormat === "json"}
+                style={{
+                  height: "36px",
+                  background: "rgba(30, 41, 59, 0.6)",
+                  border: "1px solid rgba(148, 163, 184, 0.15)",
+                  color: "#cbd5e1",
+                  borderRadius: "8px",
+                  fontSize: "0.78rem",
+                  cursor: "pointer",
+                  display: "flex",
+                  justifyContent: "center",
+                  alignItems: "center",
+                  gap: "4px",
+                }}
+              >
+                <FiDownload /> Export JSON
+              </button>
+            </div>
+          </div>
+
         </div>
-        {selectedAssessment ? (
-          <div className="threat-grid">
-            <div className="panel panel--embedded">
-              <div className="panel__header">
-                <div>
-                  <p className="eyebrow">Assessment status</p>
-                  <h2>{selectedAssessment.status}</h2>
+
+        {/* RIGHT COLUMN: Live Report Preview Paper Container (70%) */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+          
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: "0.88rem", fontWeight: "600", color: "#94a3b8" }}>
+              LIVE DOCUMENT PREVIEW ({reportType.toUpperCase()} MODE)
+            </span>
+            <span style={{ fontSize: "0.78rem", color: "#64748b" }}>Paper View 8.5" x 11"</span>
+          </div>
+
+          {/* Paper Style Scrollable Box */}
+          <div
+            style={{
+              maxHeight: "85vh",
+              overflowY: "auto",
+              background: "#ffffff",
+              color: "#1e293b",
+              borderRadius: "12px",
+              padding: "40px 48px",
+              boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.4)",
+              fontFamily: "'Times New Roman', 'Georgia', serif",
+            }}
+          >
+            {/* Document Header */}
+            <div style={{ borderBottom: "2px solid #e2e8f0", paddingBottom: "24px", marginBottom: "28px", display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div>
+                <h1 style={{ fontFamily: "'Inter', sans-serif", fontSize: "1.8rem", fontWeight: "800", color: "#0f172a", margin: "0 0 6px 0" }}>
+                  {companyName}
+                </h1>
+                <h2 style={{ fontFamily: "'Inter', sans-serif", fontSize: "1.2rem", fontWeight: "600", color: "#2563eb", margin: "0 0 12px 0" }}>
+                  {reportTitle}
+                </h2>
+                <div style={{ fontSize: "0.85rem", color: "#64748b", display: "flex", gap: "16px" }}>
+                  <span><strong>Author:</strong> {authorName}</span>
+                  <span><strong>Generated:</strong> {new Date().toLocaleDateString()}</span>
                 </div>
               </div>
-              <div className="coverage-list">
-                <div className="coverage-row"><span>Score</span><strong>{selectedAssessment.score}%</strong></div>
-                <div className="coverage-row"><span>ID</span><strong>{selectedAssessment.id}</strong></div>
-                <div className="coverage-row"><span>Framework</span><strong>{assessmentDetail?.framework || "Loading..."}</strong></div>
+
+              {logoPreview ? (
+                <img src={logoPreview} alt="Logo" style={{ maxHeight: "50px", maxWidth: "160px", objectFit: "contain" }} />
+              ) : (
+                <div style={{ padding: "8px 14px", border: "1px dashed #cbd5e1", borderRadius: "6px", fontSize: "0.75rem", color: "#94a3b8" }}>
+                  {companyName} Logo
+                </div>
+              )}
+            </div>
+
+            {/* SECTION 1: EXECUTIVE SUMMARY */}
+            <div style={{ marginBottom: "32px" }}>
+              <h3 style={{ fontFamily: "'Inter', sans-serif", fontSize: "1.1rem", fontWeight: "700", color: "#0f172a", borderBottom: "1px solid #cbd5e1", paddingBottom: "6px", marginBottom: "16px" }}>
+                1. Executive Summary & Risk Overview
+              </h3>
+
+              {/* 4 Metric Cards */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: "16px", marginBottom: "24px" }}>
+                <div style={{ background: "#f8fafc", padding: "14px", borderRadius: "8px", border: "1px solid #e2e8f0", textAlign: "center" }}>
+                  <span style={{ fontSize: "0.78rem", color: "#64748b", fontFamily: "'Inter', sans-serif" }}>TOTAL ASSETS</span>
+                  <div style={{ fontSize: "1.6rem", fontWeight: "800", color: "#0f172a", marginTop: "4px" }}>{summaryMetrics.totalAssets}</div>
+                </div>
+
+                <div style={{ background: "#f8fafc", padding: "14px", borderRadius: "8px", border: "1px solid #e2e8f0", textAlign: "center" }}>
+                  <span style={{ fontSize: "0.78rem", color: "#64748b", fontFamily: "'Inter', sans-serif" }}>TOTAL FINDINGS</span>
+                  <div style={{ fontSize: "1.6rem", fontWeight: "800", color: "#0f172a", marginTop: "4px" }}>{summaryMetrics.totalFindings}</div>
+                </div>
+
+                <div style={{ background: "#fef2f2", padding: "14px", borderRadius: "8px", border: "1px solid #fecaca", textAlign: "center" }}>
+                  <span style={{ fontSize: "0.78rem", color: "#dc2626", fontFamily: "'Inter', sans-serif" }}>CRITICAL</span>
+                  <div style={{ fontSize: "1.6rem", fontWeight: "800", color: "#991b1b", marginTop: "4px" }}>{summaryMetrics.critical}</div>
+                </div>
+
+                <div style={{ background: "#fffbebe", padding: "14px", borderRadius: "8px", border: "1px solid #fde68a", textAlign: "center" }}>
+                  <span style={{ fontSize: "0.78rem", color: "#d97706", fontFamily: "'Inter', sans-serif" }}>HIGH SEVERITY</span>
+                  <div style={{ fontSize: "1.6rem", fontWeight: "800", color: "#92400e", marginTop: "4px" }}>{summaryMetrics.high}</div>
+                </div>
+              </div>
+
+              {/* Compliance Gauge */}
+              <div style={{ display: "flex", alignItems: "center", gap: "24px", background: "#f8fafc", padding: "20px", borderRadius: "10px", border: "1px solid #e2e8f0" }}>
+                <svg width="80" height="80" viewBox="0 0 36 36">
+                  <path
+                    d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                    fill="none"
+                    stroke="#e2e8f0"
+                    strokeWidth="3.8"
+                  />
+                  <path
+                    d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                    fill="none"
+                    stroke={summaryMetrics.complianceScore > 75 ? "#16a34a" : summaryMetrics.complianceScore > 50 ? "#d97706" : "#dc2626"}
+                    strokeWidth="3.8"
+                    strokeDasharray={`${summaryMetrics.complianceScore}, 100`}
+                  />
+                  <text x="18" y="20.35" fill="#0f172a" fontSize="9" textAnchor="middle" fontWeight="bold" fontFamily="'Inter', sans-serif">
+                    {summaryMetrics.complianceScore}%
+                  </text>
+                </svg>
+                <div>
+                  <h4 style={{ fontFamily: "'Inter', sans-serif", margin: "0 0 4px 0", color: "#0f172a", fontSize: "1rem" }}>
+                    Security Posture Score
+                  </h4>
+                  <p style={{ margin: 0, fontSize: "0.88rem", color: "#475569", lineHeight: "1.4" }}>
+                    Evaluated across active infrastructure, web applications, and network endpoints.
+                  </p>
+                </div>
               </div>
             </div>
-            <div className="panel panel--embedded">
-              <div className="panel__header">
-                <div>
-                  <p className="eyebrow">Scorecard detail</p>
-                  <h2>Summary</h2>
-                </div>
+
+            {/* SECTION 2: TECHNICAL FINDINGS (Visible in Technical mode or if enabled) */}
+            {(reportType === "technical" || reportType === "executive") && (
+              <div style={{ marginBottom: "32px" }}>
+                <h3 style={{ fontFamily: "'Inter', sans-serif", fontSize: "1.1rem", fontWeight: "700", color: "#0f172a", borderBottom: "1px solid #cbd5e1", paddingBottom: "6px", marginBottom: "16px" }}>
+                  2. Detailed Technical Findings ({filteredMisconfigs.length})
+                </h3>
+
+                {filteredMisconfigs.length > 0 ? (
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
+                    <thead>
+                      <tr style={{ background: "#f1f5f9", borderBottom: "2px solid #cbd5e1", textAlign: "left", fontFamily: "'Inter', sans-serif" }}>
+                        <th style={{ padding: "8px 10px" }}>Target</th>
+                        <th style={{ padding: "8px 10px" }}>Issue Description</th>
+                        <th style={{ padding: "8px 10px" }}>Type</th>
+                        {includeCves && <th style={{ padding: "8px 10px" }}>CVE</th>}
+                        <th style={{ padding: "8px 10px" }}>Severity</th>
+                        {includeRemediation && <th style={{ padding: "8px 10px" }}>Remediation</th>}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredMisconfigs.map((m, idx) => (
+                        <tr key={m.id || idx} style={{ borderBottom: "1px solid #e2e8f0" }}>
+                          <td style={{ padding: "10px", fontWeight: "bold" }}>{m.hostname || m.ip}</td>
+                          <td style={{ padding: "10px" }}>{m.issue}</td>
+                          <td style={{ padding: "10px" }}>{m.asset_type}</td>
+                          {includeCves && <td style={{ padding: "10px", color: "#dc2626" }}>{m.cve || "n/a"}</td>}
+                          <td style={{ padding: "10px" }}>
+                            <span
+                              style={{
+                                padding: "2px 8px",
+                                borderRadius: "4px",
+                                fontSize: "0.75rem",
+                                fontWeight: "bold",
+                                fontFamily: "'Inter', sans-serif",
+                                background: m.severity?.toUpperCase() === "CRITICAL" ? "#fee2e2" : m.severity?.toUpperCase() === "HIGH" ? "#fef3c7" : "#e0f2fe",
+                                color: m.severity?.toUpperCase() === "CRITICAL" ? "#991b1b" : m.severity?.toUpperCase() === "HIGH" ? "#92400e" : "#0369a1",
+                              }}
+                            >
+                              {m.severity}
+                            </span>
+                          </td>
+                          {includeRemediation && (
+                            <td style={{ padding: "10px", fontSize: "0.8rem", color: "#334155" }}>
+                              {m.remediation}
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <p style={{ textAlign: "center", color: "#94a3b8", padding: "30px 0", fontStyle: "italic" }}>
+                    No findings discovered for this report.
+                  </p>
+                )}
               </div>
-              <div className="developer-code developer-code--block">
-                {JSON.stringify(assessmentDetail || selectedAssessment.summary || {}, null, 2)}
+            )}
+
+            {/* SECTION 3: COMPLIANCE MATRIX (Compliance mode or if enabled) */}
+            {(reportType === "compliance" || includeComplianceMap) && (
+              <div>
+                <h3 style={{ fontFamily: "'Inter', sans-serif", fontSize: "1.1rem", fontWeight: "700", color: "#0f172a", borderBottom: "1px solid #cbd5e1", paddingBottom: "6px", marginBottom: "16px" }}>
+                  3. Regulatory Compliance Control Matrix
+                </h3>
+
+                {filteredMisconfigs.length > 0 ? (
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem", textAlign: "center" }}>
+                    <thead>
+                      <tr style={{ background: "#f1f5f9", borderBottom: "2px solid #cbd5e1", fontFamily: "'Inter', sans-serif" }}>
+                        <th style={{ padding: "8px", textAlign: "left" }}>Finding Issue</th>
+                        <th style={{ padding: "8px" }}>CIS</th>
+                        <th style={{ padding: "8px" }}>NIST</th>
+                        <th style={{ padding: "8px" }}>GDPR</th>
+                        <th style={{ padding: "8px" }}>HIPAA</th>
+                        <th style={{ padding: "8px" }}>SOC 2</th>
+                        <th style={{ padding: "8px" }}>ISO 27001</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredMisconfigs.map((m, idx) => (
+                        <tr key={m.id || idx} style={{ borderBottom: "1px solid #e2e8f0" }}>
+                          <td style={{ padding: "8px", textAlign: "left", fontWeight: "600" }}>{m.issue}</td>
+                          <td style={{ padding: "8px", color: "#dc2626", fontWeight: "bold" }}>X</td>
+                          <td style={{ padding: "8px", color: m.severity === "CRITICAL" ? "#dc2626" : "#cbd5e1" }}>{m.severity === "CRITICAL" ? "X" : "-"}</td>
+                          <td style={{ padding: "8px", color: m.issue?.includes("Password") || m.issue?.includes("Exposed") ? "#dc2626" : "#cbd5e1" }}>{m.issue?.includes("Password") || m.issue?.includes("Exposed") ? "X" : "-"}</td>
+                          <td style={{ padding: "8px", color: m.severity === "CRITICAL" ? "#dc2626" : "#cbd5e1" }}>{m.severity === "CRITICAL" ? "X" : "-"}</td>
+                          <td style={{ padding: "8px", color: m.issue?.includes("CORS") ? "#dc2626" : "#cbd5e1" }}>{m.issue?.includes("CORS") ? "X" : "-"}</td>
+                          <td style={{ padding: "8px", color: "#dc2626", fontWeight: "bold" }}>X</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <p style={{ textAlign: "center", color: "#94a3b8", padding: "30px 0", fontStyle: "italic" }}>
+                    No compliance violations identified in the current scope.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Full Screen Preview Modal */}
+      <AnimatePresence>
+        {isPreviewModalOpen && (
+          <div
+            style={{
+              position: "fixed",
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              background: "rgba(0, 0, 0, 0.85)",
+              backdropFilter: "blur(6px)",
+              zIndex: 99999,
+              display: "flex",
+              flexDirection: "column",
+              padding: "24px",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+              <h2 style={{ color: "#fff", fontSize: "1.3rem", margin: 0, display: "flex", alignItems: "center", gap: "10px" }}>
+                <FiEye style={{ color: "#38bdf8" }} /> Full Screen Report Preview ({reportType.toUpperCase()})
+              </h2>
+              <button
+                onClick={() => setIsPreviewModalOpen(false)}
+                style={{ background: "none", border: "none", color: "#cbd5e1", fontSize: "24px", cursor: "pointer" }}
+              >
+                <FiX />
+              </button>
+            </div>
+
+            <div style={{ flex: 1, overflowY: "auto", display: "flex", justifyContent: "center" }}>
+              <div
+                style={{
+                  width: "900px",
+                  background: "#fff",
+                  color: "#1e293b",
+                  padding: "48px",
+                  borderRadius: "12px",
+                  fontFamily: "'Times New Roman', serif",
+                }}
+              >
+                <h1 style={{ fontFamily: "'Inter', sans-serif", color: "#0f172a", fontSize: "2rem" }}>{companyName}</h1>
+                <h2 style={{ fontFamily: "'Inter', sans-serif", color: "#2563eb", fontSize: "1.3rem" }}>{reportTitle}</h2>
+                <hr style={{ margin: "20px 0" }} />
+                <p><strong>Generated for:</strong> {companyName}</p>
+                <p><strong>Date:</strong> {new Date().toLocaleDateString()}</p>
+                <p><strong>Total Audited Assets:</strong> {summaryMetrics.totalAssets}</p>
+                <p><strong>Discovered Misconfigurations:</strong> {summaryMetrics.totalFindings}</p>
               </div>
             </div>
           </div>
-        ) : (
-          <p className="empty-copy">Choose an assessment scorecard to inspect its detail or download the scorecard.</p>
         )}
-      </div>
-
-      <div className="panel">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Framework coverage</p>
-            <h2>Compliance mapping</h2>
-          </div>
-        </div>
-        <div className="coverage-list">
-          {Object.entries(summary.compliance_counts || {}).map(([label, count]) => (
-            <div className="coverage-row" key={label}>
-              <span>{label}</span>
-              <strong>{count}</strong>
-            </div>
-          ))}
-          {!Object.keys(summary.compliance_counts || {}).length ? <p className="empty-copy">Compliance mappings appear here as normalized findings are enriched.</p> : null}
-        </div>
-      </div>
-
-      <div className="panel">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Alerting</p>
-            <h2>Delivery automation</h2>
-          </div>
-        </div>
-        <div className="coverage-list">
-          {(alertRules || []).map((rule) => (
-            <div className="coverage-row" key={rule.id}>
-              <span>{rule.name}<p>{rule.channel} → {rule.destination}</p></span>
-              <strong>{rule.min_severity} / {rule.enabled ? "enabled" : "disabled"}</strong>
-            </div>
-          ))}
-          {!alertRules?.length ? <p className="empty-copy">Create alert rules in Integrations to automate report delivery triggers.</p> : null}
-        </div>
-      </div>
-
-      <div className="panel">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Incident reporting</p>
-            <h2>Correlated incidents</h2>
-          </div>
-        </div>
-        <div className="table-wrap">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Title</th>
-                <th>Source</th>
-                <th>Severity</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {localIncidents.map((incident) => (
-                <tr key={incident.id}>
-                  <td data-label="Title"><strong>{incident.title}</strong><p>{incident.target}</p></td>
-                  <td data-label="Source">{incident.source}</td>
-                  <td data-label="Severity">{incident.severity}</td>
-                  <td data-label="Status">
-                    <div className="table-action-stack">
-                      <strong>{incident.status}</strong>
-                      <div className="scan-actions">
-                        <button type="button" className="scan-action" onClick={() => updateIncidentStatus(incident.id, "investigating")}>Investigate</button>
-                        <button type="button" className="scan-action" onClick={() => updateIncidentStatus(incident.id, "contained")}>Contain</button>
-                        <button type="button" className="scan-action" onClick={() => updateIncidentStatus(incident.id, "resolved")}>Resolve</button>
-                      </div>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {!localIncidents.length ? <tr><td colSpan="4"><p className="empty-copy">Correlated incidents will appear here after monitoring events are ingested.</p></td></tr> : null}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div className="panel">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Alert activity</p>
-            <h2>Recent alert events</h2>
-          </div>
-        </div>
-        <div className="table-wrap">
-          <table className="table table--dense">
-            <thead>
-              <tr>
-                <th>Rule</th>
-                <th>Destination</th>
-                <th>Status</th>
-                <th>Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(alertEvents || []).slice(0, 10).map((event) => (
-                <tr key={event.id}>
-                  <td data-label="Rule"><strong>{event.rule_name}</strong><p>{event.channel}</p></td>
-                  <td data-label="Destination">{event.destination}</td>
-                  <td data-label="Status">{event.status}</td>
-                  <td data-label="Created">{new Date(event.created_at).toLocaleString()}</td>
-                </tr>
-              ))}
-              {!alertEvents?.length ? <tr><td colSpan="4"><p className="empty-copy">No alert events have fired yet.</p></td></tr> : null}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div className="panel panel--metrics">
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Priority findings</p>
-            <h2>Top report items</h2>
-          </div>
-        </div>
-        <div className="table-wrap table-wrap--full">
-          <table className="table table--dense">
-            <thead>
-              <tr>
-                <th>Finding</th>
-                <th>Severity</th>
-                <th>Source</th>
-                <th>CVE</th>
-                <th>Open</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summary.top_findings?.map((finding) => (
-                <tr key={finding.id}>
-                  <td data-label="Finding"><strong>{finding.title}</strong></td>
-                  <td data-label="Severity">{finding.severity || "info"}</td>
-                  <td data-label="Source">{finding.source}</td>
-                  <td data-label="CVE">{finding.cve_id || "No CVE"}</td>
-                  <td data-label="Open"><Link className="target-link" to="/findings">Review</Link></td>
-                </tr>
-              ))}
-              {!summary.top_findings?.length ? <tr><td colSpan="5"><p className="empty-copy">Report-ready priority findings will appear here.</p></td></tr> : null}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </section>
+      </AnimatePresence>
+    </div>
   );
 }

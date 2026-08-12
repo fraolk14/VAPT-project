@@ -1,9 +1,11 @@
 import uuid
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 from app.database import Base
+from app.models.iam import user_group_association
 
 
 class UserGroup(Base):
@@ -20,11 +22,13 @@ class User(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     username = Column(String, unique=True, index=True, nullable=False)
+    full_name = Column(String, nullable=True)
     email = Column(String, unique=True, index=True, nullable=False)
     tenant_id = Column(String, nullable=False, default="default", index=True)
     group_name = Column(String, nullable=True, index=True)
     password_hash = Column(String, nullable=False)
     role = Column(String, default="viewer", nullable=False)
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=True)
     auth_source = Column(String, default="local", nullable=False)
     mfa_enabled = Column(Boolean, default=False, nullable=False)
     mfa_secret = Column(String, nullable=True)
@@ -38,3 +42,8 @@ class User(Base):
     last_login_ip = Column(String, nullable=True)
     last_login_user_agent = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+    role_obj = relationship("Role")
+    groups_rel = relationship("Group", secondary=user_group_association, back_populates="users")
+    policies = relationship("Policy", back_populates="user", cascade="all, delete-orphan")

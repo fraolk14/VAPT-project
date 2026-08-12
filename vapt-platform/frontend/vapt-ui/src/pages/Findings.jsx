@@ -4,30 +4,32 @@ import { Link, useSearchParams } from "react-router-dom";
 import api from "../api/client";
 
 const TAB_OPTIONS = [
+  { key: "all", label: "All Findings" },
   { key: "openvas", label: "Network Findings" },
   { key: "zap", label: "Web Findings" },
   { key: "mobsf", label: "Mobile Findings" },
 ];
 
 const TAB_SOURCE_MAP = {
-  openvas: ["openvas", "network-db"],
-  zap: ["zap"],
-  mobsf: ["mobsf"],
+  all: null,
+  openvas: ["openvas", "network-db", "host", "host-scan", "network", "nmap", "Network"],
+  zap: ["zap", "web", "web-scan", "web-db", "zap-proxy", "owasp", "nuclei", "Web"],
+  mobsf: ["mobsf", "mobile", "apk", "ipa", "Mobile"],
 };
 
 const DEFAULT_COLUMN_WIDTHS = {
-  date: 132,
-  severity: 92,
-  title: 210,
-  details: 300,
-  target: 220,
+  date: 130,
+  severity: 95,
+  title: 220,
+  details: 280,
+  target: 200,
   cve: 110,
-  count: 72,
-  cvss: 78,
-  owner: 250,
-  verification: 150,
-  recommendation: 270,
-  status: 96,
+  count: 70,
+  cvss: 75,
+  owner: 240,
+  verification: 140,
+  recommendation: 260,
+  status: 100,
 };
 
 const COLUMN_DEFS = [
@@ -35,31 +37,36 @@ const COLUMN_DEFS = [
   { key: "severity", label: "Severity", sortable: true },
   { key: "title", label: "Title", sortable: true },
   { key: "details", label: "Details", sortable: false },
-  { key: "target", label: "Target", sortable: true },
+  { key: "target", label: "Target Asset", sortable: true },
   { key: "cve", label: "CVE", sortable: true },
   { key: "count", label: "Count", sortable: true },
   { key: "cvss", label: "CVSS", sortable: true },
   { key: "owner", label: "Owner / Group", sortable: true },
-  { key: "verification", label: "Verification", sortable: false },
+  { key: "verification", label: "Verification", sortable: true },
   { key: "recommendation", label: "AI Recommendation", sortable: true },
-  { key: "status", label: "Status", sortable: false },
+  { key: "status", label: "Status", sortable: true },
 ];
 
 function severityLabel(value) {
-  return value || "info";
+  return (value || "info").toLowerCase();
 }
 
+const IS_WEB_SOURCE = (src) => TAB_SOURCE_MAP.zap.includes(src) || (src || "").toLowerCase().includes("web");
+const IS_NETWORK_SOURCE = (src) => TAB_SOURCE_MAP.openvas.includes(src) || (src || "").toLowerCase().includes("network") || (src || "").toLowerCase().includes("host");
+
 function targetLabel(finding) {
-  if (finding.source === "zap") return finding.finding_metadata?.url || "n/a";
-  if (finding.source === "openvas" || finding.source === "network-db") return finding.finding_metadata?.host || `${finding.port}/${finding.protocol}`;
-  return finding.finding_metadata?.file || "n/a";
+  const src = finding.source;
+  if (IS_WEB_SOURCE(src)) return finding.finding_metadata?.url || finding.finding_metadata?.host || finding.target || "n/a";
+  if (IS_NETWORK_SOURCE(src)) return finding.finding_metadata?.host || finding.target || (finding.port ? `${finding.port}/${finding.protocol}` : "n/a");
+  return finding.finding_metadata?.file || finding.target || "n/a";
 }
 
 function targetSummary(finding) {
-  if (finding.source === "zap") {
-    const rawUrl = finding.finding_metadata?.url || "";
+  const src = finding.source;
+  if (IS_WEB_SOURCE(src)) {
+    const rawUrl = finding.finding_metadata?.url || finding.finding_metadata?.host || finding.target || "";
     try {
-      const parsed = new URL(rawUrl);
+      const parsed = new URL(rawUrl.startsWith("http") ? rawUrl : `http://${rawUrl}`);
       return {
         primary: parsed.hostname || rawUrl || "n/a",
         secondary: `${parsed.protocol}//${parsed.host}${parsed.pathname || "/"}`,
@@ -69,66 +76,61 @@ function targetSummary(finding) {
     }
   }
 
-  if (finding.source === "openvas" || finding.source === "network-db") {
+  if (IS_NETWORK_SOURCE(src)) {
     return {
-      primary: finding.finding_metadata?.host || "n/a",
-      secondary: `${finding.port || 0}/${finding.protocol || "tcp"}`,
+      primary: finding.finding_metadata?.host || finding.target || "n/a",
+      secondary: finding.port ? `${finding.port}/${finding.protocol || "tcp"}` : "Network host",
     };
   }
 
   return {
-    primary: finding.finding_metadata?.file || "n/a",
-    secondary: "Mobile artifact",
+    primary: finding.finding_metadata?.file || finding.target || "n/a",
+    secondary: "Mobile package",
   };
 }
 
 function identifierLabel(finding) {
-  return finding.display_id || finding.cve_id || (finding.finding_metadata?.cwe_id ? `CWE-${finding.finding_metadata.cwe_id}` : "n/a");
+  return finding.display_id || finding.cve_id || finding.cve || (finding.finding_metadata?.cwe_id ? `CWE-${finding.finding_metadata.cwe_id}` : "n/a");
 }
 
 function cveValues(finding) {
-  const raw = finding.cve_id || finding.display_id || "";
+  const raw = finding.cve_id || finding.cve || finding.display_id || "";
   const matches = raw.match(/CVE-\d{4}-\d{4,}/gi) || [];
   return [...new Set(matches.map((item) => item.toUpperCase()))];
 }
 
-function aiRecommendation(finding) {
-  const severity = (finding.severity || "info").toLowerCase();
-  const title = (finding.title || "").toLowerCase();
-  if (severity === "critical" || severity === "high") return "Patch immediately and validate fix with a re-scan.";
-  if (title.includes("csp") || title.includes("header")) return "Harden the web security headers and re-test the exposed routes.";
-  if (title.includes("secret") || title.includes("credential")) return "Rotate exposed secrets and move them into managed secret storage.";
-  if (finding.source === "openvas" || finding.source === "network-db") return "Prioritize the exposed service, reduce attack surface, and confirm closure with validation.";
-  return "Review impact, assign an owner, and schedule validation after remediation.";
-}
-
 function detailsSummary(finding) {
   const correlation = finding.finding_metadata?.correlation || {};
-  return correlation.correlation_summary || finding.evidence || finding.remediation || "No additional detail captured.";
+  return correlation.correlation_summary || finding.evidence || finding.details || finding.remediation || "No additional detail captured.";
 }
 
 function findingMatchesTab(finding, tabKey) {
-  return (TAB_SOURCE_MAP[tabKey] || [tabKey]).includes(finding.source);
+  if (tabKey === "all") return true;
+  const sources = TAB_SOURCE_MAP[tabKey] || [tabKey];
+  const src = (finding.source || "").toLowerCase();
+  const cat = (finding.category || "").toLowerCase();
+  return sources.some((s) => src.includes(s.toLowerCase()) || cat.includes(s.toLowerCase()));
 }
 
 function sortValue(finding, sortKey) {
   if (sortKey === "severity") {
     return { critical: 5, high: 4, medium: 3, low: 2, info: 1 }[(finding.severity || "info").toLowerCase()] || 0;
   }
-  if (sortKey === "count") return finding.duplicate_count || 1;
+  if (sortKey === "count") return finding.duplicate_count || finding.count || 1;
   if (sortKey === "cvss") return finding.cvss_score || 0;
   if (sortKey === "title") return finding.title || "";
-  if (sortKey === "cve") return finding.cve_id || "";
-  if (sortKey === "reference") return identifierLabel(finding);
+  if (sortKey === "cve") return finding.cve_id || finding.cve || "";
   if (sortKey === "owner") return `${finding.assigned_to || ""} ${finding.team_name || ""}`.trim();
-  if (sortKey === "date") return finding.detected_at || "";
-  if (sortKey === "recommendation") return aiRecommendation(finding);
+  if (sortKey === "date") return finding.detected_at || finding.discovered_at || "";
+  if (sortKey === "status") return finding.status || "";
+  if (sortKey === "verification") return finding.verification_state || finding.verification_status || "";
   return targetLabel(finding);
 }
 
 function detectedLabel(finding) {
-  if (!finding.detected_at) return "n/a";
-  return new Date(finding.detected_at).toLocaleString();
+  const dt = finding.detected_at || finding.discovered_at;
+  if (!dt) return "n/a";
+  return new Date(dt).toLocaleString();
 }
 
 function renderCveLinks(finding) {
@@ -155,18 +157,26 @@ function renderCveLinks(finding) {
 export default function Findings({ findings, users, groups }) {
   const [searchParams] = useSearchParams();
   const resizeStateRef = useRef(null);
-  const [localFindings, setLocalFindings] = useState(findings);
-  const [activeTab, setActiveTab] = useState("openvas");
+  const [localFindings, setLocalFindings] = useState(findings || []);
+  const [activeTab, setActiveTab] = useState("all");
+  
+  // Advanced Filters
+  const [severityFilter, setSeverityFilter] = useState("ALL");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [verificationFilter, setVerificationFilter] = useState("ALL");
+
   const [pageSize, setPageSize] = useState(10);
   const [pageIndex, setPageIndex] = useState(0);
   const [assignmentState, setAssignmentState] = useState({});
   const [sortState, setSortState] = useState({ key: "date", direction: "desc" });
+  
   const [aiRecommendations, setAiRecommendations] = useState({});
   const [aiProvider, setAiProvider] = useState("nvidia-nim");
   const [aiStatus, setAiStatus] = useState("loading");
   const [expandedRecommendations, setExpandedRecommendations] = useState({});
   const [expandedDetails, setExpandedDetails] = useState({});
   const [columnWidths, setColumnWidths] = useState(DEFAULT_COLUMN_WIDTHS);
+  
   const selectedTarget = searchParams.get("target") || "";
   const queryParam = searchParams.get("q") || "";
   const [queryText, setQueryText] = useState(queryParam);
@@ -176,42 +186,59 @@ export default function Findings({ findings, users, groups }) {
   }, [queryParam]);
 
   useEffect(() => {
-    setLocalFindings(findings);
+    setLocalFindings(findings || []);
   }, [findings]);
 
+  // Handle selected target from URL query params
   useEffect(() => {
     if (!localFindings.length) return;
-
     if (selectedTarget) {
       const matched = localFindings.find((finding) => targetLabel(finding) === selectedTarget);
       if (matched?.source) {
-        const matchedTab = TAB_OPTIONS.find((tab) => findingMatchesTab(matched, tab.key));
+        const matchedTab = TAB_OPTIONS.find((tab) => tab.key !== "all" && findingMatchesTab(matched, tab.key));
         if (matchedTab) {
           setActiveTab(matchedTab.key);
-          return;
         }
       }
     }
-
-    const availableTab = TAB_OPTIONS.find((tab) => localFindings.some((finding) => findingMatchesTab(finding, tab.key)));
-    if (availableTab && !localFindings.some((finding) => findingMatchesTab(finding, activeTab))) {
-      setActiveTab(availableTab.key);
-    }
-  }, [localFindings, selectedTarget, activeTab]);
+  }, [localFindings, selectedTarget]);
 
   useEffect(() => {
     setPageIndex(0);
-  }, [activeTab, pageSize, sortState]);
+  }, [activeTab, severityFilter, statusFilter, verificationFilter, pageSize, sortState, queryText]);
 
-  const tabFindings = useMemo(() => {
+  // Multi-criteria Filtering & Sorting
+  const filteredAndSortedFindings = useMemo(() => {
     const needle = (queryText || selectedTarget).trim().toLowerCase();
+    
     const filtered = localFindings.filter((finding) => {
+      // 1. Tab source filter
       if (!findingMatchesTab(finding, activeTab)) return false;
+
+      // 2. Severity Filter
+      if (severityFilter !== "ALL" && (finding.severity || "").toUpperCase() !== severityFilter) {
+        return false;
+      }
+
+      // 3. Status Filter
+      if (statusFilter !== "ALL" && (finding.status || "").toUpperCase() !== statusFilter) {
+        return false;
+      }
+
+      // 4. Verification Status Filter
+      if (verificationFilter !== "ALL") {
+        const vState = (finding.verification_state || finding.verification_status || "").toUpperCase();
+        if (vState !== verificationFilter) return false;
+      }
+
+      // 5. Search Text Filter
       if (!needle) return true;
       const target = targetLabel(finding);
-      const blob = `${target} ${(finding.title || "")} ${(finding.evidence || "")}`.toLowerCase();
+      const cveStr = cveValues(finding).join(" ");
+      const blob = `${target} ${(finding.title || "")} ${(finding.evidence || "")} ${(finding.details || "")} ${cveStr}`.toLowerCase();
       return blob.includes(needle);
     });
+
     const sorted = [...filtered].sort((left, right) => {
       const leftValue = sortValue(left, sortState.key);
       const rightValue = sortValue(right, sortState.key);
@@ -219,12 +246,14 @@ export default function Findings({ findings, users, groups }) {
       if (leftValue > rightValue) return sortState.direction === "asc" ? 1 : -1;
       return 0;
     });
+
     return sorted;
-  }, [localFindings, activeTab, sortState, queryText, selectedTarget]);
+  }, [localFindings, activeTab, severityFilter, statusFilter, verificationFilter, sortState, queryText, selectedTarget]);
 
-  const totalPages = Math.max(1, Math.ceil(tabFindings.length / pageSize));
-  const visibleFindings = tabFindings.slice(pageIndex * pageSize, pageIndex * pageSize + pageSize);
+  const totalPages = Math.max(1, Math.ceil(filteredAndSortedFindings.length / pageSize));
+  const visibleFindings = filteredAndSortedFindings.slice(pageIndex * pageSize, pageIndex * pageSize + pageSize);
 
+  // Fetch AI Recommendations
   useEffect(() => {
     if (!visibleFindings.length) return;
     const pendingIds = visibleFindings.map((finding) => finding.id).filter((id) => !aiRecommendations[id]);
@@ -244,6 +273,7 @@ export default function Findings({ findings, users, groups }) {
     });
   }, [visibleFindings, aiRecommendations]);
 
+  // Update Finding Assignment / Verification / Status
   const updateFinding = async (findingId) => {
     const payload = assignmentState[findingId];
     if (!payload) return;
@@ -256,7 +286,7 @@ export default function Findings({ findings, users, groups }) {
       });
       setLocalFindings((current) => current.map((item) => (item.id === findingId ? response.data : item)));
     } catch {
-      // quiet for now
+      // Graceful error handling
     }
   };
 
@@ -265,15 +295,9 @@ export default function Findings({ findings, users, groups }) {
       const response = await api.patch(`/findings/${findingId}`, { mark_false_positive: true });
       setLocalFindings((current) => current.map((item) => (item.id === findingId ? response.data : item)));
     } catch {
-      // quiet for now
+      // Graceful error handling
     }
   };
-
-  useEffect(() => {
-    if (!selectedTarget) return;
-    const row = document.querySelector(".finding-row--selected");
-    if (row) row.scrollIntoView({ behavior: "smooth", block: "center" });
-  }, [selectedTarget, visibleFindings]);
 
   const toggleSort = (key) => {
     setSortState((current) => (
@@ -291,7 +315,7 @@ export default function Findings({ findings, users, groups }) {
   );
 
   const recommendationPreview = (finding) => {
-    const text = aiRecommendations[finding.id] || (aiStatus === "error" ? "NVIDIA NIM recommendation unavailable right now." : "Analyzing with NVIDIA NIM...");
+    const text = aiRecommendations[finding.id] || (finding.ai_recommendation ? finding.ai_recommendation : (aiStatus === "error" ? "AI recommendation unavailable." : "Analyzing remediation..."));
     const expanded = expandedRecommendations[finding.id];
     if (expanded || text.length <= 112) return text;
     return `${text.slice(0, 112).trim()}...`;
@@ -351,42 +375,128 @@ export default function Findings({ findings, users, groups }) {
     </th>
   );
 
+  // Empty state copy depending on selected tab
+  const getEmptyStateMessage = () => {
+    if (activeTab === "openvas") return "No network findings detected";
+    if (activeTab === "zap") return "No web findings detected";
+    if (activeTab === "mobsf") return "No mobile findings detected";
+    return "No findings found";
+  };
+
   return (
-    <section className="panel">
-      <div className="panel__header">
+    <section className="panel" style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "12px", padding: "24px" }}>
+      {/* Panel Header & Controls */}
+      <div className="panel__header" style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: "16px", marginBottom: "20px" }}>
         <div>
-          <p className="eyebrow">Normalized results</p>
-          <h2>Findings</h2>
+          <p className="eyebrow" style={{ color: "#38bdf8", textTransform: "uppercase", fontSize: "0.75rem", letterSpacing: "1px" }}>
+            Security Findings Engine
+          </p>
+          <h2 style={{ color: "#f8fafc", margin: "4px 0 0 0", fontSize: "1.5rem" }}>
+            Vulnerability Findings & Telemetry
+          </h2>
         </div>
-        <div className="table-controls">
+
+        {/* Global Controls & Filters */}
+        <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+          {/* Search Box */}
           <input
             className="scan-input"
-            placeholder="Search host, IP, URL, or title"
+            placeholder="Search title, target, CVE, details..."
             value={queryText}
             onChange={(event) => setQueryText(event.target.value)}
+            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "8px 12px", borderRadius: "6px", minWidth: "220px" }}
           />
-          <select className="scan-select" value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>
-            <option value={10}>10 per page</option>
-            <option value={20}>20 per page</option>
+
+          {/* Severity Filter */}
+          <select
+            value={severityFilter}
+            onChange={(e) => setSeverityFilter(e.target.value)}
+            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "8px 12px", borderRadius: "6px" }}
+          >
+            <option value="ALL">All Severities</option>
+            <option value="CRITICAL">Critical</option>
+            <option value="HIGH">High</option>
+            <option value="MEDIUM">Medium</option>
+            <option value="LOW">Low</option>
+            <option value="INFO">Info</option>
           </select>
-          <span className="topbar__user-label">AI source {aiProvider}</span>
-          <span className="topbar__user-label">
-            {aiStatus === "ready" ? "NVIDIA NIM live" : aiStatus === "fallback" ? "Fallback active" : aiStatus === "error" ? "AI unavailable" : "Loading AI"}
-          </span>
+
+          {/* Status Filter */}
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "8px 12px", borderRadius: "6px" }}
+          >
+            <option value="ALL">All Statuses</option>
+            <option value="OPEN">Open</option>
+            <option value="IN_PROGRESS">In Progress</option>
+            <option value="RESOLVED">Resolved</option>
+            <option value="FALSE_POSITIVE">False Positive</option>
+          </select>
+
+          {/* Verification Status Filter */}
+          <select
+            value={verificationFilter}
+            onChange={(e) => setVerificationFilter(e.target.value)}
+            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "8px 12px", borderRadius: "6px" }}
+          >
+            <option value="ALL">All Verifications</option>
+            <option value="PENDING">Pending</option>
+            <option value="VERIFIED">Verified</option>
+            <option value="UNVERIFIED">Unverified</option>
+            <option value="FALSE_POSITIVE">False Positive</option>
+          </select>
+
+          {/* Page Size */}
+          <select
+            className="scan-select"
+            value={pageSize}
+            onChange={(event) => setPageSize(Number(event.target.value))}
+            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "8px 12px", borderRadius: "6px" }}
+          >
+            <option value={10}>10 per page</option>
+            <option value={25}>25 per page</option>
+            <option value={50}>50 per page</option>
+            <option value={100}>100 per page</option>
+          </select>
         </div>
       </div>
 
-      <div className="subtabs">
-        {TAB_OPTIONS.map((tab) => (
-          <button key={tab.key} type="button" className={activeTab === tab.key ? "subtab is-active" : "subtab"} onClick={() => setActiveTab(tab.key)}>
-            {tab.label}
-            <span>{localFindings.filter((finding) => findingMatchesTab(finding, tab.key)).length}</span>
-          </button>
-        ))}
+      {/* Target Type Filter Tabs (All / Network / Web / Mobile) */}
+      <div className="subtabs" style={{ display: "flex", gap: "8px", borderBottom: "1px solid #1e293b", paddingBottom: "12px", marginBottom: "16px" }}>
+        {TAB_OPTIONS.map((tab) => {
+          const count = localFindings.filter((finding) => findingMatchesTab(finding, tab.key)).length;
+          return (
+            <button
+              key={tab.key}
+              type="button"
+              className={activeTab === tab.key ? "subtab is-active" : "subtab"}
+              onClick={() => setActiveTab(tab.key)}
+              style={{
+                background: activeTab === tab.key ? "#0284c722" : "#1e293b",
+                color: activeTab === tab.key ? "#38bdf8" : "#94a3b8",
+                border: `1px solid ${activeTab === tab.key ? "#0284c766" : "#334155"}`,
+                padding: "8px 16px",
+                borderRadius: "6px",
+                fontWeight: 600,
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+              }}
+            >
+              {tab.label}
+              <span style={{ background: "#0f172a", padding: "2px 6px", borderRadius: "10px", fontSize: "0.75rem" }}>
+                {count}
+              </span>
+            </button>
+          );
+        })}
       </div>
 
-      <div className="table-wrap">
-        <table className="table findings-table-compact findings-table-layout">
+      {/* Findings Data Table */}
+      <div className="table-wrap" style={{ overflowX: "auto" }}>
+        <table className="table findings-table-compact findings-table-layout" style={{ width: "100%", borderCollapse: "collapse" }}>
           <colgroup>
             {COLUMN_DEFS.map((column) => (
               <col
@@ -397,65 +507,152 @@ export default function Findings({ findings, users, groups }) {
             ))}
           </colgroup>
           <thead>
-            <tr>{COLUMN_DEFS.map(renderHeaderCell)}</tr>
+            <tr style={{ borderBottom: "1px solid #334155", textAlign: "left" }}>
+              {COLUMN_DEFS.map(renderHeaderCell)}
+            </tr>
           </thead>
           <tbody>
             {visibleFindings.map((finding) => {
               const draft = assignmentState[finding.id] || {
                 assigned_to: finding.assigned_to || "",
                 team_name: finding.team_name || "",
-                verification_state: finding.verification_state || "pending",
-                status: finding.status || "open",
+                verification_state: finding.verification_state || finding.verification_status || "pending",
+                status: finding.status || "OPEN",
               };
+              const targetSum = targetSummary(finding);
+
               return (
-                <tr key={finding.id} className={targetLabel(finding) === selectedTarget ? "finding-row--selected" : ""}>
-                  <td data-label="Date">{detectedLabel(finding)}</td>
-                  <td data-label="Severity"><span className={`pill pill--${severityLabel(finding.severity)}`}>{severityLabel(finding.severity)}</span></td>
-                  <td data-label="Title">
-                    <Link className="finding-title-link" to={`/findings/${finding.id}`}>
+                <tr
+                  key={finding.id}
+                  className={targetLabel(finding) === selectedTarget ? "finding-row--selected" : ""}
+                  style={{ borderBottom: "1px solid #1e293b" }}
+                >
+                  {/* Date */}
+                  <td data-label="Date" style={{ padding: "12px", fontSize: "0.85rem", color: "#94a3b8" }}>
+                    {detectedLabel(finding)}
+                  </td>
+
+                  {/* Severity */}
+                  <td data-label="Severity" style={{ padding: "12px" }}>
+                    <span className={`pill pill--${severityLabel(finding.severity)}`}>
+                      {severityLabel(finding.severity).toUpperCase()}
+                    </span>
+                  </td>
+
+                  {/* Title & Port */}
+                  <td data-label="Title" style={{ padding: "12px" }}>
+                    <Link className="finding-title-link" to={`/findings/${finding.id}`} style={{ fontWeight: 600, color: "#38bdf8", textDecoration: "none" }}>
                       {finding.title}
                     </Link>
-                    <p>{finding.port}/{finding.protocol}</p>
+                    {finding.port && (
+                      <p style={{ margin: "2px 0 0 0", fontSize: "0.75rem", color: "#64748b", fontFamily: "monospace" }}>
+                        {finding.port}/{finding.protocol || "tcp"}
+                      </p>
+                    )}
                   </td>
-                  <td data-label="Details">
+
+                  {/* Details */}
+                  <td data-label="Details" style={{ padding: "12px", fontSize: "0.85rem", color: "#cbd5e1" }}>
                     <div className="recommendation-cell">
-                      <span className={expandedDetails[finding.id] ? "finding-detail-copy is-expanded" : "finding-detail-copy"}>{detailsPreview(finding)}</span>
-                      {detailsSummary(finding).length > 150 ? (
+                      <span className={expandedDetails[finding.id] ? "finding-detail-copy is-expanded" : "finding-detail-copy"}>
+                        {detailsPreview(finding)}
+                      </span>
+                      {detailsSummary(finding).length > 150 && (
                         <button
                           type="button"
                           className="recommendation-cell__toggle"
                           onClick={() => setExpandedDetails((current) => ({ ...current, [finding.id]: !current[finding.id] }))}
+                          style={{ background: "none", border: "none", color: "#38bdf8", cursor: "pointer", fontSize: "0.75rem", padding: 0, marginTop: "4px" }}
                         >
                           {expandedDetails[finding.id] ? "See less" : "See more"}
                         </button>
-                      ) : null}
+                      )}
                     </div>
                   </td>
-                  <td data-label="Target"><strong>{targetSummary(finding).primary}</strong><p>{targetSummary(finding).secondary}</p></td>
-                  <td data-label="CVE">{renderCveLinks(finding)}</td>
-                  <td data-label="Count">{finding.duplicate_count || 1}</td>
-                  <td data-label="CVSS">{finding.cvss_score || "n/a"}</td>
-                  <td data-label="Owner / Group">
-                    <div className="finding-actions-cell">
-                      <select className="scan-select" value={draft.assigned_to} onChange={(event) => setAssignmentState((current) => ({ ...current, [finding.id]: { ...draft, assigned_to: event.target.value } }))}>
-                        <option value="">Unassigned</option>
+
+                  {/* Target Asset Link */}
+                  <td data-label="Target Asset" style={{ padding: "12px" }}>
+                    <Link
+                      to={`/hosts?target=${encodeURIComponent(targetSum.primary)}`}
+                      style={{ color: "#f8fafc", fontWeight: 600, textDecoration: "none" }}
+                      title="View Asset details on Hosts page"
+                    >
+                      {targetSum.primary}
+                    </Link>
+                    <p style={{ margin: "2px 0 0 0", fontSize: "0.75rem", color: "#64748b" }}>
+                      {targetSum.secondary}
+                    </p>
+                  </td>
+
+                  {/* CVE */}
+                  <td data-label="CVE" style={{ padding: "12px" }}>
+                    {renderCveLinks(finding)}
+                  </td>
+
+                  {/* Count */}
+                  <td data-label="Count" style={{ padding: "12px", textAlign: "center", color: "#94a3b8" }}>
+                    {finding.duplicate_count || finding.count || 1}
+                  </td>
+
+                  {/* CVSS */}
+                  <td data-label="CVSS" style={{ padding: "12px", fontWeight: 700, color: (finding.cvss_score || 0) >= 7.0 ? "#ef4444" : "#eab308" }}>
+                    {finding.cvss_score != null ? finding.cvss_score.toFixed(1) : "n/a"}
+                  </td>
+
+                  {/* Owner / Group Assignment (IAM Integration) */}
+                  <td data-label="Owner / Group" style={{ padding: "12px" }}>
+                    <div className="finding-actions-cell" style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                      <select
+                        className="scan-select"
+                        value={draft.assigned_to}
+                        onChange={(event) => setAssignmentState((current) => ({ ...current, [finding.id]: { ...draft, assigned_to: event.target.value } }))}
+                        style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "4px 8px", borderRadius: "4px", fontSize: "0.8rem" }}
+                      >
+                        <option value="">-- Assign Owner --</option>
                         {(users || []).map((entry) => (
-                          <option key={entry.id} value={entry.username}>{entry.username}</option>
+                          <option key={entry.id || entry.username} value={entry.username}>
+                            {entry.username} ({entry.role || "User"})
+                          </option>
                         ))}
                       </select>
-                      <select className="scan-select" value={draft.team_name} onChange={(event) => setAssignmentState((current) => ({ ...current, [finding.id]: { ...draft, team_name: event.target.value } }))}>
-                        <option value="">No group</option>
+
+                      <select
+                        className="scan-select"
+                        value={draft.team_name}
+                        onChange={(event) => setAssignmentState((current) => ({ ...current, [finding.id]: { ...draft, team_name: event.target.value } }))}
+                        style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "4px 8px", borderRadius: "4px", fontSize: "0.8rem" }}
+                      >
+                        <option value="">-- Assign Group --</option>
                         {(groups || []).map((group) => (
-                          <option key={group.id} value={group.name}>{group.name}</option>
+                          <option key={group.id || group.name} value={group.name}>
+                            {group.name}
+                          </option>
                         ))}
                       </select>
-                      <div className="scan-actions">
-                        <button type="button" className="scan-action scan-action--resume" onClick={() => updateFinding(finding.id)}>Assign</button>
-                        <button type="button" className="scan-action scan-action--cancel" onClick={() => markFalsePositive(finding.id)}>False Positive</button>
+
+                      <div className="scan-actions" style={{ display: "flex", gap: "4px", marginTop: "2px" }}>
+                        <button
+                          type="button"
+                          className="scan-action scan-action--resume"
+                          onClick={() => updateFinding(finding.id)}
+                          style={{ background: "#0284c722", color: "#38bdf8", border: "1px solid #0284c744", padding: "2px 8px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem" }}
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          className="scan-action scan-action--cancel"
+                          onClick={() => markFalsePositive(finding.id)}
+                          style={{ background: "#451a1a", color: "#fca5a5", border: "1px solid #7f1d1d", padding: "2px 8px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem" }}
+                        >
+                          False Positive
+                        </button>
                       </div>
                     </div>
                   </td>
-                  <td data-label="Verification">
+
+                  {/* Verification Status */}
+                  <td data-label="Verification" style={{ padding: "12px" }}>
                     <select
                       className="scan-select"
                       value={draft.verification_state}
@@ -466,38 +663,46 @@ export default function Findings({ findings, users, groups }) {
                         if (verification_state === "verified") nextStatus = "resolved";
                         setAssignmentState((current) => ({ ...current, [finding.id]: { ...draft, verification_state, status: nextStatus } }));
                       }}
+                      style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "4px 8px", borderRadius: "4px", fontSize: "0.8rem" }}
                     >
                       <option value="pending">Pending</option>
+                      <option value="unverified">Unverified</option>
                       <option value="in_review">In Review</option>
                       <option value="scheduled">Scheduled</option>
                       <option value="verified">Verified</option>
                     </select>
                   </td>
-                  <td data-label="AI Recommendation">
+
+                  {/* AI Recommendation */}
+                  <td data-label="AI Recommendation" style={{ padding: "12px", fontSize: "0.85rem", color: "#cbd5e1" }}>
                     <div className="recommendation-cell">
                       <span>{recommendationPreview(finding)}</span>
-                      {(aiRecommendations[finding.id] || "").length > 112 ? (
+                      {(aiRecommendations[finding.id] || finding.ai_recommendation || "").length > 112 && (
                         <button
                           type="button"
                           className="recommendation-cell__toggle"
                           onClick={() => setExpandedRecommendations((current) => ({ ...current, [finding.id]: !current[finding.id] }))}
+                          style={{ background: "none", border: "none", color: "#38bdf8", cursor: "pointer", fontSize: "0.75rem", padding: 0, marginTop: "4px" }}
                         >
                           {expandedRecommendations[finding.id] ? "See less" : "See more"}
                         </button>
-                      ) : null}
+                      )}
                     </div>
                   </td>
-                  <td data-label="Status">
+
+                  {/* Status */}
+                  <td data-label="Status" style={{ padding: "12px" }}>
                     <select
                       className="scan-select"
                       value={draft.status}
                       onChange={(event) => {
                         const status = event.target.value;
                         let nextVerification = draft.verification_state || "pending";
-                        if (status === "resolved") nextVerification = "verified";
-                        else if (status === "in_progress" && nextVerification === "pending") nextVerification = "scheduled";
+                        if (status === "resolved" || status === "RESOLVED") nextVerification = "verified";
+                        else if ((status === "in_progress" || status === "IN_PROGRESS") && nextVerification === "pending") nextVerification = "scheduled";
                         setAssignmentState((current) => ({ ...current, [finding.id]: { ...draft, status, verification_state: nextVerification } }));
                       }}
+                      style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "4px 8px", borderRadius: "4px", fontSize: "0.8rem" }}
                     >
                       <option value="open">Open</option>
                       <option value="in_progress">In Progress</option>
@@ -507,21 +712,51 @@ export default function Findings({ findings, users, groups }) {
                 </tr>
               );
             })}
-            {!visibleFindings.length ? (
+
+            {/* Empty State - Absolute No Mock Data */}
+            {!visibleFindings.length && (
               <tr>
-                <td colSpan="12"><p className="empty-copy">No findings are available in this category yet.</p></td>
+                <td colSpan="12" style={{ textAlign: "center", padding: "48px 16px", color: "#64748b" }}>
+                  <p style={{ fontSize: "1rem", fontWeight: 600, color: "#94a3b8", margin: 0 }}>
+                    {getEmptyStateMessage()}
+                  </p>
+                  <p style={{ fontSize: "0.85rem", margin: "4px 0 0 0" }}>
+                    No vulnerability findings matched your filter or search criteria.
+                  </p>
+                </td>
               </tr>
-            ) : null}
+            )}
           </tbody>
         </table>
       </div>
 
-      <div className="pagination-bar">
-        <span>Showing {visibleFindings.length ? pageIndex * pageSize + 1 : 0}-{Math.min((pageIndex + 1) * pageSize, tabFindings.length)} of {tabFindings.length}</span>
-        <div className="scan-actions">
-          <button type="button" className="scan-action" disabled={pageIndex === 0} onClick={() => setPageIndex((current) => Math.max(current - 1, 0))}>Previous</button>
-          <span className="pagination-page">Page {pageIndex + 1} of {totalPages}</span>
-          <button type="button" className="scan-action" disabled={pageIndex >= totalPages - 1} onClick={() => setPageIndex((current) => Math.min(current + 1, totalPages - 1))}>Next</button>
+      {/* Pagination Bar */}
+      <div className="pagination-bar" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "20px", color: "#94a3b8", fontSize: "0.875rem" }}>
+        <span>
+          Showing {visibleFindings.length ? pageIndex * pageSize + 1 : 0}-{Math.min((pageIndex + 1) * pageSize, filteredAndSortedFindings.length)} of {filteredAndSortedFindings.length} findings
+        </span>
+        <div className="scan-actions" style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+          <button
+            type="button"
+            className="scan-action"
+            disabled={pageIndex === 0}
+            onClick={() => setPageIndex((current) => Math.max(current - 1, 0))}
+            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "6px 12px", borderRadius: "6px", cursor: pageIndex === 0 ? "not-allowed" : "pointer" }}
+          >
+            Previous
+          </button>
+          <span className="pagination-page">
+            Page {pageIndex + 1} of {totalPages}
+          </span>
+          <button
+            type="button"
+            className="scan-action"
+            disabled={pageIndex >= totalPages - 1}
+            onClick={() => setPageIndex((current) => Math.min(current + 1, totalPages - 1))}
+            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "6px 12px", borderRadius: "6px", cursor: pageIndex >= totalPages - 1 ? "not-allowed" : "pointer" }}
+          >
+            Next
+          </button>
         </div>
       </div>
     </section>

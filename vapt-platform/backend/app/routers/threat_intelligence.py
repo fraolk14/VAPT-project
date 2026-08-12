@@ -72,3 +72,19 @@ def get_attack_map_data(db: Session = Depends(get_db)):
             ti_events=abusech_events,
         )
     )
+
+
+@router.get("/attack-map/data")
+@router.get("/v1/attack-map/data")
+def get_attack_map_dashboard(
+    time_range: str = Query(default="24h"),
+    db: Session = Depends(get_db)
+):
+    from app.services.threat_intelligence import build_attack_map_dashboard_data
+    return build_attack_map_dashboard_data(db, time_range=time_range)
+
+
+@router.get("/{target:path}")
+def get_target_threat_intelligence(target: str, db: Session = Depends(get_db)):
+    from app.services.threat_intelligence import get_target_threat_intel
+    return get_target_threat_intel(db, target)

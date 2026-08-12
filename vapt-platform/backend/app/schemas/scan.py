@@ -114,3 +114,34 @@ class ScanDebugResponse(BaseModel):
     result_summary: dict[str, Any] = Field(default_factory=dict)
     related_findings: list[FindingOut] = Field(default_factory=list)
     audit_trail: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ScanJobCreateSchema(BaseModel):
+    name: str
+    engine: str = "Network"  # "Network", "Web", "Mobile"
+    target: str
+    target_type: str = "IP"  # "IP", "Domain", "CIDR", "URL", "APK"
+    scheduled_at: Optional[datetime] = None
+    schedule_interval: Optional[str] = None  # "Daily", "Weekly", "Monthly"
+    asset_id: Optional[str] = None
+
+
+class ScanJobResponseSchema(BaseModel):
+    id: int
+    name: str
+    engine: str
+    target: str
+    target_type: str
+    status: str
+    progress: int
+    scheduled_at: Optional[datetime] = None
+    schedule_interval: Optional[str] = None
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    asset_id: Optional[str] = None
+    user_id: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+

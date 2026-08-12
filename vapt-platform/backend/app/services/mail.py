@@ -10,8 +10,8 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "1025"))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "false").lower() == "true"
-EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@vapticom.local")
-PLATFORM_NAME = os.getenv("PLATFORM_NAME", "VAPTICOM")
+EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@vap.local")
+PLATFORM_NAME = os.getenv("PLATFORM_NAME", "VAP")
 
 
 def email_config_status() -> dict[str, str | bool | int]:

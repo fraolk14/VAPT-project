@@ -28,8 +28,17 @@ router = APIRouter(prefix="/reports", tags=["Reports"])
 
 class ReportRequest(BaseModel):
     mode: str = "executive"
+    format: str = "pdf"
     selected_targets: list[str] = Field(default_factory=list)
     report_title: str | None = None
+    company_name: str | None = None
+    author_name: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    include_cves: bool = True
+    include_remediation: bool = True
+    include_raw_scan: bool = True
+    include_compliance_map: bool = True
 
 
 class ReportDownloadLinkResponse(BaseModel):
@@ -192,4 +201,261 @@ def export_pdf(mode: str = Query(default="executive"), db: Session = Depends(get
         content=payload,
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename=findings-report-{normalized_mode}.pdf"},
+    )
+
+
+@router.get("/data/{scan_job_id}")
+@router.get("/v1/data/{scan_job_id}")
+def get_report_data(scan_job_id: str, db: Session = Depends(get_db)):
+    from app.models.misconfiguration import MisconfigAsset, Misconfiguration, ScanJob
+
+    job = None
+    if scan_job_id not in {"latest", "null", "undefined"}:
+        try:
+            job_id_int = int(scan_job_id)
+            job = db.get(ScanJob, job_id_int)
+        except ValueError:
+            pass
+
+    if not job:
+        job = db.query(ScanJob).order_by(ScanJob.id.desc()).first()
+
+    if not job:
+        return {
+            "scan_job_id": None,
+            "scope": None,
+            "scope_type": None,
+            "status": "COMPLETED",
+            "summary": {
+                "total_assets": 0,
+                "total_findings": 0,
+                "critical_count": 0,
+                "high_count": 0,
+                "medium_count": 0,
+                "low_count": 0,
+                "compliance_score": 100,
+            },
+            "assets": [],
+            "misconfigurations": [],
+            "compliance_map": []
+        }
+
+    assets = db.query(MisconfigAsset).filter(MisconfigAsset.scan_job_id == job.id).all()
+    asset_ids = [a.id for a in assets]
+    misconfigs = db.query(Misconfiguration).filter(Misconfiguration.asset_id.in_(asset_ids)).all() if asset_ids else []
+
+    findings = db.query(Finding).all()
+
+    crit_cnt = len([m for m in misconfigs if m.severity.upper() == "CRITICAL"]) + len([f for f in findings if (f.severity or "").lower() == "critical"])
+    high_cnt = len([m for m in misconfigs if m.severity.upper() == "HIGH"]) + len([f for f in findings if (f.severity or "").lower() == "high"])
+    med_cnt = len([m for m in misconfigs if m.severity.upper() == "MEDIUM"]) + len([f for f in findings if (f.severity or "").lower() == "medium"])
+    low_cnt = len([m for m in misconfigs if m.severity.upper() == "LOW"]) + len([f for f in findings if (f.severity or "").lower() == "low"])
+
+    total_assets_cnt = max(1, len(assets) or len(set(m.hostname for m in assets if m.hostname)))
+    penalty = (crit_cnt * 25 + high_cnt * 12 + med_cnt * 5 + low_cnt * 1) / (total_assets_cnt * 2)
+    comp_score = min(100, max(20, round(100 - penalty)))
+
+    asset_list = [
+        {
+            "id": a.id,
+            "ip": a.ip,
+            "hostname": a.hostname,
+            "asset_type": a.asset_type,
+            "os_type": a.os_type,
+            "discovered_at": a.discovered_at.isoformat() if a.discovered_at else None,
+        }
+        for a in assets
+    ]
+
+    misconfig_list = [
+        {
+            "id": f"m_{m.id}",
+            "asset_id": m.asset_id,
+            "ip": db.get(MisconfigAsset, m.asset_id).ip if db.get(MisconfigAsset, m.asset_id) else "127.0.0.1",
+            "hostname": db.get(MisconfigAsset, m.asset_id).hostname if db.get(MisconfigAsset, m.asset_id) else job.scope,
+            "asset_type": db.get(MisconfigAsset, m.asset_id).asset_type if db.get(MisconfigAsset, m.asset_id) else "OS",
+            "port": 443 if "Web" in m.issue or "HTTP" in m.issue else 22,
+            "issue": m.issue,
+            "severity": m.severity.upper(),
+            "cve": m.cve,
+            "detected_by": m.detected_by,
+            "remediation": m.remediation,
+            "status": m.status,
+            "discovered_at": m.discovered_at.isoformat() if m.discovered_at else None,
+        }
+        for m in misconfigs
+    ]
+
+    for f in findings:
+        metadata = f.finding_metadata or {}
+        misconfig_list.append({
+            "id": f"f_{f.id}",
+            "asset_id": 0,
+            "ip": metadata.get("host") or metadata.get("ip_address") or "127.0.0.1",
+            "hostname": metadata.get("url") or metadata.get("host") or f.source,
+            "asset_type": "Website" if f.source == "zap" else "OS",
+            "port": metadata.get("port", 443),
+            "issue": f.title,
+            "severity": (f.severity or "MEDIUM").upper(),
+            "cve": f.cve_id,
+            "detected_by": f.source,
+            "remediation": f.remediation or "Apply security updates and review configuration.",
+            "status": f.status or "OPEN",
+            "discovered_at": f.detected_at.isoformat() if f.detected_at else datetime.now(timezone.utc).isoformat(),
+        })
+
+    compliance_map = [
+        {
+            "finding_id": item["id"],
+            "issue": item["issue"],
+            "severity": item["severity"],
+            "cis": True if "SSH" in item["issue"] or "CIS" in item.get("detected_by", "") else False,
+            "nist": True if item["severity"] in {"CRITICAL", "HIGH"} else False,
+            "gdpr": True if "Exposed" in item["issue"] or "Password" in item["issue"] else False,
+            "hipaa": True if item["severity"] == "CRITICAL" else False,
+            "soc2": True if "CORS" in item["issue"] or "Credentials" in item["issue"] else False,
+            "iso27001": True,
+        }
+        for item in misconfig_list
+    ]
+
+    return {
+        "scan_job_id": job.id,
+        "scope": job.scope,
+        "scope_type": job.scope_type,
+        "status": job.status,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "summary": {
+            "total_assets": len(asset_list) or len(set(m["hostname"] for m in misconfig_list)),
+            "total_findings": len(misconfig_list),
+            "critical_count": crit_cnt,
+            "high_count": high_cnt,
+            "medium_count": med_cnt,
+            "low_count": low_cnt,
+            "compliance_score": comp_score,
+        },
+        "assets": asset_list,
+        "misconfigurations": misconfig_list,
+        "compliance_map": compliance_map,
+    }
+
+
+@router.post("/logo")
+@router.post("/v1/logo")
+async def upload_logo_v1(
+    company_name: str | None = Form(default=None),
+    file: UploadFile = File(...),
+):
+    ensure_report_storage()
+    suffix = Path(file.filename or "logo").suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".svg"}:
+        return Response(content='{"detail":"Supported logo formats: PNG, JPG, JPEG, SVG."}', media_type="application/json", status_code=400)
+    destination = REPORT_UPLOADS_DIR / f"report-logo{suffix}"
+    content = await file.read()
+    destination.write_bytes(content)
+    branding = save_report_branding(company_name=company_name, logo_path=str(destination), logo_name=file.filename or destination.name)
+    return {
+        "company_name": branding["company_name"],
+        "logo_name": branding.get("logo_name"),
+        "logo_uploaded": True,
+        "logo_url": f"/api/reports/uploads/{destination.name}",
+        "updated_at": branding.get("updated_at"),
+    }
+
+
+@router.post("/download/{scan_job_id}")
+@router.post("/v1/download/{scan_job_id}")
+def download_report_file_post(
+    scan_job_id: str,
+    payload: ReportRequest,
+    db: Session = Depends(get_db),
+):
+    normalized_mode = _normalize_mode(payload.mode)
+    fmt = (payload.format or "pdf").strip().lower()
+    findings = db.query(Finding).all()
+
+    if fmt == "csv":
+        csv_data = export_findings_csv(findings)
+        return Response(
+            content=csv_data,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=VAPT_{(payload.company_name or 'Platform').replace(' ', '_')}_{normalized_mode}_Report.csv"},
+        )
+    if fmt == "json":
+        data_json = export_findings_json(findings)
+        return Response(
+            content=data_json,
+            media_type="application/json",
+            headers={"Content-Disposition": f"attachment; filename=VAPT_{(payload.company_name or 'Platform').replace(' ', '_')}_{normalized_mode}_Report.json"},
+        )
+    if fmt == "docx":
+        docx_bytes = export_findings_docx(
+            findings,
+            mode=normalized_mode,
+            report_title=payload.report_title,
+            company_name=payload.company_name,
+        )
+        return Response(
+            content=docx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f"attachment; filename=VAPT_{(payload.company_name or 'Platform').replace(' ', '_')}_{normalized_mode}_Report.docx"},
+        )
+
+    # Default to PDF
+    pdf_bytes = export_findings_pdf(
+        findings,
+        mode=normalized_mode,
+        report_title=payload.report_title,
+        company_name=payload.company_name,
+    )
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=VAPT_{(payload.company_name or 'Platform').replace(' ', '_')}_{normalized_mode}_Report.pdf"},
+    )
+
+
+@router.get("/download/{scan_job_id}")
+@router.get("/v1/download/{scan_job_id}")
+def download_report_file_get(
+    scan_job_id: str,
+    type: str = Query(default="executive"),
+    format: str = Query(default="pdf"),
+    company_name: str | None = Query(default=None),
+    report_title: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    normalized_mode = _normalize_mode(type)
+    fmt = (format or "pdf").strip().lower()
+    findings = db.query(Finding).all()
+
+    if fmt == "csv":
+        csv_data = export_findings_csv(findings)
+        return Response(
+            content=csv_data,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=report-{scan_job_id}-{normalized_mode}.csv"},
+        )
+    if fmt == "json":
+        data_json = export_findings_json(findings)
+        return Response(
+            content=data_json,
+            media_type="application/json",
+            headers={"Content-Disposition": f"attachment; filename=report-{scan_job_id}-{normalized_mode}.json"},
+        )
+    if fmt == "docx":
+        docx_bytes = export_findings_docx(findings, mode=normalized_mode, report_title=report_title, company_name=company_name)
+        return Response(
+            content=docx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f"attachment; filename=report-{scan_job_id}-{normalized_mode}.docx"},
+        )
+
+    # Default to PDF
+    pdf_bytes = export_findings_pdf(findings, mode=normalized_mode, report_title=report_title, company_name=company_name)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=report-{scan_job_id}-{normalized_mode}.pdf"},
     )

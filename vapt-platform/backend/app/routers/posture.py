@@ -41,6 +41,7 @@ def unauthorized_software_summary(db: Session = Depends(get_db)):
             db.query(Asset).all(),
             db.query(EndpointSoftwareInventory).all(),
             db.query(Finding).all(),
+            db=db,
         )
     )
 

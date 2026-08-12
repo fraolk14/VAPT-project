@@ -1,64 +1,287 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Any
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.asset import Asset
 from app.models.finding import Finding
+from app.models.misconfiguration import Misconfiguration, MisconfigAsset, ScanJob
 from app.models.user import User
-from app.schemas.asset import AssetCreate, AssetResponse
+from app.schemas.asset import AssetCreate, AssetUpdate, AssetResponse, MisconfigurationBrief
 from app.services.security import enforce_roles, get_current_user
+from app.services.misconfig_scanner import parse_scope_type, run_misconfiguration_scan_job
 
 router = APIRouter(prefix="/assets", tags=["Assets"])
 
 
-@router.post("/", response_model=AssetResponse)
-def create_asset(
-    asset: AssetCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    enforce_roles(current_user, "admin", "analyst")
-    payload = asset.model_dump()
-    payload["risk_score"] = {
-        "critical": 9.0,
-        "high": 7.5,
-        "medium": 5.0,
-        "low": 2.5,
-    }.get((asset.criticality or "medium").lower(), 5.0)
-    existing = None
-    if payload.get("url"):
-        existing = db.query(Asset).filter(Asset.url == payload["url"]).first()
-    if not existing and payload.get("ip_address"):
-        existing = db.query(Asset).filter(Asset.ip_address == payload["ip_address"]).first()
-    if existing:
-        for key, value in payload.items():
-            if value not in {None, "", []}:
-                setattr(existing, key, value)
+def trigger_auto_scan(target_scope: str, db_session_factory):
+    """Triggers an automatic background scan for newly registered assets."""
+    db = db_session_factory()
+    try:
+        scope_type = parse_scope_type(target_scope)
+        scan_job = ScanJob(
+            scope=target_scope,
+            scope_type=scope_type,
+            status="PENDING",
+        )
+        db.add(scan_job)
         db.commit()
-        db.refresh(existing)
-        return existing
-    db_asset = Asset(**payload)
-    db.add(db_asset)
-    db.commit()
-    db.refresh(db_asset)
-    return db_asset
+        db.refresh(scan_job)
+        run_misconfiguration_scan_job(scan_job.id)
+    except Exception as e:
+        print(f"[AutoScan] Error running background scan for asset target '{target_scope}': {e}")
+    finally:
+        db.close()
+
+
+def _format_asset_response(a: Asset, db: Session) -> dict[str, Any]:
+    # Query misconfigurations associated with asset matching hostname/IP or direct misconfig_asset
+    m_list = (
+        db.query(Misconfiguration)
+        .join(MisconfigAsset, Misconfiguration.asset_id == MisconfigAsset.id)
+        .filter(
+            (MisconfigAsset.ip == a.ip_address) |
+            (MisconfigAsset.hostname == a.hostname) |
+            (MisconfigAsset.hostname == a.asset_name)
+        )
+        .order_by(Misconfiguration.discovered_at.desc())
+        .all()
+    )
+
+    return {
+        "id": a.id,
+        "hostname": a.hostname or a.asset_name or a.ip_address,
+        "ip_address": a.ip_address,
+        "url": a.url,
+        "os_type": a.os_type or a.os or "Unknown",
+        "os": a.os or a.os_type or "Unknown",
+        "owner": a.owner,
+        "environment": a.environment or "Production",
+        "criticality": a.criticality or "Medium",
+        "risk_level": a.risk_level or ("High" if (a.risk_score or 0) > 70 else "Medium" if (a.risk_score or 0) > 40 else "Low"),
+        "classification": a.classification or (a.exposure.capitalize() if a.exposure else "Internal"),
+        "exposure": a.exposure or (a.classification.lower() if a.classification else "internal"),
+        "asset_type": a.asset_type or "OS",
+        "asset_name": a.asset_name or a.hostname or a.ip_address,
+        "is_active": a.is_active if a.is_active is not None else True,
+        "risk_score": a.risk_score or 0.0,
+        "created_at": a.created_at,
+        "updated_at": a.updated_at,
+        "last_scan_id": a.last_scan_id,
+        "misconfigurations_count": len(m_list),
+        "misconfigurations": [
+            {
+                "id": m.id,
+                "issue": m.issue,
+                "severity": m.severity,
+                "cve": m.cve,
+                "detected_by": m.detected_by,
+                "remediation": m.remediation,
+                "status": m.status,
+                "discovered_at": m.discovered_at,
+            }
+            for m in m_list
+        ],
+    }
 
 
 @router.get("/", response_model=list[AssetResponse])
+@router.get("/v1/", response_model=list[AssetResponse])
 def list_assets(db: Session = Depends(get_db)):
-    return db.query(Asset).order_by(Asset.created_at.desc(), Asset.risk_score.desc()).all()
+    assets = db.query(Asset).order_by(Asset.created_at.desc()).all()
+    return [_format_asset_response(a, db) for a in assets]
+
+
+@router.post("/", response_model=AssetResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/v1/", response_model=AssetResponse, status_code=status.HTTP_201_CREATED)
+def create_asset(
+    payload: AssetCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    enforce_roles(current_user, "admin", "analyst", "SecurityEngineer")
+
+    risk_score_calc = {
+        "critical": 90.0,
+        "high": 75.0,
+        "medium": 50.0,
+        "low": 25.0,
+    }.get(payload.criticality.lower(), 50.0)
+
+    # Upsert check without deleting existing data
+    existing = None
+    if payload.url:
+        existing = db.query(Asset).filter(Asset.url == payload.url).first()
+    if not existing and payload.ip_address:
+        existing = db.query(Asset).filter(Asset.ip_address == payload.ip_address).first()
+    if not existing and payload.hostname:
+        existing = db.query(Asset).filter(Asset.hostname == payload.hostname).first()
+
+    if existing:
+        existing.hostname = payload.hostname or existing.hostname
+        existing.ip_address = payload.ip_address or existing.ip_address
+        existing.url = payload.url or existing.url
+        existing.os_type = payload.os_type or existing.os_type
+        existing.os = payload.os or existing.os
+        existing.owner = payload.owner or existing.owner
+        existing.environment = payload.environment or existing.environment
+        existing.criticality = payload.criticality or existing.criticality
+        existing.risk_level = payload.risk_level or existing.risk_level
+        existing.classification = payload.classification or existing.classification
+        existing.exposure = payload.classification.lower() if payload.classification else existing.exposure
+        existing.asset_type = payload.asset_type or existing.asset_type
+        existing.is_active = payload.is_active
+        existing.risk_score = risk_score_calc
+
+        db.commit()
+        db.refresh(existing)
+        asset_obj = existing
+    else:
+        db_asset = Asset(
+            asset_name=payload.asset_name or payload.hostname or payload.ip_address,
+            hostname=payload.hostname,
+            ip_address=payload.ip_address,
+            url=payload.url,
+            os=payload.os or payload.os_type,
+            os_type=payload.os_type or payload.os,
+            owner=payload.owner,
+            environment=payload.environment,
+            criticality=payload.criticality,
+            risk_level=payload.risk_level,
+            classification=payload.classification,
+            exposure=payload.classification.lower() if payload.classification else "internal",
+            asset_type=payload.asset_type,
+            is_active=payload.is_active,
+            risk_score=risk_score_calc,
+        )
+        db.add(db_asset)
+        db.commit()
+        db.refresh(db_asset)
+        asset_obj = db_asset
+
+    # INTEGRATION REQUIREMENT 4: Trigger background scan for newly registered asset
+    scan_target = asset_obj.url or asset_obj.ip_address or asset_obj.hostname
+    if scan_target:
+        from app.database import SessionLocal
+        background_tasks.add_task(trigger_auto_scan, scan_target, SessionLocal)
+
+    return _format_asset_response(asset_obj, db)
+
+
+@router.put("/{asset_id}", response_model=AssetResponse)
+@router.put("/v1/{asset_id}", response_model=AssetResponse)
+def update_asset(
+    asset_id: str,
+    payload: AssetUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    enforce_roles(current_user, "admin", "analyst", "SecurityEngineer")
+    import uuid
+    try:
+        uid = uuid.UUID(asset_id)
+        asset = db.get(Asset, uid)
+    except ValueError:
+        asset = db.query(Asset).filter(Asset.hostname == asset_id).first()
+
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    if payload.hostname is not None:
+        asset.hostname = payload.hostname
+    if payload.ip_address is not None:
+        asset.ip_address = payload.ip_address
+    if payload.url is not None:
+        asset.url = payload.url
+    if payload.os_type is not None:
+        asset.os_type = payload.os_type
+        asset.os = payload.os_type
+    if payload.owner is not None:
+        asset.owner = payload.owner
+    if payload.environment is not None:
+        asset.environment = payload.environment
+    if payload.criticality is not None:
+        asset.criticality = payload.criticality
+        asset.risk_score = {
+            "critical": 90.0,
+            "high": 75.0,
+            "medium": 50.0,
+            "low": 25.0,
+        }.get(payload.criticality.lower(), asset.risk_score)
+    if payload.risk_level is not None:
+        asset.risk_level = payload.risk_level
+    if payload.classification is not None:
+        asset.classification = payload.classification
+        asset.exposure = payload.classification.lower()
+    if payload.asset_type is not None:
+        asset.asset_type = payload.asset_type
+    if payload.is_active is not None:
+        asset.is_active = payload.is_active
+
+    db.commit()
+    db.refresh(asset)
+    return _format_asset_response(asset, db)
+
+
+@router.get("/{asset_id}/misconfigurations", response_model=list[MisconfigurationBrief])
+@router.get("/v1/{asset_id}/misconfigurations", response_model=list[MisconfigurationBrief])
+def get_asset_misconfigurations(asset_id: str, db: Session = Depends(get_db)):
+    import uuid
+    try:
+        uid = uuid.UUID(asset_id)
+        asset = db.get(Asset, uid)
+    except ValueError:
+        asset = db.query(Asset).filter(Asset.hostname == asset_id).first()
+
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    m_list = (
+        db.query(Misconfiguration)
+        .join(MisconfigAsset, Misconfiguration.asset_id == MisconfigAsset.id)
+        .filter(
+            (MisconfigAsset.ip == asset.ip_address) |
+            (MisconfigAsset.hostname == asset.hostname) |
+            (MisconfigAsset.hostname == asset.asset_name)
+        )
+        .order_by(Misconfiguration.discovered_at.desc())
+        .all()
+    )
+
+    return [
+        {
+            "id": m.id,
+            "issue": m.issue,
+            "severity": m.severity,
+            "cve": m.cve,
+            "detected_by": m.detected_by,
+            "remediation": m.remediation,
+            "status": m.status,
+            "discovered_at": m.discovered_at,
+        }
+        for m in m_list
+    ]
 
 
 @router.delete("/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/v1/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_asset(
     asset_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    enforce_roles(current_user, "admin", "analyst")
-    asset = db.get(Asset, asset_id)
+    enforce_roles(current_user, "admin", "analyst", "SecurityEngineer")
+    import uuid
+    try:
+        uid = uuid.UUID(asset_id)
+        asset = db.get(Asset, uid)
+    except ValueError:
+        asset = db.query(Asset).filter(Asset.hostname == asset_id).first()
+
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
+
     db.query(Finding).filter(Finding.asset_id == asset.id).update({Finding.asset_id: None}, synchronize_session=False)
     db.delete(asset)
     db.commit()

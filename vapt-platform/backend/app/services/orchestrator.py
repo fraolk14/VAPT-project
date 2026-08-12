@@ -459,6 +459,58 @@ def run_direct_network_scan(db: Session, scan: Scan) -> Scan:
         return scan
 
 
+def run_direct_web_scan(db: Session, scan: Scan) -> Scan:
+    from app.services.web_assessment import run_web_assessment
+    try:
+        scan.status = "running"
+        scan.started_at = scan.started_at or datetime.now(timezone.utc)
+        scan.progress = "10"
+        scan.error_message = "Direct web scanning assessment is running. Testing surface forms and headers..."
+        scan.engine_metadata = {
+            **scan.engine_metadata,
+            "engine": "web-db",
+            "execution_mode": "direct-correlation",
+        }
+        db.commit()
+        db.refresh(scan)
+
+        def _progress_callback(progress: int, detail: dict[str, Any]) -> None:
+            scan.progress = str(progress)
+            scan.error_message = detail.get("message")
+            scan.engine_metadata = {
+                **scan.engine_metadata,
+                "assessment_phase": detail.get("phase"),
+                "assessment_detail": detail,
+            }
+            db.commit()
+            db.refresh(scan)
+
+        normalized_findings = run_web_assessment(scan.target, progress_callback=_progress_callback)
+        scan.progress = "90"
+        scan.error_message = "Direct assessment completed. Storing findings..."
+        db.commit()
+        db.refresh(scan)
+        _store_findings(db, scan, normalized_findings)
+        scan.status = "completed"
+        scan.progress = "100"
+        scan.finished_at = datetime.now(timezone.utc)
+        scan.error_message = None
+        scan.engine_metadata = {
+            **scan.engine_metadata,
+            "execution_mode": "direct-correlation",
+            "web_alerts_count": len(normalized_findings),
+        }
+        db.commit()
+        db.refresh(scan)
+        return scan
+    except Exception as exc:
+        scan.status = "failed"
+        scan.error_message = str(exc)
+        db.commit()
+        db.refresh(scan)
+        return scan
+
+
 def launch_zap_scan(db: Session, scan: Scan) -> Scan:
     client = ZAPClient()
     metadata = client.launch_scan(scan.target, scan.profile)
@@ -711,10 +763,8 @@ def _background_zap_worker(scan_id: str) -> None:
                 scan = db.get(Scan, scan_id)
                 if not scan:
                     return
-
                 if scan.status in {"completed", "failed", "cancelled"}:
                     return
-
                 if scan.status == "paused":
                     time.sleep(5)
                     continue
@@ -728,14 +778,17 @@ def _background_zap_worker(scan_id: str) -> None:
                 if not metadata.get("spider_scan_id") and not metadata.get("active_scan_id"):
                     try:
                         launch_zap_scan(db, scan)
-                    except Exception as exc:
-                        _set_scan_state(db, scan, status="failed", progress="0", error_message=str(exc))
+                    except Exception:
+                        run_direct_web_scan(db, scan)
+                        return
                 else:
                     refresh_zap_scan(db, scan)
 
                 scan = db.get(Scan, scan_id)
                 if scan and scan.status in {"completed", "failed", "cancelled"}:
                     return
+            except Exception:
+                pass
             finally:
                 db.close()
 

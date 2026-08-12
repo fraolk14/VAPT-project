@@ -5,6 +5,7 @@ from app.models.operations import ComplianceTemplate, MonitoringRule
 from app.models.tenant import Tenant
 from app.models.asset import Asset
 from app.models.user import User
+from app.models.finding import Finding
 from app.services.security import hash_password
 
 
@@ -196,15 +197,86 @@ def seed_demo_data(db: Session) -> None:
                 enabled=True,
             )
         )
-    if "Enterprise SAML" not in existing_providers:
-        db.add(
-            SSOProvider(
-                name="Enterprise SAML",
-                provider_type="saml",
-                login_url="https://sso.example.local/saml/login",
-                metadata_url="https://sso.example.local/metadata",
-                enabled=True,
-            )
+    if db.query(Finding).count() == 0:
+        from app.models.scan import Scan
+        from sqlalchemy.sql import func
+        scan = Scan(
+            scan_name="System Default Audit",
+            scan_type="network",
+            tool="openvas",
+            target="10.0.0.10",
+            status="completed",
+            finished_at=func.now()
         )
+        db.add(scan)
+        db.commit()
+        db.refresh(scan)
+
+        db.add_all([
+            Finding(
+                scan_id=scan.id,
+                title="Missing HTTP Strict Transport Security (HSTS)",
+                severity="high",
+                category="web",
+                source="zap",
+                status="open",
+                port=443,
+                protocol="tcp",
+                state="open",
+                cvss_score=7.5,
+                cve_id="CVE-2023-28432",
+                evidence="HTTPS target lacks Strict-Transport-Security header.",
+                remediation="Configure Strict-Transport-Security header in web server config.",
+                finding_metadata={"url": "https://portal-web-01.local/login", "host": "portal-web-01", "cwe_id": "319"}
+            ),
+            Finding(
+                scan_id=scan.id,
+                title="Reflected Cross-Site Scripting (XSS) in Search Route",
+                severity="high",
+                category="web",
+                source="zap",
+                status="open",
+                port=80,
+                protocol="tcp",
+                state="open",
+                cvss_score=7.2,
+                cve_id=None,
+                evidence="Reflected payload observed in search parameter `q`.",
+                remediation="Implement contextual HTML output encoding and CSP.",
+                finding_metadata={"url": "https://portal-web-01.local/search?q=", "host": "portal-web-01", "cwe_id": "79"}
+            ),
+            Finding(
+                scan_id=scan.id,
+                title="Open SSH Service with Password Authentication Allowed",
+                severity="medium",
+                category="network",
+                source="openvas",
+                status="open",
+                port=22,
+                protocol="tcp",
+                state="open",
+                cvss_score=5.8,
+                cve_id="CVE-2023-38408",
+                evidence="OpenSSH server accepts password authentication without public key enforcement.",
+                remediation="Disable password authentication in sshd_config.",
+                finding_metadata={"host": "10.0.0.10", "port": 22, "protocol": "tcp"}
+            ),
+            Finding(
+                scan_id=scan.id,
+                title="Unpatched Windows SMB Protocol Vulnerability (EternalBlue / SMBGhost)",
+                severity="critical",
+                category="network",
+                source="openvas",
+                status="open",
+                port=445,
+                protocol="tcp",
+                state="open",
+                cvss_score=9.8,
+                cve_id="CVE-2020-0796",
+                evidence="Remote SMBv3 compression vulnerability detected on target host 10.0.5.77.",
+                remediation="Apply KB4551762 update and restrict port 445 on perimeter firewalls.",
+                finding_metadata={"host": "10.0.5.77", "port": 445, "protocol": "tcp"}
+            ),
+        ])
 
     db.commit()

@@ -1,401 +1,484 @@
 import { useEffect, useMemo, useState } from "react";
-
 import api from "../api/client";
 
 const ENGINE_OPTIONS = {
-  openvas: {
+  Network: {
     label: "Network Engine",
-    targetKind: "Network target",
-    targetHelp: "Use a valid IP address, fully qualified domain name, or IPv4 CIDR block up to /24.",
-    description: "Queue a host, FQDN, or network block for background discovery and network assessment.",
-    buttonLabel: "Start Network Scan",
-    loadingLabel: "Queueing network scan...",
-    placeholder: "10.0.0.15, scanme.nmap.org, or 192.168.10.0/24",
-    profile: "Full and fast",
-    success: "Network assessment queued. It will start in the background automatically.",
-    errorFallback: "Unable to queue the network assessment right now.",
+    targetKind: "Network Target",
+    targetHelp: "Enter an IP address, Domain, or CIDR block (e.g. 192.168.1.1, example.com, 10.0.0.0/24).",
+    description: "Executes deep network discovery, port scanning, service version detection, and vulnerability correlation.",
+    buttonLabel: "Launch Network Scan",
+    defaultType: "IP",
+    placeholder: "192.168.1.1",
   },
-  zap: {
+  Web: {
     label: "Web Engine",
-    targetKind: "Website URL",
-    targetHelp: "Use a full website URL starting with http:// or https://.",
-    description: "Queue a full URL for spider discovery followed by active web scanning.",
-    buttonLabel: "Start Web Scan",
-    loadingLabel: "Queueing web scan...",
+    targetKind: "Web Target",
+    targetHelp: "Enter a Web URL or Domain (e.g. https://example.com, app.internal.local).",
+    description: "Performs web vulnerability scans, web spidering, CORS audits, and HTTP security header checks.",
+    buttonLabel: "Launch Web Scan",
+    defaultType: "URL",
     placeholder: "https://example.com",
-    profile: "spider-active",
-    success: "Web assessment queued. The web engine will start automatically in the background.",
-    errorFallback: "Unable to queue the web assessment right now.",
   },
-  mobsf: {
+  Mobile: {
     label: "Mobile Engine",
-    targetKind: "Mobile binary",
-    targetHelp: "Upload an APK, IPA, or AAB file for static analysis.",
-    description: "Queue a mobile binary for background static security assessment.",
-    buttonLabel: "Start Mobile Scan",
-    loadingLabel: "Queueing mobile scan...",
-    placeholder: "",
-    profile: "static-analysis",
-    success: "Mobile assessment queued. Static analysis will begin automatically in the background.",
-    errorFallback: "Unable to queue the mobile assessment right now.",
+    targetKind: "Mobile Target",
+    targetHelp: "Enter APK/IPA package name or URL (e.g. com.example.app, https://store.local/app.apk).",
+    description: "Performs static binary analysis, permission audits, secret leakage detection, and mobile package risk scoring.",
+    buttonLabel: "Launch Mobile Scan",
+    defaultType: "APK",
+    placeholder: "com.example.secureapp",
   },
 };
 
-const FQDN_PATTERN = /^(?=.{1,253}$)(?!-)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}\.?$/;
-
-function isValidIpAddress(value) {
-  if (!value) return false;
-  if (value.includes(":")) {
-    return /^[0-9A-Fa-f:]+$/.test(value) && value.includes(":");
-  }
-  const parts = value.split(".");
-  if (parts.length !== 4) return false;
-  return parts.every((part) => /^\d+$/.test(part) && Number(part) >= 0 && Number(part) <= 255);
-}
-
-function isValidFqdn(value) {
-  return FQDN_PATTERN.test(value);
-}
-
-function isValidCidr(value) {
-  const [ip, prefix] = value.split("/");
-  if (!ip || prefix === undefined || !isValidIpAddress(ip)) return false;
-  const prefixNumber = Number(prefix);
-  return Number.isInteger(prefixNumber) && prefixNumber >= 24 && prefixNumber <= 32;
-}
-
-function validateTarget(engine, value) {
-  const normalized = value.trim();
-  if (!normalized) return "Target is required.";
-  if (engine === "openvas") {
-    return isValidIpAddress(normalized) || isValidFqdn(normalized) || isValidCidr(normalized) ? "" : "Enter a valid IP address, FQDN, or IPv4 CIDR block up to /24.";
-  }
-  if (engine === "zap") {
-    try {
-      const parsed = new URL(normalized);
-      return parsed.protocol === "http:" || parsed.protocol === "https:" ? "" : "Enter a full http:// or https:// URL.";
-    } catch {
-      return "Enter a full http:// or https:// URL.";
-    }
-  }
-  return "";
-}
-
-function engineLabel(tool) {
-  return tool === "openvas" ? "Network Engine" : tool === "zap" ? "Web Engine" : "Mobile Engine";
-}
-
-function actionButtons(scan) {
-  if (["completed", "failed", "cancelled"].includes(scan.status)) return [];
-  if (scan.status === "paused") return ["resume", "cancel"];
-  return ["pause", "cancel"];
-}
-
-function actionLabel(action) {
-  if (action === "pause") return "Pause";
-  if (action === "resume") return "Start";
-  return "Cancel";
-}
-
-function assetTarget(asset, engine) {
-  if (engine === "zap") {
-    if (asset.url) return asset.url;
-    const host = asset.hostname || asset.ip_address;
-    return host ? `http://${host}` : "";
-  }
-  if (asset.ip_address || asset.hostname) return asset.ip_address || asset.hostname;
-  if (asset.url) {
-    try {
-      return new URL(asset.url).hostname;
-    } catch {
-      return asset.url.replace(/^https?:\/\//, "").split("/")[0];
-    }
-  }
-  return "";
-}
-
-function assetDisplayName(asset) {
-  return asset.asset_name || asset.name || asset.hostname || asset.ip_address || asset.url || "Unnamed asset";
-}
-
-export default function Scans({ scans, assets, onScanQueued, onScanUpdated }) {
-  const [engine, setEngine] = useState("openvas");
+export default function Scans({ scans: legacyScans, assets: initialAssets, onScanQueued, onScanUpdated }) {
+  const [engine, setEngine] = useState("Network");
+  const [targetType, setTargetType] = useState("IP");
   const [target, setTarget] = useState("");
+  const [scanName, setScanName] = useState("");
+  const [scheduleInterval, setScheduleInterval] = useState("Immediate");
   const [selectedAssetId, setSelectedAssetId] = useState("");
-  const [mobileFile, setMobileFile] = useState(null);
-  const [launchState, setLaunchState] = useState({ status: "idle", message: "" });
-  const [actionState, setActionState] = useState({});
-  const [scheduleState, setScheduleState] = useState({ cadenceMinutes: "60", jobs: [] });
-  const [assetInventory, setAssetInventory] = useState(assets || []);
-  const selectedEngine = ENGINE_OPTIONS[engine];
-  const targetError = validateTarget(engine, target);
-  const inProgressScans = scans.filter((scan) => ["waiting", "queued", "running", "paused"].includes(scan.status));
-  const filteredAssets = useMemo(
-    () => (assetInventory || []).filter((asset) => (engine === "zap" ? Boolean(asset.url || asset.hostname || asset.ip_address) : Boolean(asset.ip_address || asset.hostname || asset.url))),
-    [assetInventory, engine]
-  );
+  
+  const [scanJobs, setScanJobs] = useState([]);
+  const [assetList, setAssetList] = useState(initialAssets || []);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [message, setMessage] = useState({ type: "", text: "" });
 
+  // Keep assetList synced with initialAssets prop if passed from parent App
   useEffect(() => {
-    setAssetInventory(assets || []);
-  }, [assets]);
+    if (initialAssets && initialAssets.length > 0) {
+      setAssetList(initialAssets);
+    }
+  }, [initialAssets]);
 
-  useEffect(() => {
-    api.get("/assets/").then((response) => setAssetInventory(response.data || [])).catch(() => {});
-  }, []);
-
-  const loadSchedules = async () => {
+  // Fetch Real Assets from GET /assets/
+  const fetchAssets = async () => {
     try {
-      const response = await api.get("/schedules/");
-      setScheduleState((current) => ({ ...current, jobs: response.data }));
-    } catch {
-      setScheduleState((current) => ({ ...current, jobs: [] }));
-    }
-  };
-
-  useEffect(() => {
-    loadSchedules();
-  }, []);
-
-  const startScan = async (event) => {
-    event.preventDefault();
-    if (engine === "mobsf" && !mobileFile) {
-      setLaunchState({ status: "error", message: "Select an APK, IPA, or AAB file to start a mobile assessment." });
-      return;
-    }
-    if (engine !== "mobsf" && targetError) {
-      setLaunchState({ status: "error", message: targetError });
-      return;
-    }
-    setLaunchState({ status: "loading", message: selectedEngine.loadingLabel });
-    try {
-      let response;
-      if (engine === "openvas") {
-        response = await api.post("/scans/network", { target: target.trim(), label: `Network Assessment ${target.trim()}` });
-      } else if (engine === "zap") {
-        response = await api.post("/scans/web", { target: target.trim(), label: `Web Assessment ${target.trim()}` });
-      } else {
-        const form = new FormData();
-        form.append("file", mobileFile);
-        form.append("label", `Mobile Assessment ${mobileFile.name}`);
-        response = await api.post("/scans/mobile", form, { headers: { "Content-Type": "multipart/form-data" } });
+      const res = await api.get("/assets/");
+      if (res.data && res.data.length > 0) {
+        setAssetList(res.data);
+        return;
       }
-      onScanQueued?.(response.data);
-      setLaunchState({ status: "success", message: selectedEngine.success });
-      setTarget("");
-      setMobileFile(null);
-      setSelectedAssetId("");
-    } catch (error) {
-      setLaunchState({ status: "error", message: error?.response?.data?.detail || selectedEngine.errorFallback });
+    } catch {
+      // Fallback endpoints
+    }
+    try {
+      const res2 = await api.get("/assets");
+      if (res2.data && res2.data.length > 0) {
+        setAssetList(res2.data);
+        return;
+      }
+    } catch {
+      // Fallback v1
+    }
+    try {
+      const resV1 = await api.get("/api/v1/assets");
+      if (resV1.data) setAssetList(resV1.data);
+    } catch {
+      // Keep existing list
     }
   };
 
-  const handleScanAction = async (scan, action) => {
-    setActionState((current) => ({ ...current, [scan.id]: action }));
+  // Fetch Real Scan Jobs from GET /scans/v1/jobs
+  const fetchScanJobs = async () => {
     try {
-      const response = await api.post(`/scans/${scan.id}/${action}`);
-      onScanUpdated?.(response.data);
-    } catch (error) {
-      setLaunchState({ status: "error", message: error?.response?.data?.detail || `Unable to ${action} this assessment right now.` });
+      const res = await api.get("/scans/v1/jobs");
+      setScanJobs(res.data || []);
+    } catch {
+      try {
+        const resLegacy = await api.get("/scans/");
+        setScanJobs(
+          (resLegacy.data || []).map((s) => ({
+            id: s.id,
+            name: s.scan_name || "Scan",
+            engine: s.tool === "openvas" ? "Network" : s.tool === "zap" ? "Web" : "Mobile",
+            target: s.target,
+            target_type: "IP",
+            status: (s.status || "PENDING").toUpperCase(),
+            progress: parseInt(s.progress || "0", 10),
+            created_at: s.created_at,
+          }))
+        );
+      } catch {
+        setScanJobs([]);
+      }
     } finally {
-      setActionState((current) => {
-        const next = { ...current };
-        delete next[scan.id];
-        return next;
-      });
+      setLoading(false);
     }
   };
 
-  const createSchedule = async () => {
-    if (engine === "mobsf") {
-      setLaunchState({ status: "error", message: "Recurring mobile schedules are not enabled yet." });
-      return;
-    }
-    if (targetError) {
-      setLaunchState({ status: "error", message: targetError });
-      return;
-    }
-    try {
-      await api.post("/schedules/", {
-        job_name: `${selectedEngine.label} ${target.trim()}`,
-        scan_type: engine === "openvas" ? "network" : "web",
-        tool: engine,
-        target: target.trim(),
-        profile: selectedEngine.profile,
-        cadence_minutes: Number(scheduleState.cadenceMinutes || 60),
-        options: {},
-      });
-      setLaunchState({ status: "success", message: "Recurring assessment schedule created." });
-      await loadSchedules();
-    } catch (error) {
-      setLaunchState({ status: "error", message: error?.response?.data?.detail || "Unable to create the schedule right now." });
+  useEffect(() => {
+    fetchAssets();
+    fetchScanJobs();
+  }, []);
+
+  // Real-time 2-Second Polling for Progress Updates
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchScanJobs();
+    }, 2000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Update target type when engine changes
+  const handleEngineChange = (newEngine) => {
+    setEngine(newEngine);
+    setTargetType(ENGINE_OPTIONS[newEngine].defaultType);
+    setTarget("");
+    setSelectedAssetId("");
+  };
+
+  // Asset dropdown selection handler
+  const handleAssetSelect = (assetId) => {
+    setSelectedAssetId(assetId);
+    if (!assetId) return;
+    const asset = assetList.find((a) => String(a.id) === String(assetId));
+    if (asset) {
+      const bestTarget = asset.ip_address || asset.hostname || asset.url || asset.asset_name || "";
+      setTarget(bestTarget);
+      if (!scanName) {
+        setScanName(`${engine} Assessment - ${asset.asset_name || asset.hostname || bestTarget}`);
+      }
     }
   };
 
-  const toggleSchedule = async (jobId) => {
+  // Launch New Scan
+  const handleCreateScan = async (e) => {
+    e.preventDefault();
+    if (!target.trim()) {
+      setMessage({ type: "error", text: "Scan target is required." });
+      return;
+    }
+
+    setSubmitting(true);
+    setMessage({ type: "", text: "" });
+
+    const payload = {
+      name: scanName.trim() || `${engine} Assessment ${target.trim()}`,
+      engine,
+      target: target.trim(),
+      target_type: targetType,
+      schedule_interval: scheduleInterval === "Immediate" ? null : scheduleInterval,
+      asset_id: selectedAssetId || null,
+    };
+
     try {
-      await api.post(`/schedules/${jobId}/toggle`);
-      await loadSchedules();
-    } catch (error) {
-      setLaunchState({ status: "error", message: error?.response?.data?.detail || "Unable to update the schedule right now." });
+      const res = await api.post("/scans/v1/jobs", payload);
+      setMessage({ type: "success", text: `Scan "${res.data.name}" queued and actively scanning target in background!` });
+      setTarget("");
+      setScanName("");
+      setSelectedAssetId("");
+      fetchScanJobs();
+    } catch (err) {
+      setMessage({
+        type: "error",
+        text: err?.response?.data?.detail || "Failed to create scan job.",
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Trigger Rescan for an Existing Job
+  const handleRescan = async (jobId) => {
+    try {
+      const res = await api.post(`/scans/v1/jobs/${jobId}/rescan`);
+      setMessage({ type: "success", text: `Rescan job "${res.data.name}" launched successfully!` });
+      fetchScanJobs();
+    } catch (err) {
+      alert(err?.response?.data?.detail || "Failed to launch rescan.");
+    }
+  };
+
+  // Cancel Scan Job
+  const handleCancelScan = async (jobId) => {
+    try {
+      await api.post(`/scans/v1/jobs/${jobId}/cancel`);
+      fetchScanJobs();
+    } catch (err) {
+      alert(err?.response?.data?.detail || "Failed to cancel scan.");
+    }
+  };
+
+  // Delete Scan Job
+  const handleDeleteScan = async (jobId) => {
+    if (!window.confirm("Are you sure you want to delete this scan job record?")) return;
+    try {
+      await api.delete(`/scans/v1/jobs/${jobId}`);
+      fetchScanJobs();
+    } catch (err) {
+      alert(err?.response?.data?.detail || "Failed to delete scan job.");
     }
   };
 
   return (
-    <section className="panel">
-      <div className="panel__header">
-        <div>
-          <p className="eyebrow">Campaign orchestration</p>
-          <h2>Launch and control scans</h2>
+    <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      {/* Launch Scan Header & Panel */}
+      <section className="panel" style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "12px", padding: "24px" }}>
+        <div style={{ marginBottom: "20px" }}>
+          <p className="eyebrow" style={{ color: "#38bdf8", textTransform: "uppercase", fontSize: "0.75rem", letterSpacing: "1px" }}>
+            VAPT Orchestration Engine
+          </p>
+          <h2 style={{ color: "#f8fafc", margin: "4px 0 0 0", fontSize: "1.5rem" }}>Scan Center & Target Selection</h2>
+          <p style={{ color: "#64748b", margin: "4px 0 0 0", fontSize: "0.875rem" }}>
+            {ENGINE_OPTIONS[engine].description}
+          </p>
         </div>
-      </div>
-      <form className="scan-launcher" onSubmit={startScan}>
-        <div className="scan-launcher__copy">
-          <strong>Launch an assessment</strong>
-          <p>{selectedEngine.description}</p>
-        </div>
-        <div className="scan-launcher__controls">
-          <select className="scan-select" value={engine} onChange={(event) => { setEngine(event.target.value); setTarget(""); setSelectedAssetId(""); setLaunchState({ status: "idle", message: "" }); }}>
-            {Object.entries(ENGINE_OPTIONS).map(([value, option]) => (
-              <option key={value} value={value}>{option.label}</option>
-            ))}
-          </select>
-          {engine !== "mobsf" ? (
-            <>
-              <select
-                className="scan-select"
-                value={selectedAssetId}
-                onChange={(event) => {
-                  const asset = filteredAssets.find((item) => item.id === event.target.value);
-                  setSelectedAssetId(event.target.value);
-                  setTarget(asset ? assetTarget(asset, engine) : "");
-                }}
-              >
-                <option value="">Pick from assets</option>
-                {filteredAssets.map((asset) => (
-                  <option key={asset.id} value={asset.id}>
-                    {assetDisplayName(asset)} - {assetTarget(asset, engine)}
-                  </option>
-                ))}
-              </select>
-              <input className="scan-input" value={target} onChange={(event) => { setTarget(event.target.value); setSelectedAssetId(""); }} placeholder={selectedEngine.placeholder} />
-            </>
-          ) : (
-            <input
-              className="scan-input"
-              type="file"
-              accept=".apk,.ipa,.aab"
-              onChange={(event) => {
-                setMobileFile(event.target.files?.[0] || null);
-                if (launchState.status !== "idle") setLaunchState({ status: "idle", message: "" });
-              }}
-            />
-          )}
-          <button type="submit" disabled={launchState.status === "loading" || (engine !== "mobsf" && Boolean(targetError))}>
-            {launchState.status === "loading" ? "Queueing..." : selectedEngine.buttonLabel}
-          </button>
-          <div className="scan-actions">
-            <select className="scan-select" value={scheduleState.cadenceMinutes} onChange={(event) => setScheduleState((current) => ({ ...current, cadenceMinutes: event.target.value }))}>
-              <option value="15">Every 15 min</option>
-              <option value="30">Every 30 min</option>
-              <option value="60">Hourly</option>
-              <option value="360">Every 6 hours</option>
-              <option value="1440">Daily</option>
+
+        <form onSubmit={handleCreateScan} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "16px" }}>
+          {/* Engine Selection */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>Scanning Engine</label>
+            <select
+              value={engine}
+              onChange={(e) => handleEngineChange(e.target.value)}
+              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 12px", borderRadius: "6px" }}
+            >
+              <option value="Network">Network Engine</option>
+              <option value="Web">Web Engine</option>
+              <option value="Mobile">Mobile Engine</option>
             </select>
-            <button type="button" className="scan-action scan-action--resume" onClick={createSchedule}>Schedule</button>
           </div>
-          <p className="scan-target-hint"><strong>{selectedEngine.targetKind}:</strong> {selectedEngine.targetHelp}</p>
-          {engine !== "mobsf" && targetError ? <p className="scan-feedback scan-feedback--error">{targetError}</p> : null}
-          {engine === "mobsf" && mobileFile ? <p className="scan-feedback scan-feedback--success">Selected binary: {mobileFile.name}</p> : null}
-        </div>
-      </form>
-      {launchState.message ? <p className={`scan-feedback scan-feedback--${launchState.status}`}>{launchState.message}</p> : null}
 
-      <div className="table-wrap">
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Engine</th>
-              <th>Type</th>
-              <th>Target</th>
-              <th>Status</th>
-              <th>Progress</th>
-              <th>Controls</th>
-            </tr>
-          </thead>
-          <tbody>
-            {inProgressScans.map((scan) => (
-              <tr key={scan.id}>
-                <td data-label="Name">{scan.scan_name}</td>
-                <td data-label="Engine">{engineLabel(scan.tool)}</td>
-                <td data-label="Type">{scan.scan_type}</td>
-                <td data-label="Target">{scan.target}</td>
-                <td data-label="Status"><span className={`pill pill--${scan.status}`}>{scan.status}</span></td>
-                <td data-label="Progress">{scan.progress}%</td>
-                <td data-label="Controls">
-                  <div className="scan-actions">
-                    {actionButtons(scan).map((action) => (
-                      <button key={action} type="button" className={`scan-action scan-action--${action}`} disabled={Boolean(actionState[scan.id])} onClick={() => handleScanAction(scan, action)}>
-                        {actionState[scan.id] === action ? `${actionLabel(action)}...` : actionLabel(action)}
-                      </button>
-                    ))}
-                    {!actionButtons(scan).length ? <span className="scan-actions__empty">No actions</span> : null}
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {!inProgressScans.length ? (
-              <tr>
-                <td colSpan="7"><p className="empty-copy">No scans are currently running.</p></td>
-              </tr>
-            ) : null}
-          </tbody>
-        </table>
-      </div>
+          {/* Target Selection from Real Asset Inventory */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>
+              Pick Target from Asset Inventory ({assetList.length} assets found)
+            </label>
+            <select
+              value={selectedAssetId}
+              onChange={(e) => handleAssetSelect(e.target.value)}
+              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 12px", borderRadius: "6px" }}
+            >
+              <option value="">
+                {assetList.length > 0 ? `-- Select from ${assetList.length} Real Assets --` : "No assets available"}
+              </option>
+              {assetList.map((asset) => {
+                const displayName = asset.asset_name || asset.hostname || asset.ip_address || "Unnamed Asset";
+                const details = [asset.ip_address, asset.hostname, asset.environment].filter(Boolean).join(" | ");
+                return (
+                  <option key={asset.id} value={asset.id}>
+                    {displayName} ({details})
+                  </option>
+                );
+              })}
+            </select>
+          </div>
 
-      <div className="panel panel--embedded">
-        <div className="panel__header">
+          {/* Target Type */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>Target Type</label>
+            <select
+              value={targetType}
+              onChange={(e) => setTargetType(e.target.value)}
+              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 12px", borderRadius: "6px" }}
+            >
+              <option value="IP">IP Address</option>
+              <option value="Domain">Domain Name</option>
+              <option value="CIDR">CIDR Range</option>
+              <option value="URL">URL</option>
+              <option value="APK">APK / Package</option>
+            </select>
+          </div>
+
+          {/* Manual Target Input */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>Target Address / URL</label>
+            <input
+              type="text"
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+              placeholder={ENGINE_OPTIONS[engine].placeholder}
+              required
+              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 12px", borderRadius: "6px" }}
+            />
+          </div>
+
+          {/* Scan Name */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>Scan Campaign Name</label>
+            <input
+              type="text"
+              value={scanName}
+              onChange={(e) => setScanName(e.target.value)}
+              placeholder={`e.g. ${engine} Assessment`}
+              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 12px", borderRadius: "6px" }}
+            />
+          </div>
+
+          {/* Schedule Interval */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>Execution Schedule</label>
+            <select
+              value={scheduleInterval}
+              onChange={(e) => setScheduleInterval(e.target.value)}
+              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 12px", borderRadius: "6px" }}
+            >
+              <option value="Immediate">Run Immediately</option>
+              <option value="Daily">Daily Schedule</option>
+              <option value="Weekly">Weekly Schedule</option>
+              <option value="Monthly">Monthly Schedule</option>
+            </select>
+          </div>
+
+          {/* Submit Button */}
+          <div style={{ display: "flex", alignItems: "flex-end", gridColumn: "1 / -1", marginTop: "8px" }}>
+            <button
+              type="submit"
+              disabled={submitting}
+              style={{
+                background: "linear-gradient(135deg, #0284c7 0%, #0369a1 100%)",
+                color: "#ffffff",
+                border: "none",
+                padding: "12px 24px",
+                borderRadius: "6px",
+                fontWeight: 600,
+                cursor: submitting ? "not-allowed" : "pointer",
+                transition: "opacity 0.2s",
+              }}
+            >
+              {submitting ? "Queuing & Starting Scan Engine..." : ENGINE_OPTIONS[engine].buttonLabel}
+            </button>
+          </div>
+        </form>
+
+        {message.text && (
+          <div
+            style={{
+              marginTop: "16px",
+              padding: "12px",
+              borderRadius: "6px",
+              background: message.type === "error" ? "#451a1a" : "#14532d",
+              color: message.type === "error" ? "#fca5a5" : "#86efac",
+              border: `1px solid ${message.type === "error" ? "#7f1d1d" : "#166534"}`,
+            }}
+          >
+            {message.text}
+          </div>
+        )}
+      </section>
+
+      {/* Active & Historical Scan Jobs List */}
+      <section className="panel" style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "12px", padding: "24px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px" }}>
           <div>
-            <p className="eyebrow">Automation</p>
-            <h2>Scheduled assessments</h2>
+            <h3 style={{ color: "#f8fafc", margin: 0, fontSize: "1.25rem" }}>Scan Jobs & Real-Time Telemetry</h3>
+            <p style={{ color: "#64748b", margin: "4px 0 0 0", fontSize: "0.875rem" }}>
+              Live 2-second progress polling against PostgreSQL database
+            </p>
           </div>
+          <button
+            onClick={fetchScanJobs}
+            style={{ background: "#1e293b", color: "#38bdf8", border: "1px solid #334155", padding: "6px 16px", borderRadius: "6px", cursor: "pointer" }}
+          >
+            Refresh List
+          </button>
         </div>
-        <div className="table-wrap">
-          <table className="table">
+
+        <div className="table-wrap" style={{ overflowX: "auto" }}>
+          <table className="table" style={{ width: "100%", borderCollapse: "collapse", color: "#cbd5e1" }}>
             <thead>
-              <tr>
-                <th>Job</th>
-                <th>Engine</th>
-                <th>Target</th>
-                <th>Cadence</th>
-                <th>Next Run</th>
-                <th>Status</th>
+              <tr style={{ borderBottom: "1px solid #334155", textAlign: "left" }}>
+                <th style={{ padding: "12px" }}>Scan Name</th>
+                <th style={{ padding: "12px" }}>Engine</th>
+                <th style={{ padding: "12px" }}>Target</th>
+                <th style={{ padding: "12px" }}>Target Type</th>
+                <th style={{ padding: "12px" }}>Status</th>
+                <th style={{ padding: "12px", width: "180px" }}>Progress</th>
+                <th style={{ padding: "12px" }}>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {scheduleState.jobs.map((job) => (
-                <tr key={job.id}>
-                  <td data-label="Job"><strong>{job.job_name}</strong></td>
-                  <td data-label="Engine">{engineLabel(job.tool)}</td>
-                  <td data-label="Target">{job.target}</td>
-                  <td data-label="Cadence">{job.cadence_minutes} min</td>
-                  <td data-label="Next Run">{job.next_run_at ? new Date(job.next_run_at).toLocaleString() : "Pending"}</td>
-                  <td data-label="Status">
-                    <button type="button" className={`scan-action ${job.enabled ? "scan-action--pause" : "scan-action--resume"}`} onClick={() => toggleSchedule(job.id)}>
-                      {job.enabled ? "Disable" : "Enable"}
-                    </button>
+              {scanJobs.map((job) => {
+                const statusColor =
+                  job.status === "COMPLETED"
+                    ? "#22c55e"
+                    : job.status === "RUNNING"
+                    ? "#38bdf8"
+                    : job.status === "FAILED"
+                    ? "#ef4444"
+                    : "#eab308";
+
+                return (
+                  <tr key={job.id} style={{ borderBottom: "1px solid #1e293b" }}>
+                    <td style={{ padding: "12px", fontWeight: 600, color: "#f8fafc" }}>{job.name}</td>
+                    <td style={{ padding: "12px" }}>
+                      <span style={{ background: "#1e293b", padding: "4px 8px", borderRadius: "4px", fontSize: "0.8rem", color: "#38bdf8" }}>
+                        {job.engine}
+                      </span>
+                    </td>
+                    <td style={{ padding: "12px", fontFamily: "monospace" }}>{job.target}</td>
+                    <td style={{ padding: "12px" }}>{job.target_type}</td>
+                    <td style={{ padding: "12px" }}>
+                      <span
+                        style={{
+                          background: `${statusColor}22`,
+                          color: statusColor,
+                          border: `1px solid ${statusColor}44`,
+                          padding: "2px 8px",
+                          borderRadius: "12px",
+                          fontSize: "0.75rem",
+                          fontWeight: 700,
+                        }}
+                      >
+                        {job.status}
+                      </span>
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <div style={{ flex: 1, background: "#1e293b", height: "8px", borderRadius: "4px", overflow: "hidden" }}>
+                          <div
+                            style={{
+                              width: `${Math.min(100, Math.max(0, job.progress || 0))}%`,
+                              background: statusColor,
+                              height: "100%",
+                              transition: "width 0.5s ease-in-out",
+                            }}
+                          />
+                        </div>
+                        <span style={{ fontSize: "0.8rem", color: "#94a3b8", width: "36px" }}>{job.progress || 0}%</span>
+                      </div>
+                    </td>
+                    <td style={{ padding: "12px" }}>
+                      <div style={{ display: "flex", gap: "6px" }}>
+                        <button
+                          onClick={() => handleRescan(job.id)}
+                          style={{ background: "#0284c722", color: "#38bdf8", border: "1px solid #0284c744", padding: "4px 10px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem", fontWeight: 600 }}
+                        >
+                          Rescan
+                        </button>
+                        {["PENDING", "RUNNING"].includes(job.status) && (
+                          <button
+                            onClick={() => handleCancelScan(job.id)}
+                            style={{ background: "#451a1a", color: "#fca5a5", border: "1px solid #7f1d1d", padding: "4px 10px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem" }}
+                          >
+                            Cancel
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleDeleteScan(job.id)}
+                          style={{ background: "#1e293b", color: "#64748b", border: "1px solid #334155", padding: "4px 10px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem" }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+
+              {!loading && scanJobs.length === 0 && (
+                <tr>
+                  <td colSpan="7" style={{ textAlign: "center", padding: "32px", color: "#64748b" }}>
+                    No scans found
                   </td>
                 </tr>
-              ))}
-              {!scheduleState.jobs.length ? (
-                <tr>
-                  <td colSpan="6"><p className="empty-copy">No recurring assessments configured yet.</p></td>
-                </tr>
-              ) : null}
+              )}
             </tbody>
           </table>
         </div>
-      </div>
-    </section>
+      </section>
+    </div>
   );
 }
