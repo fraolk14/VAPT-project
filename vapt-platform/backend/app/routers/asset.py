@@ -1,5 +1,6 @@
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -35,18 +36,24 @@ def trigger_auto_scan(target_scope: str, db_session_factory):
 
 
 def _format_asset_response(a: Asset, db: Session) -> dict[str, Any]:
-    # Query misconfigurations associated with asset matching hostname/IP or direct misconfig_asset
-    m_list = (
-        db.query(Misconfiguration)
-        .join(MisconfigAsset, Misconfiguration.asset_id == MisconfigAsset.id)
-        .filter(
-            (MisconfigAsset.ip == a.ip_address) |
-            (MisconfigAsset.hostname == a.hostname) |
-            (MisconfigAsset.hostname == a.asset_name)
+    conds = []
+    if a.ip_address:
+        conds.append(MisconfigAsset.ip == a.ip_address)
+    if a.hostname:
+        conds.append(MisconfigAsset.hostname == a.hostname)
+    if a.asset_name and a.asset_name != a.hostname:
+        conds.append(MisconfigAsset.hostname == a.asset_name)
+
+    m_list = []
+    if conds:
+        from sqlalchemy import or_
+        m_list = (
+            db.query(Misconfiguration)
+            .join(MisconfigAsset, Misconfiguration.asset_id == MisconfigAsset.id)
+            .filter(or_(*conds))
+            .order_by(Misconfiguration.discovered_at.desc())
+            .all()
         )
-        .order_by(Misconfiguration.discovered_at.desc())
-        .all()
-    )
 
     return {
         "id": a.id,
@@ -263,6 +270,95 @@ def get_asset_misconfigurations(asset_id: str, db: Session = Depends(get_db)):
         }
         for m in m_list
     ]
+
+
+@router.get("/{asset_id}/details")
+@router.get("/v1/{asset_id}/details")
+def get_asset_full_details(asset_id: str, db: Session = Depends(get_db)):
+    """Retrieve complete asset details including Agent Device state, Misconfigurations, Shadow IT, and Unauthorized Software."""
+    import uuid
+    from app.models.agent import AgentDevice
+    try:
+        uid = uuid.UUID(asset_id)
+        asset = db.get(Asset, uid)
+    except ValueError:
+        asset = db.query(Asset).filter((Asset.hostname == asset_id) | (Asset.ip_address == asset_id)).first()
+
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    formatted_asset = _format_asset_response(asset, db)
+
+    agent_device = db.query(AgentDevice).filter(
+        (AgentDevice.hostname == asset.hostname) | (AgentDevice.device_id == asset.hostname)
+    ).first()
+
+    device_info = None
+    if agent_device:
+        device_info = {
+            "device_id": agent_device.device_id,
+            "status": agent_device.status,
+            "ip_address": agent_device.ip_address,
+            "os_info": agent_device.os_info,
+            "first_seen": agent_device.first_seen.isoformat() if agent_device.first_seen else None,
+            "last_seen": agent_device.last_seen.isoformat() if agent_device.last_seen else None,
+        }
+
+    asset_findings = (
+        db.query(Finding)
+        .filter(Finding.asset_id == asset.id)
+        .order_by(Finding.discovered_at.desc() if hasattr(Finding, "discovered_at") else Finding.last_seen.desc())
+        .all()
+    )
+    if not asset_findings and asset.hostname:
+        asset_findings = (
+            db.query(Finding)
+            .filter(Finding.title.contains(asset.hostname))
+            .order_by(Finding.discovered_at.desc() if hasattr(Finding, "discovered_at") else Finding.last_seen.desc())
+            .all()
+        )
+
+    misconfigurations = []
+    shadow_it = []
+    unauthorized_software = []
+    other_findings = []
+
+    for f in asset_findings:
+        item = {
+            "id": str(f.id),
+            "title": f.title,
+            "category": f.category,
+            "source": f.source,
+            "severity": f.severity,
+            "cvss_score": f.cvss_score,
+            "cve_id": f.cve_id,
+            "evidence": f.evidence,
+            "remediation": f.remediation,
+            "status": f.status,
+            "created_at": f.discovered_at.isoformat() if getattr(f, "discovered_at", None) else (f.last_seen.isoformat() if getattr(f, "last_seen", None) else None),
+            "metadata": f.finding_metadata or {},
+        }
+        cat_lower = (f.category or "").lower()
+        title_lower = (f.title or "").lower()
+
+        if "misconfig" in cat_lower or (f.source == "endpoint-agent" and ("smb" in title_lower or "rdp" in title_lower or "defender" in title_lower or "uac" in title_lower or "path" in title_lower)):
+            misconfigurations.append(item)
+        elif "shadow" in cat_lower or "remoteaccess" in title_lower or "cloud" in title_lower or "usb" in title_lower or "anydesk" in title_lower:
+            shadow_it.append(item)
+        elif "software" in cat_lower or "drift" in title_lower or "unauthorized" in title_lower:
+            unauthorized_software.append(item)
+        else:
+            other_findings.append(item)
+
+    return jsonable_encoder({
+        "asset": formatted_asset,
+        "agent_device": device_info,
+        "misconfigurations": misconfigurations,
+        "shadow_it": shadow_it,
+        "unauthorized_software": unauthorized_software,
+        "other_findings": other_findings,
+        "total_findings_count": len(misconfigurations) + len(shadow_it) + len(unauthorized_software) + len(other_findings),
+    })
 
 
 @router.delete("/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -87,15 +87,23 @@ export default function Assets({ assets: propAssets = [], onAssetCreated }) {
     }
   }, []);
 
+  const [assetDetails, setAssetDetails] = useState(null);
+
   const fetchAssetMisconfigurations = async (asset) => {
     setDetailDrawerAsset(asset);
     setLoadingMisconfigs(true);
     try {
-      const res = await api.get(`/assets/${asset.id}/misconfigurations`);
-      setAssetMisconfigs(res.data || []);
+      const res = await api.get(`/assets/${asset.id}/details`);
+      setAssetDetails(res.data);
+      setAssetMisconfigs(res.data.misconfigurations || []);
     } catch (err) {
-      console.error("Error fetching asset misconfigurations:", err);
-      setAssetMisconfigs(asset.misconfigurations || []);
+      console.error("Failed to load asset details:", err);
+      try {
+        const legacyRes = await api.get(`/assets/${asset.id}/misconfigurations`);
+        setAssetMisconfigs(legacyRes.data || []);
+      } catch (e) {
+        setAssetMisconfigs([]);
+      }
     } finally {
       setLoadingMisconfigs(false);
     }
@@ -706,33 +714,103 @@ export default function Assets({ assets: propAssets = [], onAssetCreated }) {
                 </div>
               </div>
 
-              {/* INTEGRATION REQUIREMENT 1: Associated Misconfigurations */}
-              <div>
+              {/* Agent Device Registered Info Banner */}
+              {assetDetails?.agent_device && (
+                <div style={{ background: "rgba(79, 209, 197, 0.08)", border: "1px solid rgba(79, 209, 197, 0.3)", padding: "14px", borderRadius: "10px", marginBottom: "20px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ color: "#4fd1c5", fontSize: "0.85rem", fontWeight: "bold" }}>📡 Active VAP Endpoint Agent</span>
+                    <span style={{ fontSize: "0.72rem", background: "#4fd1c5", color: "#0f172a", padding: "2px 8px", borderRadius: "10px", fontWeight: "bold" }}>{assetDetails.agent_device.status.toUpperCase()}</span>
+                  </div>
+                  <p style={{ margin: "4px 0 0 0", color: "#cbd5e1", fontSize: "0.8rem" }}>Device ID: <code style={{ color: "#38bdf8" }}>{assetDetails.agent_device.device_id}</code></p>
+                  <p style={{ margin: "2px 0 0 0", color: "#94a3b8", fontSize: "0.78rem" }}>OS Build: {assetDetails.agent_device.os_info || "Windows Endpoint"}</p>
+                </div>
+              )}
+
+              {/* 1. Associated Misconfigurations */}
+              <div style={{ marginBottom: "24px" }}>
                 <h3 style={{ color: "#f8fafc", fontSize: "1.05rem", marginBottom: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
-                  <FiAlertTriangle style={{ color: "#fbbf24" }} /> Associated Misconfigurations ({assetMisconfigs.length})
+                  <FiAlertTriangle style={{ color: "#fbbf24" }} /> CIS Misconfigurations ({assetMisconfigs.length})
                 </h3>
 
                 {loadingMisconfigs ? (
                   <p style={{ color: "#94a3b8", fontSize: "0.85rem" }}>Loading misconfigurations from database...</p>
                 ) : assetMisconfigs.length > 0 ? (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                     {assetMisconfigs.map((m) => (
-                      <div key={m.id} style={{ background: "rgba(30, 41, 59, 0.6)", padding: "14px", borderRadius: "10px", border: "1px solid rgba(148, 163, 184, 0.15)" }}>
+                      <div key={m.id || m.title} style={{ background: "rgba(30, 41, 59, 0.6)", padding: "14px", borderRadius: "10px", border: "1px solid rgba(148, 163, 184, 0.15)" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
-                          <span className={`pill pill--${m.severity.toLowerCase()}`}>{m.severity}</span>
-                          <span style={{ fontSize: "0.75rem", color: "#94a3b8" }}>Detected by: {m.detected_by}</span>
+                          <span className={`pill pill--${(m.severity || "medium").toLowerCase()}`}>{m.severity || "Medium"}</span>
+                          <span style={{ fontSize: "0.75rem", color: "#94a3b8" }}>Source: {m.source || m.detected_by || "endpoint-agent"}</span>
                         </div>
-                        <h4 style={{ color: "#f8fafc", margin: "4px 0", fontSize: "0.92rem" }}>{m.issue}</h4>
-                        {m.cve && <p style={{ margin: 0, fontSize: "0.78rem", color: "#ef4444", fontFamily: "monospace" }}>CVE: {m.cve}</p>}
-                        {m.remediation && <p style={{ margin: "6px 0 0 0", fontSize: "0.8rem", color: "#94a3b8" }}>{m.remediation}</p>}
+                        <h4 style={{ color: "#f8fafc", margin: "4px 0", fontSize: "0.92rem" }}>{m.title || m.issue}</h4>
+                        {m.cve_id && <p style={{ margin: 0, fontSize: "0.78rem", color: "#ef4444", fontFamily: "monospace" }}>CVE / Control: {m.cve_id}</p>}
+                        {(m.remediation || m.evidence) && <p style={{ margin: "6px 0 0 0", fontSize: "0.8rem", color: "#94a3b8" }}>{m.remediation || m.evidence}</p>}
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <div style={{ padding: "30px 20px", textAlign: "center", background: "rgba(30, 41, 59, 0.3)", borderRadius: "10px", border: "1px dashed rgba(148, 163, 184, 0.2)" }}>
-                    <FiCheckCircle style={{ fontSize: "28px", color: "#34d399", marginBottom: "8px" }} />
-                    <p style={{ margin: 0, color: "#f8fafc", fontWeight: "600" }}>No misconfigurations for this asset</p>
-                    <small style={{ color: "#64748b" }}>Live system audit found 0 open vulnerability findings for this target.</small>
+                  <div style={{ padding: "20px", textAlign: "center", background: "rgba(30, 41, 59, 0.3)", borderRadius: "10px", border: "1px dashed rgba(148, 163, 184, 0.2)" }}>
+                    <FiCheckCircle style={{ fontSize: "24px", color: "#34d399", marginBottom: "6px" }} />
+                    <p style={{ margin: 0, color: "#f8fafc", fontWeight: "600", fontSize: "0.88rem" }}>No misconfigurations detected</p>
+                    <small style={{ color: "#64748b" }}>Live database audit found 0 misconfiguration findings for this host.</small>
+                  </div>
+                )}
+              </div>
+
+              {/* 2. Discovered Shadow IT */}
+              <div style={{ marginBottom: "24px" }}>
+                <h3 style={{ color: "#f8fafc", fontSize: "1.05rem", marginBottom: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
+                  <FiLayers style={{ color: "#f59e0b" }} /> Shadow IT Telemetry ({assetDetails?.shadow_it?.length || 0})
+                </h3>
+
+                {assetDetails?.shadow_it?.length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                    {assetDetails.shadow_it.map((s) => (
+                      <div key={s.id || s.title} style={{ background: "rgba(30, 41, 59, 0.6)", padding: "14px", borderRadius: "10px", border: "1px solid rgba(245, 158, 11, 0.3)" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                          <span className={`pill pill--${(s.severity || "high").toLowerCase()}`}>{s.severity || "High"}</span>
+                          <span style={{ fontSize: "0.75rem", color: "#f59e0b" }}>{s.category || "Shadow IT"}</span>
+                        </div>
+                        <h4 style={{ color: "#f8fafc", margin: "4px 0", fontSize: "0.92rem" }}>{s.title}</h4>
+                        {s.evidence && <p style={{ margin: "4px 0 0 0", fontSize: "0.8rem", color: "#cbd5e1", whiteSpace: "pre-wrap" }}>{s.evidence}</p>}
+                        {s.remediation && <p style={{ margin: "6px 0 0 0", fontSize: "0.78rem", color: "#94a3b8" }}>{s.remediation}</p>}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ padding: "20px", textAlign: "center", background: "rgba(30, 41, 59, 0.3)", borderRadius: "10px", border: "1px dashed rgba(148, 163, 184, 0.2)" }}>
+                    <FiCheckCircle style={{ fontSize: "24px", color: "#34d399", marginBottom: "6px" }} />
+                    <p style={{ margin: 0, color: "#f8fafc", fontWeight: "600", fontSize: "0.88rem" }}>No Shadow IT tools detected</p>
+                    <small style={{ color: "#64748b" }}>Zero unapproved remote desktop, cloud storage, or USBSTOR devices found.</small>
+                  </div>
+                )}
+              </div>
+
+              {/* 3. Unauthorized Software & Software Drift */}
+              <div>
+                <h3 style={{ color: "#f8fafc", fontSize: "1.05rem", marginBottom: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
+                  <FiShield style={{ color: "#f87171" }} /> Unauthorized Software & Drift ({assetDetails?.unauthorized_software?.length || 0})
+                </h3>
+
+                {assetDetails?.unauthorized_software?.length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                    {assetDetails.unauthorized_software.map((sw) => (
+                      <div key={sw.id || sw.title} style={{ background: "rgba(30, 41, 59, 0.6)", padding: "14px", borderRadius: "10px", border: "1px solid rgba(239, 68, 68, 0.3)" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                          <span className={`pill pill--${(sw.severity || "medium").toLowerCase()}`}>{sw.severity || "Medium"}</span>
+                          <span style={{ fontSize: "0.75rem", color: "#f87171" }}>Unapproved Software</span>
+                        </div>
+                        <h4 style={{ color: "#f8fafc", margin: "4px 0", fontSize: "0.92rem" }}>{sw.title}</h4>
+                        {sw.evidence && <p style={{ margin: "4px 0 0 0", fontSize: "0.8rem", color: "#cbd5e1" }}>{sw.evidence}</p>}
+                        {sw.remediation && <p style={{ margin: "6px 0 0 0", fontSize: "0.78rem", color: "#94a3b8" }}>{sw.remediation}</p>}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ padding: "20px", textAlign: "center", background: "rgba(30, 41, 59, 0.3)", borderRadius: "10px", border: "1px dashed rgba(148, 163, 184, 0.2)" }}>
+                    <FiCheckCircle style={{ fontSize: "24px", color: "#34d399", marginBottom: "6px" }} />
+                    <p style={{ margin: 0, color: "#f8fafc", fontWeight: "600", fontSize: "0.88rem" }}>Software Allowlist compliant</p>
+                    <small style={{ color: "#64748b" }}>All installed applications match corporate Software Allowlist policy.</small>
                   </div>
                 )}
               </div>

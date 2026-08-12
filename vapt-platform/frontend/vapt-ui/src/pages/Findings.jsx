@@ -5,6 +5,7 @@ import api from "../api/client";
 
 const TAB_OPTIONS = [
   { key: "all", label: "All Findings" },
+  { key: "endpoint", label: "Endpoint Findings" },
   { key: "openvas", label: "Network Findings" },
   { key: "zap", label: "Web Findings" },
   { key: "mobsf", label: "Mobile Findings" },
@@ -12,6 +13,7 @@ const TAB_OPTIONS = [
 
 const TAB_SOURCE_MAP = {
   all: null,
+  endpoint: ["endpoint-agent", "agent", "windows-agent", "Endpoint", "VAP Agent"],
   openvas: ["openvas", "network-db", "host", "host-scan", "network", "nmap", "Network"],
   zap: ["zap", "web", "web-scan", "web-db", "zap-proxy", "owasp", "nuclei", "Web"],
   mobsf: ["mobsf", "mobile", "apk", "ipa", "Mobile"],
@@ -51,11 +53,13 @@ function severityLabel(value) {
   return (value || "info").toLowerCase();
 }
 
+const IS_ENDPOINT_SOURCE = (src) => TAB_SOURCE_MAP.endpoint.includes(src) || (src || "").toLowerCase().includes("agent") || (src || "").toLowerCase().includes("endpoint");
 const IS_WEB_SOURCE = (src) => TAB_SOURCE_MAP.zap.includes(src) || (src || "").toLowerCase().includes("web");
 const IS_NETWORK_SOURCE = (src) => TAB_SOURCE_MAP.openvas.includes(src) || (src || "").toLowerCase().includes("network") || (src || "").toLowerCase().includes("host");
 
 function targetLabel(finding) {
   const src = finding.source;
+  if (IS_ENDPOINT_SOURCE(src)) return finding.finding_metadata?.hostname || finding.target || "Endpoint Host";
   if (IS_WEB_SOURCE(src)) return finding.finding_metadata?.url || finding.finding_metadata?.host || finding.target || "n/a";
   if (IS_NETWORK_SOURCE(src)) return finding.finding_metadata?.host || finding.target || (finding.port ? `${finding.port}/${finding.protocol}` : "n/a");
   return finding.finding_metadata?.file || finding.target || "n/a";
@@ -63,6 +67,13 @@ function targetLabel(finding) {
 
 function targetSummary(finding) {
   const src = finding.source;
+  if (IS_ENDPOINT_SOURCE(src)) {
+    return {
+      primary: finding.finding_metadata?.hostname || finding.target || "Endpoint Host",
+      secondary: finding.finding_metadata?.ip_address ? `VAP Agent (${finding.finding_metadata.ip_address})` : "VAP Agent Device",
+    };
+  }
+
   if (IS_WEB_SOURCE(src)) {
     const rawUrl = finding.finding_metadata?.url || finding.finding_metadata?.host || finding.target || "";
     try {
