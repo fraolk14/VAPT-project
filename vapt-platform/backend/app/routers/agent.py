@@ -362,10 +362,20 @@ def revoke_agent_device(device_id: str, db: Session = Depends(get_db)):
 @router.get("/download")
 def download_agent_binary():
     """Download the compiled Go Windows Endpoint Agent static executable."""
-    binary_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "bin", "vap-agent.exe"))
-    if not os.path.exists(binary_path):
+    search_paths = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "bin", "vap-agent.exe")),
+        "/app/bin/vap-agent.exe",
+    ]
+    binary_path = None
+    for path in search_paths:
+        if os.path.exists(path):
+            binary_path = path
+            break
+
+    if not binary_path:
         raise HTTPException(status_code=404, detail="Agent binary not yet compiled. Run build script.")
-    return FileResponse(binary_path, filename="vap-agent.exe", media_type="application/octet-stream")
+    headers = {"Content-Disposition": 'attachment; filename="vap-agent.exe"'}
+    return FileResponse(binary_path, filename="vap-agent.exe", media_type="application/octet-stream", headers=headers)
 
 
 @router.get("/installer-script")
