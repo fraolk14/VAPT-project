@@ -101,6 +101,8 @@ class AssetResponse(BaseModel):
     exposure: Optional[str] = None
     asset_type: str
     asset_name: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    business_unit: Optional[str] = None
     is_active: bool
     risk_score: float
     created_at: datetime

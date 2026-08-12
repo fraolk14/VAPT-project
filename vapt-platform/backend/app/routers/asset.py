@@ -63,6 +63,7 @@ def _format_asset_response(a: Asset, db: Session) -> dict[str, Any]:
         "exposure": a.exposure or (a.classification.lower() if a.classification else "internal"),
         "asset_type": a.asset_type or "OS",
         "asset_name": a.asset_name or a.hostname or a.ip_address,
+        "tags": a.tags or [],
         "is_active": a.is_active if a.is_active is not None else True,
         "risk_score": a.risk_score or 0.0,
         "created_at": a.created_at,
