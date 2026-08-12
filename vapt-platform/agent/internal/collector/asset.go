@@ -110,8 +110,11 @@ func getNetworkInterfaces() ([]string, []string) {
 			case *net.IPAddr:
 				ip = v.IP
 			}
-			if ip != nil && !ip.IsLoopback() && ip.To4() != nil {
-				ips = append(ips, ip.String())
+			if ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && ip.To4() != nil {
+				ipStr := ip.String()
+				if !strings.HasPrefix(ipStr, "169.254.") {
+					ips = append(ips, ipStr)
+				}
 			}
 		}
 	}

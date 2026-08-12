@@ -152,14 +152,19 @@ def agent_checkin(
         if device.status == "revoked":
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Agent device credential has been revoked.")
 
+        valid_ips = [ip for ip in (payload.asset.ip_addresses or []) if not ip.startswith("169.254.")]
+        primary_ip = valid_ips[0] if valid_ips else (payload.asset.ip_addresses[0] if payload.asset.ip_addresses else "127.0.0.1")
+
         device.last_seen = datetime.now(timezone.utc)
-        if payload.asset.ip_addresses:
+        if valid_ips:
+            device.ip_address = valid_ips[0]
+        elif payload.asset.ip_addresses:
             device.ip_address = payload.asset.ip_addresses[0]
+
         if payload.asset.os_name:
             device.os_info = f"{payload.asset.os_name} {payload.asset.os_version or ''}".strip()
 
         # 1. Upsert Device Asset Facts into PostgreSQL Asset table
-        primary_ip = payload.asset.ip_addresses[0] if payload.asset.ip_addresses else "127.0.0.1"
         asset_obj = db.query(Asset).filter(
             (Asset.hostname == payload.asset.hostname) | (Asset.ip_address == primary_ip)
         ).first()
