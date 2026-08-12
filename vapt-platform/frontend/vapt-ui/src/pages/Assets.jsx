@@ -38,11 +38,18 @@ const emptyAssetForm = {
   is_active: true,
 };
 
-export default function Assets({ onAssetCreated }) {
-  const [assets, setAssets] = useState([]);
-  const [loading, setLoading] = useState(true);
+export default function Assets({ assets: propAssets = [], onAssetCreated }) {
+  const [assets, setAssets] = useState(propAssets);
+  const [loading, setLoading] = useState(!propAssets || propAssets.length === 0);
   const [search, setSearch] = useState("");
-  
+
+  useEffect(() => {
+    if (propAssets && propAssets.length > 0) {
+      setAssets(propAssets);
+      setLoading(false);
+    }
+  }, [propAssets]);
+
   // Filters
   const [classificationFilter, setClassificationFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
@@ -75,7 +82,9 @@ export default function Assets({ onAssetCreated }) {
   };
 
   useEffect(() => {
-    fetchAssets();
+    if (!propAssets || propAssets.length === 0) {
+      fetchAssets();
+    }
   }, []);
 
   const fetchAssetMisconfigurations = async (asset) => {
