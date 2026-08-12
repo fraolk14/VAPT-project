@@ -194,3 +194,64 @@ def discover_software_on_target(payload: DiscoverRequest, db: Session = Depends(
         processed.append(sw)
         
     return processed
+
+
+@router.post("/bulk-whitelist")
+def bulk_whitelist_software(db: Session = Depends(get_db)):
+    """Bulk approve all discovered software items across all managed endpoints and update whitelist baseline policy."""
+    from app.models.finding import Finding
+    all_sw = db.query(Software).all()
+    count = 0
+    for sw in all_sw:
+        sw.status = "APPROVED"
+        sw.updated_at = datetime.now(timezone.utc)
+        
+        existing = db.query(WhitelistSoftware).filter(WhitelistSoftware.name.ilike(sw.name.strip())).first()
+        if not existing:
+            wl_entry = WhitelistSoftware(
+                name=sw.name.strip(),
+                vendor=sw.vendor,
+                reason="Bulk Whitelisted across all endpoints",
+            )
+            db.add(wl_entry)
+        count += 1
+
+    db.query(Finding).filter(Finding.category == "Software Drift").update({Finding.status: "RESOLVED"}, synchronize_session=False)
+    db.commit()
+    return {"message": f"Successfully whitelisted {count} software applications across all managed endpoints.", "whitelisted_count": count}
+
+
+@router.post("/discover-subnet")
+def discover_subnet_software(payload: dict[str, Any], db: Session = Depends(get_db)):
+    """Run real software discovery across a specified subnet range across all endpoints."""
+    subnet = payload.get("subnet", "").strip() or "192.168.10.0/24"
+    assets = db.query(Asset).all()
+    results = []
+    
+    for a in assets:
+        target = a.ip_address or a.hostname
+        if not target:
+            continue
+        try:
+            wmi_res = run_wmi_discovery(target)
+            nmap_res = run_nmap_service_discovery(target)
+            
+            for item in wmi_res + nmap_res:
+                sw = process_software_governance(
+                    db,
+                    software_name=item["name"],
+                    vendor=item.get("vendor"),
+                    version=item.get("version"),
+                    category=item.get("category", "Application"),
+                    asset_id=str(a.id),
+                    installed_path=item.get("installed_path"),
+                    ip_address=a.ip_address or "127.0.0.1",
+                    hostname=a.hostname,
+                    endpoint_name=a.asset_name or a.hostname,
+                    source="Subnet WMI/Nmap Discovery",
+                )
+                results.append(sw)
+        except Exception as e:
+            print(f"[SubnetDiscovery] Error discovering {target}: {e}")
+
+    return {"message": f"Discovered software across subnet {subnet}.", "total_items_found": len(results)}

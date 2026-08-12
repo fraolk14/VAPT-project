@@ -92,6 +92,39 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
     }
   };
 
+  const [subnetInput, setSubnetInput] = useState("192.168.10.0/24");
+  const [isBulkWhitelisting, setIsBulkWhitelisting] = useState(false);
+
+  const handleBulkWhitelist = async () => {
+    if (!window.confirm("Are you sure you want to approve and whitelist ALL discovered software across all endpoints?")) return;
+    setIsBulkWhitelisting(true);
+    setFeedback("Processing bulk baseline whitelisting across all managed endpoints...");
+    try {
+      const res = await api.post("/software/bulk-whitelist");
+      setFeedback(`✅ ${res.data.message}`);
+      fetchSoftwareData();
+    } catch (err) {
+      setFeedback("Failed to bulk whitelist software.");
+    } finally {
+      setIsBulkWhitelisting(false);
+    }
+  };
+
+  const handleRunSubnetDiscovery = async (e) => {
+    e.preventDefault();
+    setIsDiscovering(true);
+    setFeedback(`Running endpoint software discovery across subnet ${subnetInput}...`);
+    try {
+      const res = await api.post("/software/discover-subnet", { subnet: subnetInput });
+      setFeedback(`✅ ${res.data.message}`);
+      fetchSoftwareData();
+    } catch (err) {
+      setFeedback("Failed to run subnet software discovery.");
+    } finally {
+      setIsDiscovering(false);
+    }
+  };
+
   const approvedCount = softwareList.filter((s) => s.status === "APPROVED").length;
   const vulnerableCount = softwareList.filter((s) => s.status === "VULNERABLE").length;
   const unauthorizedCount = softwareList.filter((s) => s.status === "UNAUTHORIZED").length;
@@ -99,10 +132,20 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
   return (
     <section className="section-grid">
       <div className="panel panel--metrics">
-        <div className="panel__header">
+        <div className="panel__header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
             <p className="eyebrow">Unauthorized software governance</p>
             <h2>Application and endpoint review</h2>
+          </div>
+          <div style={{ display: "flex", gap: "10px" }}>
+            <button
+              onClick={handleBulkWhitelist}
+              disabled={isBulkWhitelisting}
+              className="scan-action scan-action--resume"
+              style={{ background: "linear-gradient(135deg, #10b981 0%, #059669 100%)", color: "#fff", fontWeight: "bold" }}
+            >
+              {isBulkWhitelisting ? "Whitelisting All..." : "🛡️ Whitelist All Discovered Software"}
+            </button>
           </div>
         </div>
         <div className="metrics-grid">
@@ -113,27 +156,42 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
         </div>
       </div>
 
-      {/* Discovery Subprocess Section */}
+      {/* Discovery Subprocess & Subnet Section */}
       <div className="panel">
         <div className="panel__header">
           <div>
-            <p className="eyebrow">Target IP Discovery</p>
-            <h2>Run Endpoint Software Discovery (WMI / Nmap -sV / Lynis)</h2>
+            <p className="eyebrow">Endpoint & Subnet Discovery</p>
+            <h2>Run Endpoint Software Discovery (Subnet / WMI / Nmap -sV)</h2>
           </div>
         </div>
-        <form className="form-grid" onSubmit={handleRunDiscovery}>
-          <input
-            className="scan-input"
-            placeholder="Target IP Address or Hostname (e.g. 192.168.1.50, 127.0.0.1)"
-            value={discoverTarget}
-            onChange={(e) => setDiscoverTarget(e.target.value)}
-            required
-          />
-          <button type="submit" className="scan-action scan-action--resume" disabled={isDiscovering}>
-            {isDiscovering ? "Discovering Target..." : "Run Discovery by IP"}
-          </button>
-        </form>
-        {feedback ? <p className="scan-feedback scan-feedback--success">{feedback}</p> : null}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+          <form className="form-grid" onSubmit={handleRunDiscovery}>
+            <input
+              className="scan-input"
+              placeholder="Target IP Address or Hostname (e.g. 192.168.10.130)"
+              value={discoverTarget}
+              onChange={(e) => setDiscoverTarget(e.target.value)}
+              required
+            />
+            <button type="submit" className="scan-action scan-action--resume" disabled={isDiscovering}>
+              {isDiscovering ? "Discovering..." : "Scan Target Host"}
+            </button>
+          </form>
+
+          <form className="form-grid" onSubmit={handleRunSubnetDiscovery}>
+            <input
+              className="scan-input"
+              placeholder="Subnet Range (e.g. 192.168.10.0/24)"
+              value={subnetInput}
+              onChange={(e) => setSubnetInput(e.target.value)}
+              required
+            />
+            <button type="submit" className="scan-action scan-action--resume" disabled={isDiscovering} style={{ background: "#0284c7" }}>
+              {isDiscovering ? "Scanning Subnet..." : "📡 Discover Subnet Endpoints"}
+            </button>
+          </form>
+        </div>
+        {feedback ? <p className="scan-feedback scan-feedback--success" style={{ marginTop: "12px" }}>{feedback}</p> : null}
       </div>
 
       {/* Software Inventory Table */}
