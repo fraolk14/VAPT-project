@@ -13,6 +13,7 @@ function navItemsForRole(role) {
     { to: "/shadow-it", label: "Shadow IT", icon: "🕵️" },
     { to: "/misconfigurations", label: "Misconfigurations", icon: "⚙️" },
     { to: "/unauthorized-software", label: "Unauthorized Software", icon: "🚫" },
+    { to: "/agent-management", label: "Endpoint Agents", icon: "📡" },
     { to: "/reports", label: "Reports", icon: "📑" },
   ];
 

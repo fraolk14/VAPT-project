@@ -350,15 +350,43 @@ def ensure_runtime_schema() -> None:
         "ALTER TABLE software_assets ADD COLUMN IF NOT EXISTS source VARCHAR DEFAULT 'Nmap -sV'",
         "CREATE INDEX IF NOT EXISTS ix_software_assets_ip_address ON software_assets (ip_address)",
         """
-        CREATE TABLE IF NOT EXISTS whitelist_software (
+        CREATE TABLE IF NOT EXISTS agent_devices (
+            id UUID PRIMARY KEY,
+            device_id VARCHAR UNIQUE NOT NULL,
+            hostname VARCHAR NOT NULL,
+            hardware_id VARCHAR,
+            credential_hash VARCHAR NOT NULL,
+            enrollment_token_ref VARCHAR,
+            status VARCHAR NOT NULL DEFAULT 'active',
+            ip_address VARCHAR,
+            os_info VARCHAR,
+            first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_agent_devices_device_id ON agent_devices (device_id)",
+        """
+        CREATE TABLE IF NOT EXISTS agent_enrollment_tokens (
+            id UUID PRIMARY KEY,
+            token VARCHAR UNIQUE NOT NULL,
+            created_by VARCHAR DEFAULT 'admin',
+            is_used BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            expires_at TIMESTAMPTZ
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_agent_enrollment_tokens_token ON agent_enrollment_tokens (token)",
+        """
+        CREATE TABLE IF NOT EXISTS software_allowlist (
             id SERIAL PRIMARY KEY,
             name VARCHAR UNIQUE NOT NULL,
             vendor VARCHAR,
             reason VARCHAR,
+            category VARCHAR NOT NULL DEFAULT 'Approved',
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
         """,
-        "CREATE INDEX IF NOT EXISTS ix_whitelist_software_name ON whitelist_software (name)",
+        "CREATE INDEX IF NOT EXISTS ix_software_allowlist_name ON software_allowlist (name)",
         "CREATE INDEX IF NOT EXISTS ix_vulnerabilities_title ON vulnerabilities (title)",
         "CREATE INDEX IF NOT EXISTS ix_vulnerabilities_severity ON vulnerabilities (severity)",
     ]

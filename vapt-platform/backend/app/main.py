@@ -12,6 +12,7 @@ from app.routers import finding as finding_router
 from app.routers import integrations as integrations_router
 from app.routers import iam as iam_router
 from app.routers import misconfiguration as misconfiguration_router
+from app.routers import agent as agent_router
 from app.routers import posture as posture_router
 from app.routers import platform as platform_router
 from app.routers import operations as operations_router
@@ -79,6 +80,9 @@ app.include_router(operations_router.router)
 app.include_router(software_router.router)
 app.include_router(software_router.router, prefix="/api")
 app.include_router(software_router.router, prefix="/api/v1")
+app.include_router(agent_router.router)
+app.include_router(agent_router.router, prefix="/api")
+app.include_router(agent_router.router, prefix="/api/v1")
 
 
 @app.on_event("startup")

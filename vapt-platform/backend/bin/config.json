@@ -1,0 +1,7 @@
+{
+  "backend_url": "http://localhost:8000",
+  "device_id": "IPCOM",
+  "agent_key": "vap_agent_sec_UcrzSfWCR2yH1DUHAp2yFZLDtf7-0igQLT-BS7pQGfc",
+  "enrollment_token": "vap_tok_f00d542810f514f42c8c0ca35f9ae495",
+  "checkin_interval_sec": 14400
+}

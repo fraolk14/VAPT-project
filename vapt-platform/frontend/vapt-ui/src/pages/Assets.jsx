@@ -49,6 +49,7 @@ export default function Assets({ onAssetCreated }) {
   const [envFilter, setEnvFilter] = useState("all");
   const [criticalityFilter, setCriticalityFilter] = useState("all");
   const [riskFilter, setRiskFilter] = useState("all");
+  const [managedFilter, setManagedFilter] = useState("all");
 
   // Modals & Drawers
   const [modalState, setModalState] = useState(null); // null | "create" | "edit"
@@ -145,6 +146,9 @@ export default function Assets({ onAssetCreated }) {
 
   const filteredAssets = useMemo(() => {
     return assets.filter((a) => {
+      const isManaged = (a.tags || []).some((t) => t.includes("managed") || t.includes("agent")) || (a.asset_type || "").toLowerCase().includes("endpoint");
+      const matchesManaged = managedFilter === "all" || (managedFilter === "managed" ? isManaged : !isManaged);
+
       const matchesClassification =
         classificationFilter === "all" ||
         (a.classification || "").toLowerCase() === classificationFilter.toLowerCase() ||
@@ -158,16 +162,17 @@ export default function Assets({ onAssetCreated }) {
       const searchBlob = `${a.hostname || ""} ${a.ip_address || ""} ${a.url || ""} ${a.owner || ""} ${a.os_type || ""} ${a.os || ""}`.toLowerCase();
       const matchesSearch = !search || searchBlob.includes(search.toLowerCase());
 
-      return matchesClassification && matchesType && matchesEnv && matchesCriticality && matchesRisk && matchesSearch;
+      return matchesManaged && matchesClassification && matchesType && matchesEnv && matchesCriticality && matchesRisk && matchesSearch;
     });
-  }, [assets, classificationFilter, typeFilter, envFilter, criticalityFilter, riskFilter, search]);
+  }, [assets, managedFilter, classificationFilter, typeFilter, envFilter, criticalityFilter, riskFilter, search]);
 
   const summary = useMemo(() => {
     const total = assets.length;
+    const managedCount = assets.filter((a) => (a.tags || []).some((t) => t.includes("managed") || t.includes("agent")) || (a.asset_type || "").toLowerCase().includes("endpoint")).length;
     const internal = assets.filter((a) => (a.classification || a.exposure || "").toLowerCase().includes("internal")).length;
     const external = total - internal;
     const criticalCount = assets.filter((a) => (a.criticality || "").toLowerCase() === "critical").length;
-    return { total, internal, external, criticalCount };
+    return { total, managedCount, internal, external, criticalCount };
   }, [assets]);
 
   return (
@@ -202,6 +207,14 @@ export default function Assets({ onAssetCreated }) {
         </div>
 
         <div style={{ display: "flex", gap: "12px" }}>
+          <a
+            href="/agent-management"
+            className="btn btn--secondary"
+            style={{ height: "38px", padding: "0 14px", display: "flex", alignItems: "center", gap: "6px", borderColor: "#4fd1c5", color: "#4fd1c5", textDecoration: "none" }}
+          >
+            📡 Deploy Agent (.exe)
+          </a>
+
           <button
             onClick={() => {
               setForm(emptyAssetForm);
@@ -245,22 +258,51 @@ export default function Assets({ onAssetCreated }) {
       )}
 
       {/* Summary KPI Cards */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "16px" }}>
-        <div className="panel" style={{ padding: "16px 20px" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "16px" }}>
+        <div
+          className="panel"
+          onClick={() => setManagedFilter("all")}
+          style={{
+            padding: "16px 20px",
+            cursor: "pointer",
+            border: managedFilter === "all" ? "1px solid #38bdf8" : "1px solid rgba(148, 163, 184, 0.15)",
+            transition: "all 0.2s ease",
+          }}
+          title="Click to view all assets"
+        >
           <span style={{ color: "#94a3b8", fontSize: "0.78rem" }}>Total Discovered Assets</span>
           <strong style={{ display: "block", fontSize: "1.6rem", color: "#38bdf8", marginTop: "4px" }}>{summary.total}</strong>
+        </div>
+        <div
+          className="panel"
+          onClick={() => setManagedFilter("managed")}
+          style={{
+            padding: "16px 20px",
+            cursor: "pointer",
+            border: managedFilter === "managed" ? "2px solid #4fd1c5" : "1px solid rgba(79, 209, 197, 0.4)",
+            background: managedFilter === "managed" ? "rgba(79, 209, 197, 0.15)" : "rgba(79, 209, 197, 0.05)",
+            boxShadow: managedFilter === "managed" ? "0 0 12px rgba(79, 209, 197, 0.3)" : "none",
+            transition: "all 0.2s ease",
+          }}
+          title="Click to filter table for Managed Agent Devices only"
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ color: "#4fd1c5", fontSize: "0.78rem", fontWeight: "600" }}>Managed Devices (VAP Agent)</span>
+            <span style={{ fontSize: "0.7rem", background: "#4fd1c5", color: "#0f172a", padding: "2px 6px", borderRadius: "10px", fontWeight: "bold" }}>FILTER</span>
+          </div>
+          <strong style={{ display: "block", fontSize: "1.6rem", color: "#4fd1c5", marginTop: "4px" }}>{summary.managedCount}</strong>
         </div>
         <div className="panel" style={{ padding: "16px 20px" }}>
           <span style={{ color: "#94a3b8", fontSize: "0.78rem" }}>Internal Footprint</span>
           <strong style={{ display: "block", fontSize: "1.6rem", color: "#34d399", marginTop: "4px" }}>{summary.internal}</strong>
         </div>
         <div className="panel" style={{ padding: "16px 20px" }}>
-          <span style={{ color: "#94a3b8", fontSize: "0.78rem" }}>External Exposure</span>
-          <strong style={{ display: "block", fontSize: "1.6rem", color: "#f87171", marginTop: "4px" }}>{summary.external}</strong>
+          <span style={{ color: "#94a3b8", fontSize: "0.78rem" }}>External Surface</span>
+          <strong style={{ display: "block", fontSize: "1.6rem", color: "#f59e0b", marginTop: "4px" }}>{summary.external}</strong>
         </div>
         <div className="panel" style={{ padding: "16px 20px" }}>
-          <span style={{ color: "#94a3b8", fontSize: "0.78rem" }}>Critical Target Assets</span>
-          <strong style={{ display: "block", fontSize: "1.6rem", color: "#fbbf24", marginTop: "4px" }}>{summary.criticalCount}</strong>
+          <span style={{ color: "#94a3b8", fontSize: "0.78rem" }}>Critical Tier Assets</span>
+          <strong style={{ display: "block", fontSize: "1.6rem", color: "#f87171", marginTop: "4px" }}>{summary.criticalCount}</strong>
         </div>
       </div>
 
@@ -279,6 +321,12 @@ export default function Assets({ onAssetCreated }) {
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+            <select className="scan-select" value={managedFilter} onChange={(e) => setManagedFilter(e.target.value)} style={{ borderColor: "#4fd1c5", color: "#4fd1c5" }}>
+              <option value="all">All Agent Statuses</option>
+              <option value="managed">Managed Devices (VAP Agent)</option>
+              <option value="unmanaged">Unmanaged Assets</option>
+            </select>
+
             <select className="scan-select" value={classificationFilter} onChange={(e) => setClassificationFilter(e.target.value)}>
               <option value="all">All Classifications</option>
               <option value="internal">Internal</option>

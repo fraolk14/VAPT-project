@@ -10,6 +10,7 @@ from .schedule import ScheduledScan
 from .scan import Scan, ScanTarget
 from .tenant import Tenant
 from .iam import Group, Policy, Role, SSOConfig, user_group_association
+from .agent import AgentDevice, AgentEnrollmentToken, SoftwareAllowlist
 from .software import Software, SoftwareAsset, WhitelistSoftware
 from .user import User
 from .vulnerability import Vulnerability

@@ -22,6 +22,7 @@ import Scans from "./pages/Scans";
 import ShadowIT from "./pages/ShadowIT";
 import ThreatIntelligence from "./pages/ThreatIntelligence";
 import UnauthorizedSoftware from "./pages/UnauthorizedSoftware";
+import AgentManagement from "./pages/AgentManagement";
 import Users from "./pages/Users";
 
 class SafeErrorBoundary extends React.Component {
@@ -407,6 +408,7 @@ function App() {
               <Route path="/shadow-it" element={<ShadowIT summary={posture.shadowIt} assets={assets} incidents={platformData.incidents} monitoringEvents={platformData.monitoringEvents} />} />
               <Route path="/misconfigurations" element={<Misconfigurations findings={findings} assets={assets} />} />
               <Route path="/unauthorized-software" element={<UnauthorizedSoftware summary={posture.unauthorizedSoftware} assets={assets} groups={groups} users={users} />} />
+              <Route path="/agent-management" element={<AgentManagement />} />
               <Route path="/reports" element={<Reports findings={findings} scans={scans} compliance={platformData.compliance} incidents={platformData.incidents} alertRules={alerts.rules} alertEvents={alerts.events} />} />
               <Route path="/admin" element={<Users />} />
               <Route path="/users" element={<Users />} />
