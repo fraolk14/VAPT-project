@@ -347,8 +347,31 @@ def get_asset_full_details(asset_id: str, db: Session = Depends(get_db)):
             shadow_it.append(item)
         elif "software" in cat_lower or "drift" in title_lower or "unauthorized" in title_lower:
             unauthorized_software.append(item)
-        else:
-            other_findings.append(item)
+    from app.models.software import Software, SoftwareAsset
+    installed_software_records = (
+        db.query(Software, SoftwareAsset)
+        .join(SoftwareAsset, Software.id == SoftwareAsset.software_id)
+        .filter(
+            (SoftwareAsset.asset_id == asset.id) |
+            (SoftwareAsset.hostname == asset.hostname) |
+            (SoftwareAsset.ip_address == asset.ip_address)
+        )
+        .all()
+    )
+    installed_software = [
+        {
+            "id": sw.id,
+            "name": sw.name,
+            "vendor": sw.vendor,
+            "version": sw.version,
+            "category": sw.category,
+            "status": sw.status,
+            "risk_score": sw.risk_score,
+            "source": sa.source,
+            "installed_path": sa.installed_path,
+        }
+        for sw, sa in installed_software_records
+    ]
 
     return jsonable_encoder({
         "asset": formatted_asset,
@@ -356,6 +379,7 @@ def get_asset_full_details(asset_id: str, db: Session = Depends(get_db)):
         "misconfigurations": misconfigurations,
         "shadow_it": shadow_it,
         "unauthorized_software": unauthorized_software,
+        "installed_software": installed_software,
         "other_findings": other_findings,
         "total_findings_count": len(misconfigurations) + len(shadow_it) + len(unauthorized_software) + len(other_findings),
     })

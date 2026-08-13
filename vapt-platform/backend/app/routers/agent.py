@@ -237,12 +237,31 @@ def agent_checkin(
                 },
             })
 
-        # 3. Process Shadow IT & Full Software Inventory against Allowlist
+        # 3. Process Shadow IT & Full Software Inventory against Allowlist and Governance tables
+        from app.services.software_discovery import process_software_governance
         allowlist_names = {item.name.lower() for item in db.query(SoftwareAllowlist).all()}
+        
         for sw in payload.software_inventory:
             sw_name = sw.get("name")
             if not sw_name:
                 continue
+
+            # Ingest into Software & SoftwareAsset governance tables
+            process_software_governance(
+                db,
+                software_name=sw_name,
+                vendor=sw.get("vendor"),
+                version=sw.get("version"),
+                category=sw.get("category") or "Application",
+                asset_id=str(asset_obj.id) if asset_obj else None,
+                installed_path=sw.get("install_location"),
+                ip_address=primary_ip,
+                hostname=payload.asset.hostname,
+                endpoint_name=payload.asset.hostname,
+                source="VAP Endpoint Agent",
+            )
+
+            # Generate security finding for unapproved software drift
             if allowlist_names and sw_name.lower() not in allowlist_names:
                 normalized_findings.append({
                     "title": f"Unauthorized Software Drift: {sw_name}",

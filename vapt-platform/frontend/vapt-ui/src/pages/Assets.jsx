@@ -787,7 +787,7 @@ export default function Assets({ assets: propAssets = [], onAssetCreated }) {
               </div>
 
               {/* 3. Unauthorized Software & Software Drift */}
-              <div>
+              <div style={{ marginBottom: "24px" }}>
                 <h3 style={{ color: "#f8fafc", fontSize: "1.05rem", marginBottom: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
                   <FiShield style={{ color: "#f87171" }} /> Unauthorized Software & Drift ({assetDetails?.unauthorized_software?.length || 0})
                 </h3>
@@ -811,6 +811,35 @@ export default function Assets({ assets: propAssets = [], onAssetCreated }) {
                     <FiCheckCircle style={{ fontSize: "24px", color: "#34d399", marginBottom: "6px" }} />
                     <p style={{ margin: 0, color: "#f8fafc", fontWeight: "600", fontSize: "0.88rem" }}>Software Allowlist compliant</p>
                     <small style={{ color: "#64748b" }}>All installed applications match corporate Software Allowlist policy.</small>
+                  </div>
+                )}
+              </div>
+
+              {/* 4. Complete Installed Software Inventory */}
+              <div>
+                <h3 style={{ color: "#f8fafc", fontSize: "1.05rem", marginBottom: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
+                  <FiLayers style={{ color: "#38bdf8" }} /> Full Software Inventory ({assetDetails?.installed_software?.length || 0})
+                </h3>
+
+                {assetDetails?.installed_software?.length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "320px", overflowY: "auto" }}>
+                    {assetDetails.installed_software.map((item) => (
+                      <div key={item.id} style={{ background: "rgba(30, 41, 59, 0.5)", padding: "10px 14px", borderRadius: "8px", border: "1px solid rgba(148, 163, 184, 0.12)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div>
+                          <strong style={{ color: "#f8fafc", fontSize: "0.85rem", display: "block" }}>{item.name}</strong>
+                          <span style={{ fontSize: "0.75rem", color: "#94a3b8" }}>
+                            {item.vendor || "Unknown Vendor"} {item.version ? `(v${item.version})` : ""}
+                          </span>
+                        </div>
+                        <span className={`pill pill--${item.status === "APPROVED" ? "low" : item.status === "VULNERABLE" ? "critical" : "high"}`} style={{ fontSize: "0.7rem" }}>
+                          {item.status}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ padding: "20px", textAlign: "center", background: "rgba(30, 41, 59, 0.3)", borderRadius: "10px", border: "1px dashed rgba(148, 163, 184, 0.2)" }}>
+                    <p style={{ margin: 0, color: "#94a3b8", fontSize: "0.85rem" }}>No installed software ingested yet for this device.</p>
                   </div>
                 )}
               </div>
