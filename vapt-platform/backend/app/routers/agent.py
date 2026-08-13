@@ -3,7 +3,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from passlib.context import CryptContext
 from pydantic import BaseModel
