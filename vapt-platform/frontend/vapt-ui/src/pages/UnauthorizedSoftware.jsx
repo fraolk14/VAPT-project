@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import api from "../api/client";
 
 export default function UnauthorizedSoftware({ summary, assets = [] }) {
   const [softwareList, setSoftwareList] = useState([]);
   const [whitelist, setWhitelist] = useState([]);
-  const [riskFilter, setRiskFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [ipFilter, setIpFilter] = useState("");
   const [selectedId, setSelectedId] = useState(null);
+
+  const tableRef = useRef(null);
 
   // Pagination state (10 per page)
   const [currentPage, setCurrentPage] = useState(1);
@@ -41,20 +42,25 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
   // Filter rows
   const rows = useMemo(() => {
     return softwareList
-      .filter((item) => riskFilter === "all" || item.status.toLowerCase() === riskFilter.toLowerCase())
-      .filter((item) => statusFilter === "all" || item.status === statusFilter)
+      .filter((item) => {
+        if (statusFilter === "all") return true;
+        if (statusFilter === "VULNERABLE") {
+          return item.status === "VULNERABLE" || (Array.isArray(item.cves) && item.cves.length > 0);
+        }
+        return item.status === statusFilter;
+      })
       .filter((item) => {
         const itemIp = item.ip_address || item.metadata?.ip_address || "";
         return !ipFilter.trim() || itemIp.includes(ipFilter.trim());
       })
       .filter((item) => `${item.name} ${item.vendor || ""} ${item.category || ""} ${item.version || ""}`.toLowerCase().includes(query.trim().toLowerCase()))
       .sort((a, b) => b.risk_score - a.risk_score);
-  }, [softwareList, riskFilter, statusFilter, ipFilter, query]);
+  }, [softwareList, statusFilter, ipFilter, query]);
 
   // Reset to page 1 whenever filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [query, ipFilter, statusFilter, riskFilter]);
+  }, [query, ipFilter, statusFilter]);
 
   const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
   const pagedRows = useMemo(() => {
@@ -63,6 +69,15 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
   }, [rows, currentPage]);
 
   const selected = useMemo(() => softwareList.find((item) => item.id === selectedId) || rows[0] || null, [softwareList, selectedId, rows]);
+
+  const scrollToTable = () => {
+    tableRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  const handleMetricCardClick = (statusValue) => {
+    setStatusFilter(statusValue);
+    scrollToTable();
+  };
 
   const handleAddWhitelist = async (event) => {
     event.preventDefault();
@@ -164,13 +179,13 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
   };
 
   const approvedCount = softwareList.filter((s) => s.status === "APPROVED").length;
-  const vulnerableCount = softwareList.filter((s) => s.status === "VULNERABLE").length;
+  const vulnerableCount = softwareList.filter((s) => s.status === "VULNERABLE" || (Array.isArray(s.cves) && s.cves.length > 0)).length;
   const unauthorizedCount = softwareList.filter((s) => s.status === "UNAUTHORIZED").length;
 
   return (
     <section className="section-grid" style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
       
-      {/* 1. Top Metrics Banner */}
+      {/* 1. Top Metrics Banner with Interactive Filter Cards */}
       <div className="panel panel--metrics" style={{ margin: 0 }}>
         <div className="panel__header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "16px" }}>
           <div>
@@ -188,20 +203,87 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
             </button>
           </div>
         </div>
+        
+        {/* Interactive Clickable Metric Cards */}
         <div className="metrics-grid" style={{ marginTop: "16px" }}>
-          <article className="metric-card"><span>Total Discovered</span><strong>{softwareList.length}</strong><small>Discovered in PostgreSQL</small></article>
-          <article className="metric-card"><span>Approved Software</span><strong>{approvedCount}</strong><small>Whitelisted by policy</small></article>
-          <article className="metric-card"><span>Vulnerable Apps</span><strong>{vulnerableCount}</strong><small>Known CVE vulnerabilities</small></article>
-          <article className="metric-card"><span>Unauthorized Drift</span><strong>{unauthorizedCount}</strong><small>Requires review / containment</small></article>
+          <article
+            className="metric-card"
+            onClick={() => handleMetricCardClick("all")}
+            style={{
+              cursor: "pointer",
+              transition: "all 0.2s ease",
+              border: statusFilter === "all" ? "2px solid #38bdf8" : "1px solid rgba(148, 163, 184, 0.15)",
+              background: statusFilter === "all" ? "rgba(56, 189, 248, 0.08)" : "inherit"
+            }}
+          >
+            <span>Total Discovered</span>
+            <strong>{softwareList.length}</strong>
+            <small style={{ color: "#38bdf8", marginTop: "4px", display: "block" }}>Click to view all apps ➔</small>
+          </article>
+
+          <article
+            className="metric-card"
+            onClick={() => handleMetricCardClick("APPROVED")}
+            style={{
+              cursor: "pointer",
+              transition: "all 0.2s ease",
+              border: statusFilter === "APPROVED" ? "2px solid #34d399" : "1px solid rgba(148, 163, 184, 0.15)",
+              background: statusFilter === "APPROVED" ? "rgba(52, 211, 153, 0.08)" : "inherit"
+            }}
+          >
+            <span>Approved Software</span>
+            <strong>{approvedCount}</strong>
+            <small style={{ color: "#34d399", marginTop: "4px", display: "block" }}>Click to filter whitelisted ➔</small>
+          </article>
+
+          {/* Interactive Vulnerable Apps Card */}
+          <article
+            className="metric-card"
+            onClick={() => handleMetricCardClick("VULNERABLE")}
+            style={{
+              cursor: "pointer",
+              transition: "all 0.2s ease",
+              border: statusFilter === "VULNERABLE" ? "2px solid #f87171" : "1px solid rgba(239, 68, 68, 0.3)",
+              background: statusFilter === "VULNERABLE" ? "rgba(239, 68, 68, 0.15)" : "rgba(239, 68, 68, 0.04)"
+            }}
+          >
+            <span>Vulnerable Apps</span>
+            <strong style={{ color: "#f87171" }}>{vulnerableCount}</strong>
+            <small style={{ color: "#f87171", fontWeight: "600", marginTop: "4px", display: "block" }}>
+              ⚠️ Click to view CVE targets ➔
+            </small>
+          </article>
+
+          <article
+            className="metric-card"
+            onClick={() => handleMetricCardClick("UNAUTHORIZED")}
+            style={{
+              cursor: "pointer",
+              transition: "all 0.2s ease",
+              border: statusFilter === "UNAUTHORIZED" ? "2px solid #fbbf24" : "1px solid rgba(148, 163, 184, 0.15)",
+              background: statusFilter === "UNAUTHORIZED" ? "rgba(251, 191, 36, 0.08)" : "inherit"
+            }}
+          >
+            <span>Unauthorized Drift</span>
+            <strong>{unauthorizedCount}</strong>
+            <small style={{ color: "#fbbf24", marginTop: "4px", display: "block" }}>Click to filter unapproved ➔</small>
+          </article>
         </div>
       </div>
 
       {/* 2. Discovered Software Inventory Panel (FULL 100% HORIZONTAL WIDTH) */}
-      <div className="panel" style={{ margin: 0, width: "100%", boxSizing: "border-box" }}>
+      <div className="panel" ref={tableRef} style={{ margin: 0, width: "100%", boxSizing: "border-box" }}>
         <div className="panel__header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "16px", marginBottom: "16px" }}>
           <div>
             <p className="eyebrow">Discovered software inventory</p>
-            <h2 style={{ fontSize: "1.25rem", margin: 0 }}>Discovered Software ({rows.length})</h2>
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              <h2 style={{ fontSize: "1.25rem", margin: 0 }}>Discovered Software ({rows.length})</h2>
+              {statusFilter === "VULNERABLE" && (
+                <span style={{ background: "rgba(239, 68, 68, 0.2)", color: "#f87171", padding: "4px 10px", borderRadius: "6px", fontSize: "0.8rem", border: "1px solid rgba(239, 68, 68, 0.4)", fontWeight: "600" }}>
+                  ⚠️ Filtered by Vulnerable Apps & CVE Targets
+                </span>
+              )}
+            </div>
           </div>
           <span style={{ fontSize: "0.85rem", color: "#94a3b8", background: "rgba(30, 41, 59, 0.6)", padding: "6px 12px", borderRadius: "6px", border: "1px solid rgba(148, 163, 184, 0.12)" }}>
             Showing <strong>{(currentPage - 1) * pageSize + (pagedRows.length ? 1 : 0)}</strong> - <strong>{(currentPage - 1) * pageSize + pagedRows.length}</strong> of <strong>{rows.length}</strong>
@@ -214,8 +296,8 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
           <input className="scan-input" placeholder="🌐 Filter by Target IP (e.g. 192.168.30.129)..." value={ipFilter} onChange={(e) => setIpFilter(e.target.value)} style={{ width: "100%" }} />
           <select className="scan-select" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ width: "100%" }}>
             <option value="all">All Statuses (Approved, Unauthorized, Vulnerable)</option>
+            <option value="VULNERABLE">⚠️ VULNERABLE & CVE Targets Only</option>
             <option value="UNAUTHORIZED">UNAUTHORIZED</option>
-            <option value="VULNERABLE">VULNERABLE</option>
             <option value="APPROVED">APPROVED</option>
           </select>
         </div>
@@ -227,11 +309,11 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
               <tr style={{ background: "rgba(15, 23, 42, 0.8)", textAlign: "left" }}>
                 <th style={{ padding: "12px 14px", width: "24%" }}>Software Name & Version</th>
                 <th style={{ padding: "12px 14px", width: "16%" }}>Target IP Address</th>
-                <th style={{ padding: "12px 14px", width: "15%" }}>Discovery Source</th>
-                <th style={{ padding: "12px 14px", width: "15%" }}>Vendor / Publisher</th>
+                <th style={{ padding: "12px 14px", width: "14%" }}>Discovery Source</th>
+                <th style={{ padding: "12px 14px", width: "14%" }}>Vendor / Publisher</th>
                 <th style={{ padding: "12px 14px", width: "10%" }}>Status</th>
                 <th style={{ padding: "12px 14px", width: "8%" }}>Risk Score</th>
-                <th style={{ padding: "12px 14px", width: "12%", textAlign: "right" }}>Governance Action</th>
+                <th style={{ padding: "12px 14px", width: "14%", textAlign: "right" }}>Governance Action</th>
               </tr>
             </thead>
             <tbody>
@@ -239,16 +321,24 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
                 const targetIp = item.ip_address || item.metadata?.ip_address || "127.0.0.1";
                 const sourceLabel = item.source || item.metadata?.source || "Nmap -sV";
                 const isApproved = item.status === "APPROVED";
+                const isVulnerable = item.status === "VULNERABLE" || (Array.isArray(item.cves) && item.cves.length > 0);
                 return (
                   <tr
                     key={item.id}
                     className={selected?.id === item.id ? "finding-row--selected" : ""}
                     onClick={() => setSelectedId(item.id)}
-                    style={{ cursor: "pointer", transition: "background 0.15s ease" }}
+                    style={{ cursor: "pointer", transition: "background 0.15s ease", background: selected?.id === item.id ? "rgba(56, 189, 248, 0.08)" : "inherit" }}
                   >
                     <td data-label="Software Name" style={{ padding: "12px 14px" }}>
                       <strong style={{ color: "#f8fafc", fontSize: "0.9rem", display: "block" }}>{item.name}</strong>
                       <small style={{ color: "#94a3b8", fontSize: "0.78rem" }}>{item.version ? `v${item.version}` : "Version unspecified"}</small>
+                      {item.cves?.length ? (
+                        <div style={{ marginTop: "4px" }}>
+                          <span style={{ fontSize: "0.72rem", color: "#f87171", background: "rgba(239, 68, 68, 0.15)", padding: "2px 6px", borderRadius: "4px" }}>
+                            {item.cves.join(", ")}
+                          </span>
+                        </div>
+                      ) : null}
                     </td>
                     <td data-label="Target IP" style={{ padding: "12px 14px" }}>
                       <code style={{ background: "rgba(30, 41, 59, 0.8)", padding: "4px 8px", borderRadius: "4px", fontSize: "0.82rem", color: "#38bdf8" }}>{targetIp}</code>
@@ -258,8 +348,8 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
                     </td>
                     <td data-label="Vendor" style={{ padding: "12px 14px", color: "#cbd5e1", fontSize: "0.85rem" }}>{item.vendor || "Unknown Vendor"}</td>
                     <td data-label="Status" style={{ padding: "12px 14px" }}>
-                      <span className={`pill pill--${isApproved ? "low" : item.status === "VULNERABLE" ? "critical" : "high"}`} style={{ fontSize: "0.75rem", fontWeight: "600" }}>
-                        {item.status}
+                      <span className={`pill pill--${isApproved ? "low" : isVulnerable ? "critical" : "high"}`} style={{ fontSize: "0.75rem", fontWeight: "600" }}>
+                        {isVulnerable ? "VULNERABLE" : item.status}
                       </span>
                     </td>
                     <td data-label="Risk Score" style={{ padding: "12px 14px" }}>
@@ -294,7 +384,9 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
               {!pagedRows.length ? (
                 <tr>
                   <td colSpan="7" style={{ padding: "24px", textAlign: "center" }}>
-                    <p className="empty-copy" style={{ color: "#94a3b8", margin: 0 }}>No software items found matching filter criteria.</p>
+                    <p className="empty-copy" style={{ color: "#94a3b8", margin: 0 }}>
+                      {statusFilter === "VULNERABLE" ? "No software items with known CVE vulnerabilities found." : "No software items found matching filter criteria."}
+                    </p>
                   </td>
                 </tr>
               ) : null}
