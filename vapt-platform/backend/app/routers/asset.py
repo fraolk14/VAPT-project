@@ -96,6 +96,34 @@ def _format_asset_response(a: Asset, db: Session) -> dict[str, Any]:
 @router.get("/", response_model=list[AssetResponse])
 @router.get("/v1/", response_model=list[AssetResponse])
 def list_assets(db: Session = Depends(get_db)):
+    from app.models.agent import AgentDevice
+    agent_devices = db.query(AgentDevice).all()
+    for dev in agent_devices:
+        a_match = db.query(Asset).filter(
+            (Asset.hostname == dev.hostname) | (Asset.asset_name == dev.hostname)
+        ).first()
+        if not a_match:
+            a_match = Asset(
+                asset_name=dev.hostname,
+                hostname=dev.hostname,
+                ip_address=dev.ip_address or "Enrolled Agent",
+                os=dev.os_info or "Windows Endpoint",
+                asset_type="Endpoint Workstation",
+                environment="prod",
+                criticality="medium",
+                exposure="internal",
+                tags=["managed-agent", "vap-agent-active"],
+                business_unit="IT Workstation Fleet",
+                risk_score=5.0,
+            )
+            db.add(a_match)
+        else:
+            if dev.ip_address and not dev.ip_address.startswith("169.254.") and a_match.ip_address != dev.ip_address:
+                a_match.ip_address = dev.ip_address
+            if "managed-agent" not in (a_match.tags or []):
+                a_match.tags = list(set((a_match.tags or []) + ["managed-agent", "vap-agent-active"]))
+    db.commit()
+
     assets = db.query(Asset).order_by(Asset.created_at.desc()).all()
     return [_format_asset_response(a, db) for a in assets]
 
