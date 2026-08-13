@@ -121,6 +121,26 @@ def enroll_agent_device(payload: EnrollRequest, db: Session = Depends(get_db)):
         device.hostname = payload.hostname
         device.last_seen = datetime.now(timezone.utc)
 
+    # Immediately upsert Asset record so device appears on Assets page instantly upon enrollment
+    asset_obj = db.query(Asset).filter(
+        (Asset.hostname == payload.hostname) | (Asset.asset_name == payload.hostname)
+    ).first()
+    if not asset_obj:
+        asset_obj = Asset(
+            asset_name=payload.hostname,
+            hostname=payload.hostname,
+            ip_address="Enrolled (Pending Check-in)",
+            os=payload.os_info or "Windows Endpoint",
+            asset_type="Endpoint Workstation",
+            environment="prod",
+            criticality="medium",
+            exposure="internal",
+            tags=["managed-agent", "vap-agent-active"],
+            business_unit="IT Workstation Fleet",
+            risk_score=5.0,
+        )
+        db.add(asset_obj)
+
     db.commit()
     db.refresh(device)
 
