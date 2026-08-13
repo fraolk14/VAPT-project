@@ -84,13 +84,11 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
   const handleToggleWhitelist = async (swName, swVendor, currentStatus) => {
     try {
       if (currentStatus === "APPROVED") {
-        // Find whitelist item ID to remove
         const entry = whitelist.find((w) => w.name.toLowerCase() === swName.toLowerCase());
         if (entry) {
           await api.delete(`/software/whitelist/${entry.id}`);
           setFeedback(`Blacklisted / Removed '${swName}' from approved whitelist.`);
         } else {
-          // Manual approval removal fallback
           await api.post("/software/whitelist", { name: swName, vendor: swVendor, reason: "Unapproved by Analyst" });
         }
       } else {
@@ -197,113 +195,13 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
         </div>
       </div>
 
-      {/* Main Two-Column Layout (Discovery & Policy on LEFT, Software Inventory on RIGHT) */}
-      <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: "20px", alignItems: "start" }}>
+      {/* Main Two-Column Layout: Software Inventory on LEFT (1fr), Discovery & Governance on RIGHT (380px) */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 380px", gap: "20px", alignItems: "start" }}>
         
-        {/* LEFT COLUMN: Endpoint & Subnet Discovery + Whitelist Governance */}
+        {/* LEFT COLUMN: Discovered Software Inventory Table & Details (Main View) */}
         <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
           
-          {/* 1. Endpoint & Subnet Discovery Panel */}
-          <div className="panel">
-            <div className="panel__header">
-              <div>
-                <p className="eyebrow">Endpoint & Subnet Discovery</p>
-                <h3 style={{ color: "#f8fafc", margin: "4px 0", fontSize: "1.05rem" }}>Run Software Discovery</h3>
-              </div>
-            </div>
-            
-            <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-              <form className="form-grid" onSubmit={handleRunDiscovery} style={{ gridTemplateColumns: "1fr" }}>
-                <label style={{ fontSize: "0.78rem", color: "#94a3b8" }}>Scan Single Target IP / Host</label>
-                <input
-                  className="scan-input"
-                  placeholder="Target IP (e.g. 192.168.10.130)"
-                  value={discoverTarget}
-                  onChange={(e) => setDiscoverTarget(e.target.value)}
-                  required
-                />
-                <button type="submit" className="scan-action scan-action--resume" disabled={isDiscovering}>
-                  {isDiscovering ? "Discovering..." : "Scan Target Host"}
-                </button>
-              </form>
-
-              <div style={{ borderTop: "1px solid rgba(148, 163, 184, 0.15)", paddingTop: "12px" }}>
-                <form className="form-grid" onSubmit={handleRunSubnetDiscovery} style={{ gridTemplateColumns: "1fr" }}>
-                  <label style={{ fontSize: "0.78rem", color: "#94a3b8" }}>Discover Subnet Managed Endpoints</label>
-                  <input
-                    className="scan-input"
-                    placeholder="Subnet (e.g. 192.168.10.0/24)"
-                    value={subnetInput}
-                    onChange={(e) => setSubnetInput(e.target.value)}
-                    required
-                  />
-                  <button type="submit" className="scan-action scan-action--resume" disabled={isDiscovering} style={{ background: "#0284c7" }}>
-                    {isDiscovering ? "Scanning Subnet..." : "📡 Discover Subnet Endpoints"}
-                  </button>
-                </form>
-              </div>
-            </div>
-            {feedback ? <p className="scan-feedback scan-feedback--success" style={{ marginTop: "12px", fontSize: "0.8rem" }}>{feedback}</p> : null}
-          </div>
-
-          {/* 2. Whitelist Baseline Form */}
-          <div className="panel">
-            <div className="panel__header">
-              <div>
-                <p className="eyebrow">Approved baseline policy</p>
-                <h3 style={{ color: "#f8fafc", margin: "4px 0", fontSize: "1.05rem" }}>Add Whitelist Policy</h3>
-              </div>
-            </div>
-            <form className="form-grid" onSubmit={handleAddWhitelist} style={{ gridTemplateColumns: "1fr" }}>
-              <input className="scan-input" placeholder="Software Name (e.g. Apache)" value={whitelistForm.name} onChange={(e) => setWhitelistForm((prev) => ({ ...prev, name: e.target.value }))} required />
-              <input className="scan-input" placeholder="Vendor (e.g. Apache Foundation)" value={whitelistForm.vendor} onChange={(e) => setWhitelistForm((prev) => ({ ...prev, vendor: e.target.value }))} />
-              <input className="scan-input" placeholder="Approval Reason" value={whitelistForm.reason} onChange={(e) => setWhitelistForm((prev) => ({ ...prev, reason: e.target.value }))} />
-              <button type="submit" className="scan-action scan-action--resume">Add to Whitelist</button>
-            </form>
-          </div>
-
-          {/* 3. Managed Whitelist Entries */}
-          <div className="panel">
-            <div className="panel__header">
-              <div>
-                <p className="eyebrow">Whitelist Policy</p>
-                <h3 style={{ color: "#f8fafc", margin: "4px 0", fontSize: "1.05rem" }}>Approved Policy ({whitelist.length})</h3>
-              </div>
-            </div>
-            <div style={{ maxHeight: "280px", overflowY: "auto" }}>
-              <table className="table table--dense" style={{ fontSize: "0.8rem" }}>
-                <thead>
-                  <tr>
-                    <th>Software Name</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {whitelist.map((w) => (
-                    <tr key={w.id}>
-                      <td><strong>{w.name}</strong><br/><small style={{ color: "#94a3b8" }}>{w.vendor || "Any Vendor"}</small></td>
-                      <td>
-                        <button type="button" className="scan-action scan-action--pause" style={{ padding: "2px 6px", fontSize: "0.7rem" }} onClick={() => handleRemoveWhitelist(w.id, w.name)}>
-                          Remove
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                  {!whitelist.length ? (
-                    <tr>
-                      <td colSpan="2"><p className="empty-copy" style={{ padding: "10px 0" }}>No whitelist policy entries configured.</p></td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        {/* RIGHT COLUMN: Discovered Software Inventory Table & Details */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-          
-          {/* Software Inventory Panel */}
+          {/* Software Inventory Table Panel */}
           <div className="panel" style={{ margin: 0 }}>
             <div className="panel__header" style={{ flexDirection: "column", alignItems: "flex-start", gap: "12px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", width: "100%", alignItems: "center" }}>
@@ -315,10 +213,10 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
                   Showing {(currentPage - 1) * pageSize + (pagedRows.length ? 1 : 0)} - {(currentPage - 1) * pageSize + pagedRows.length} of {rows.length}
                 </span>
               </div>
-              <div className="table-controls" style={{ width: "100%", display: "flex", gap: "8px" }}>
+              <div className="table-controls" style={{ width: "100%", display: "flex", gap: "10px" }}>
                 <input className="scan-input" placeholder="Filter by IP..." value={ipFilter} onChange={(e) => setIpFilter(e.target.value)} style={{ flex: 1 }} />
-                <input className="scan-input" placeholder="Filter by software name..." value={query} onChange={(e) => setQuery(e.target.value)} style={{ flex: 1 }} />
-                <select className="scan-select" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                <input className="scan-input" placeholder="Filter by software name..." value={query} onChange={(e) => setQuery(e.target.value)} style={{ flex: 1.5 }} />
+                <select className="scan-select" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ flex: 1 }}>
                   <option value="all">All Statuses</option>
                   <option value="UNAUTHORIZED">UNAUTHORIZED</option>
                   <option value="VULNERABLE">VULNERABLE</option>
@@ -425,7 +323,7 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
             </div>
           </div>
 
-          {/* Selected Software Network Mapping Panel */}
+          {/* Selected Software Details Card */}
           <div className="panel">
             <div className="panel__header">
               <div>
@@ -453,6 +351,107 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
               <p className="empty-copy">Select a software entry to view network source mapping.</p>
             )}
           </div>
+        </div>
+
+        {/* RIGHT COLUMN: Endpoint & Subnet Discovery + Whitelist Baseline Policy */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+          
+          {/* 1. Endpoint & Subnet Discovery Panel */}
+          <div className="panel">
+            <div className="panel__header">
+              <div>
+                <p className="eyebrow">Endpoint & Subnet Discovery</p>
+                <h3 style={{ color: "#f8fafc", margin: "4px 0", fontSize: "1.05rem" }}>Run Software Discovery</h3>
+              </div>
+            </div>
+            
+            <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+              <form className="form-grid" onSubmit={handleRunDiscovery} style={{ gridTemplateColumns: "1fr" }}>
+                <label style={{ fontSize: "0.78rem", color: "#94a3b8" }}>Scan Single Target IP / Host</label>
+                <input
+                  className="scan-input"
+                  placeholder="Target IP (e.g. 192.168.10.130)"
+                  value={discoverTarget}
+                  onChange={(e) => setDiscoverTarget(e.target.value)}
+                  required
+                />
+                <button type="submit" className="scan-action scan-action--resume" disabled={isDiscovering}>
+                  {isDiscovering ? "Discovering..." : "Scan Target Host"}
+                </button>
+              </form>
+
+              <div style={{ borderTop: "1px solid rgba(148, 163, 184, 0.15)", paddingTop: "12px" }}>
+                <form className="form-grid" onSubmit={handleRunSubnetDiscovery} style={{ gridTemplateColumns: "1fr" }}>
+                  <label style={{ fontSize: "0.78rem", color: "#94a3b8" }}>Discover Subnet Managed Endpoints</label>
+                  <input
+                    className="scan-input"
+                    placeholder="Subnet (e.g. 192.168.10.0/24)"
+                    value={subnetInput}
+                    onChange={(e) => setSubnetInput(e.target.value)}
+                    required
+                  />
+                  <button type="submit" className="scan-action scan-action--resume" disabled={isDiscovering} style={{ background: "#0284c7" }}>
+                    {isDiscovering ? "Scanning Subnet..." : "📡 Discover Subnet Endpoints"}
+                  </button>
+                </form>
+              </div>
+            </div>
+            {feedback ? <p className="scan-feedback scan-feedback--success" style={{ marginTop: "12px", fontSize: "0.8rem" }}>{feedback}</p> : null}
+          </div>
+
+          {/* 2. Whitelist Baseline Policy Form */}
+          <div className="panel">
+            <div className="panel__header">
+              <div>
+                <p className="eyebrow">Approved baseline policy</p>
+                <h3 style={{ color: "#f8fafc", margin: "4px 0", fontSize: "1.05rem" }}>Add Whitelist Policy</h3>
+              </div>
+            </div>
+            <form className="form-grid" onSubmit={handleAddWhitelist} style={{ gridTemplateColumns: "1fr" }}>
+              <input className="scan-input" placeholder="Software Name (e.g. Apache)" value={whitelistForm.name} onChange={(e) => setWhitelistForm((prev) => ({ ...prev, name: e.target.value }))} required />
+              <input className="scan-input" placeholder="Vendor (e.g. Apache Foundation)" value={whitelistForm.vendor} onChange={(e) => setWhitelistForm((prev) => ({ ...prev, vendor: e.target.value }))} />
+              <input className="scan-input" placeholder="Approval Reason" value={whitelistForm.reason} onChange={(e) => setWhitelistForm((prev) => ({ ...prev, reason: e.target.value }))} />
+              <button type="submit" className="scan-action scan-action--resume">Add to Whitelist</button>
+            </form>
+          </div>
+
+          {/* 3. Whitelisted Software List */}
+          <div className="panel">
+            <div className="panel__header">
+              <div>
+                <p className="eyebrow">Whitelist Policy</p>
+                <h3 style={{ color: "#f8fafc", margin: "4px 0", fontSize: "1.05rem" }}>Approved Policy ({whitelist.length})</h3>
+              </div>
+            </div>
+            <div style={{ maxHeight: "280px", overflowY: "auto" }}>
+              <table className="table table--dense" style={{ fontSize: "0.8rem" }}>
+                <thead>
+                  <tr>
+                    <th>Software Name</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {whitelist.map((w) => (
+                    <tr key={w.id}>
+                      <td><strong>{w.name}</strong><br/><small style={{ color: "#94a3b8" }}>{w.vendor || "Any Vendor"}</small></td>
+                      <td>
+                        <button type="button" className="scan-action scan-action--pause" style={{ padding: "2px 6px", fontSize: "0.7rem" }} onClick={() => handleRemoveWhitelist(w.id, w.name)}>
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                  {!whitelist.length ? (
+                    <tr>
+                      <td colSpan="2"><p className="empty-copy" style={{ padding: "10px 0" }}>No whitelist policy entries configured.</p></td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
         </div>
       </div>
     </section>
