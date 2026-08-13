@@ -78,7 +78,7 @@ class CheckinRequest(BaseModel):
 
 
 @router.post("/enroll", response_model=EnrollResponse)
-def enroll_agent_device(payload: EnrollRequest, db: Session = Depends(get_db)):
+def enroll_agent_device(request: Request, payload: EnrollRequest, db: Session = Depends(get_db)):
     """Single-use enrollment token bootstrap trust endpoint."""
     token_entry = db.query(AgentEnrollmentToken).filter(
         AgentEnrollmentToken.token == payload.token.strip()
@@ -99,6 +99,13 @@ def enroll_agent_device(payload: EnrollRequest, db: Session = Depends(get_db)):
     # Invalidate token so it cannot be reused (Single-Use Requirement)
     token_entry.is_used = True
 
+    # Determine remote client IP from headers or direct socket
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    else:
+        client_ip = request.client.host if request.client else "Unknown IP"
+
     device_id = payload.hardware_id.strip() if payload.hardware_id else f"WIN-{secrets.token_hex(4).upper()}"
     raw_agent_key = f"vap_agent_sec_{secrets.token_urlsafe(32)}"
     credential_hash = pwd_context.hash(raw_agent_key)
@@ -112,6 +119,7 @@ def enroll_agent_device(payload: EnrollRequest, db: Session = Depends(get_db)):
             credential_hash=credential_hash,
             enrollment_token_ref=payload.token,
             status="active",
+            ip_address=client_ip,
             os_info=payload.os_info,
         )
         db.add(device)
@@ -119,6 +127,7 @@ def enroll_agent_device(payload: EnrollRequest, db: Session = Depends(get_db)):
         device.credential_hash = credential_hash
         device.status = "active"
         device.hostname = payload.hostname
+        device.ip_address = client_ip
         device.last_seen = datetime.now(timezone.utc)
 
     # Immediately upsert Asset record so device appears on Assets page instantly upon enrollment
@@ -129,7 +138,7 @@ def enroll_agent_device(payload: EnrollRequest, db: Session = Depends(get_db)):
         asset_obj = Asset(
             asset_name=payload.hostname,
             hostname=payload.hostname,
-            ip_address="Enrolled (Pending Check-in)",
+            ip_address=client_ip if client_ip != "Unknown IP" else "Enrolled Agent",
             os=payload.os_info or "Windows Endpoint",
             asset_type="Endpoint Workstation",
             environment="prod",
@@ -140,6 +149,9 @@ def enroll_agent_device(payload: EnrollRequest, db: Session = Depends(get_db)):
             risk_score=5.0,
         )
         db.add(asset_obj)
+    else:
+        if client_ip and client_ip != "Unknown IP":
+            asset_obj.ip_address = client_ip
 
     db.commit()
     db.refresh(device)
