@@ -583,7 +583,7 @@ def _http_probe_bundle(host: str, port: int, tls: bool) -> list[dict[str, Any]]:
 
 def _probe_port(host: str, port: int, service_hint: str) -> list[dict[str, Any]]:
     try:
-        with socket.create_connection((host, port), timeout=1.2):
+        with socket.create_connection((host, port), timeout=0.35):
             pass
     except OSError:
         return []
@@ -785,7 +785,7 @@ def run_network_assessment(target: str, progress_callback: Callable[[int, dict[s
 
     emit(10, {"phase": "port-sweep", "message": f"Starting deep network assessment across {total} ports."})
 
-    with ThreadPoolExecutor(max_workers=24) as pool:
+    with ThreadPoolExecutor(max_workers=80) as pool:
         futures = {
             pool.submit(_probe_port, host, port, BASE_PORTS.get(port, "unknown")): port
             for port in DEEP_PORTS

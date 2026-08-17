@@ -426,22 +426,57 @@ export default function Scans({ scans: legacyScans, assets: initialAssets, onSca
                       </span>
                     </td>
                     <td style={{ padding: "12px" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <div style={{ flex: 1, background: "#1e293b", height: "8px", borderRadius: "4px", overflow: "hidden" }}>
-                          <div
-                            style={{
-                              width: `${Math.min(100, Math.max(0, job.progress || 0))}%`,
-                              background: statusColor,
-                              height: "100%",
-                              transition: "width 0.5s ease-in-out",
-                            }}
-                          />
+                      <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                          <div style={{ flex: 1, background: "#1e293b", height: "8px", borderRadius: "4px", overflow: "hidden" }}>
+                            <div
+                              style={{
+                                width: `${Math.min(100, Math.max(0, job.progress || 0))}%`,
+                                background: job.status === "RUNNING"
+                                  ? "linear-gradient(90deg, #38bdf8 0%, #0284c7 100%)"
+                                  : statusColor,
+                                height: "100%",
+                                transition: "width 0.5s ease-in-out",
+                                boxShadow: job.status === "RUNNING" ? "0 0 8px #38bdf888" : "none",
+                              }}
+                            />
+                          </div>
+                          <span style={{ fontSize: "0.8rem", color: "#94a3b8", fontWeight: 700, width: "36px" }}>{job.progress || 0}%</span>
                         </div>
-                        <span style={{ fontSize: "0.8rem", color: "#94a3b8", width: "36px" }}>{job.progress || 0}%</span>
+                        {job.status === "RUNNING" && (
+                          <span style={{ fontSize: "0.7rem", color: "#38bdf8", fontStyle: "italic" }}>
+                            {job.progress >= 70 ? "Correlating CVEs & saving findings..." : "Active port discovery & probing..."}
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td style={{ padding: "12px" }}>
-                      <div style={{ display: "flex", gap: "6px" }}>
+                      <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                        <button
+                          onClick={() => {
+                            if (window.location.hash !== undefined) {
+                              window.location.hash = "#/findings";
+                            } else {
+                              window.location.pathname = "/findings";
+                            }
+                          }}
+                          style={{
+                            background: "linear-gradient(135deg, #10b98122 0%, #05966922 100%)",
+                            color: "#34d399",
+                            border: "1px solid #10b98144",
+                            padding: "4px 10px",
+                            borderRadius: "4px",
+                            cursor: "pointer",
+                            fontSize: "0.75rem",
+                            fontWeight: 700,
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "4px",
+                          }}
+                          title="View findings discovered by this scan"
+                        >
+                          🔍 View Findings
+                        </button>
                         <button
                           onClick={() => handleRescan(job.id)}
                           style={{ background: "#0284c722", color: "#38bdf8", border: "1px solid #0284c744", padding: "4px 10px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem", fontWeight: 600 }}

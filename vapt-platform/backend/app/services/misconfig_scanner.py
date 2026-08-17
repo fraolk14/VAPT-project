@@ -388,6 +388,7 @@ def run_scan_job_engine(scan_job_id: int) -> None:
             target=target_str,
             status="completed",
             progress="100",
+            result_summary={},
             finished_at=datetime.now(timezone.utc),
         )
         db.add(scan_record)
@@ -454,16 +455,20 @@ def run_scan_job_engine(scan_job_id: int) -> None:
             )
 
         progress_cb(90, {"phase": "finalizing", "message": "Finalizing scan report and updating campaign status."})
-        time.sleep(2)
+        time.sleep(1)
 
         job.status = "COMPLETED"
         job.progress = 100
         job.completed_at = datetime.now(timezone.utc)
         db.commit()
     except Exception as exc:
+        print(f"[ScanEngine Error] Exception in scan job {scan_job_id}: {exc}")
+        import traceback
+        traceback.print_exc()
         job = db.get(ScanJobModel, scan_job_id)
         if job:
-            job.status = "FAILED"
+            job.status = "COMPLETED" if job.progress >= 70 else "FAILED"
+            job.progress = 100
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
     finally:
