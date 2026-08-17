@@ -2,7 +2,12 @@ services:
   api:
     container_name: vapt-prod-api
     image: vapt-platform-api:latest
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     restart: always
+    volumes:
+      - ./backend/app:/app/app
     env_file:
       - .env
     environment:
@@ -19,6 +24,9 @@ services:
   frontend:
     container_name: vapt-prod-frontend
     image: vapt-platform-frontend:latest
+    build:
+      context: ./frontend/vapt-ui
+      dockerfile: Dockerfile
     restart: always
     ports:
       - "18080:80"
