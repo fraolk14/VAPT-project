@@ -220,11 +220,11 @@ export default function Findings({ findings, users, groups }) {
     const needle = (queryText || targetParam).trim().toLowerCase();
     
     const filtered = localFindings.filter((finding) => {
-      // 0. Fast Target IP / CIDR / URL filter if target query param is present
+      // 0. Flexible Target IP / CIDR / URL filter if target query param is present
       if (targetParam) {
-        const paramStr = targetParam.trim().toLowerCase();
-        const rawTarget = (finding.target || "").toLowerCase();
-        const metaHost = (finding.finding_metadata?.host || finding.finding_metadata?.url || finding.finding_metadata?.ip_address || "").toLowerCase();
+        const paramStr = targetParam.trim().toLowerCase().replace(/^https?:\/\//, "");
+        const rawTarget = (finding.target || "").toLowerCase().replace(/^https?:\/\//, "");
+        const metaHost = (finding.finding_metadata?.host || finding.finding_metadata?.url || finding.finding_metadata?.ip_address || "").toLowerCase().replace(/^https?:\/\//, "");
         const matches = rawTarget.includes(paramStr) || paramStr.includes(rawTarget) || metaHost.includes(paramStr) || paramStr.includes(metaHost);
         if (!matches) return false;
       }
