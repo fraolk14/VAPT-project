@@ -507,10 +507,11 @@ export default function Scans({ scans: legacyScans, assets: initialAssets, onSca
                       <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
                         {(() => {
                           const tabKey = job.engine === "Network" ? "openvas" : (job.engine === "Web" ? "zap" : (job.engine === "Mobile" ? "mobsf" : "all"));
+                          const targetParam = job.target ? `&target=${encodeURIComponent(job.target)}` : "";
                           return (
                             <>
                               <Link
-                                to={`/findings?scan_id=${job.id}&tab=${tabKey}`}
+                                to={`/findings?tab=${tabKey}${targetParam}`}
                                 style={{
                                   background: "linear-gradient(135deg, #10b98122 0%, #05966922 100%)",
                                   color: "#34d399",
@@ -525,7 +526,7 @@ export default function Scans({ scans: legacyScans, assets: initialAssets, onSca
                                   gap: "4px",
                                   textDecoration: "none",
                                 }}
-                                title="View findings discovered strictly by this scan job"
+                                title={`View findings for target: ${job.target}`}
                               >
                                 🔍 View Findings
                               </Link>

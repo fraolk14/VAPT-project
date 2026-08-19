@@ -171,7 +171,18 @@ export default function Findings({ findings, users, groups }) {
   const [searchParams] = useSearchParams();
   const resizeStateRef = useRef(null);
   const [localFindings, setLocalFindings] = useState(findings || []);
-  const [activeTab, setActiveTab] = useState("all");
+
+  const scanIdParam = searchParams.get("scan_id") || "";
+  const tabParam = searchParams.get("tab") || "";
+  const targetParam = searchParams.get("target") || searchParams.get("target_ip") || "";
+  const queryParam = searchParams.get("search") || searchParams.get("q") || "";
+  
+  const [activeTab, setActiveTab] = useState(() => {
+    if (tabParam && ["all", "endpoint", "openvas", "zap", "mobsf"].includes(tabParam)) {
+      return tabParam;
+    }
+    return "all";
+  });
   
   // Advanced Filters
   const [severityFilter, setSeverityFilter] = useState("ALL");
@@ -190,10 +201,6 @@ export default function Findings({ findings, users, groups }) {
   const [expandedDetails, setExpandedDetails] = useState({});
   const [columnWidths, setColumnWidths] = useState(DEFAULT_COLUMN_WIDTHS);
   
-  const scanIdParam = searchParams.get("scan_id") || "";
-  const tabParam = searchParams.get("tab") || "";
-  const selectedTarget = searchParams.get("target") || "";
-  const queryParam = searchParams.get("search") || searchParams.get("q") || "";
   const [queryText, setQueryText] = useState(queryParam);
 
   useEffect(() => {
@@ -201,39 +208,28 @@ export default function Findings({ findings, users, groups }) {
   }, [queryParam]);
 
   useEffect(() => {
-    if (tabParam && ["all", "endpoint", "openvas", "zap", "mobsf"].includes(tabParam)) {
-      setActiveTab(tabParam);
-    }
-  }, [tabParam]);
-
-  useEffect(() => {
     setLocalFindings(findings || []);
   }, [findings]);
 
-  // Handle selected target from URL query params
-  useEffect(() => {
-    if (!localFindings.length) return;
-    if (selectedTarget) {
-      const matched = localFindings.find((finding) => targetLabel(finding) === selectedTarget);
-      if (matched?.source) {
-        const matchedTab = TAB_OPTIONS.find((tab) => tab.key !== "all" && findingMatchesTab(matched, tab.key));
-        if (matchedTab) {
-          setActiveTab(matchedTab.key);
-        }
-      }
-    }
-  }, [localFindings, selectedTarget]);
-
   useEffect(() => {
     setPageIndex(0);
-  }, [activeTab, severityFilter, statusFilter, verificationFilter, pageSize, sortState, queryText, scanIdParam]);
+  }, [activeTab, severityFilter, statusFilter, verificationFilter, pageSize, sortState, queryText, scanIdParam, targetParam]);
 
   // Multi-criteria Filtering & Sorting
   const filteredAndSortedFindings = useMemo(() => {
-    const needle = (queryText || selectedTarget).trim().toLowerCase();
+    const needle = (queryText || targetParam).trim().toLowerCase();
     
     const filtered = localFindings.filter((finding) => {
-      // 0. Strict Scan Job ID filter if scan_id query param is present
+      // 0. Fast Target IP / CIDR / URL filter if target query param is present
+      if (targetParam) {
+        const paramStr = targetParam.trim().toLowerCase();
+        const rawTarget = (finding.target || "").toLowerCase();
+        const metaHost = (finding.finding_metadata?.host || finding.finding_metadata?.url || finding.finding_metadata?.ip_address || "").toLowerCase();
+        const matches = rawTarget.includes(paramStr) || paramStr.includes(rawTarget) || metaHost.includes(paramStr) || paramStr.includes(metaHost);
+        if (!matches) return false;
+      }
+
+      // 0b. Strict Scan Job ID filter if scan_id query param is present
       if (scanIdParam && String(finding.scan_id) !== String(scanIdParam)) {
         return false;
       }
@@ -411,17 +407,17 @@ export default function Findings({ findings, users, groups }) {
 
   return (
     <section className="panel" style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "12px", padding: "24px" }}>
-      {/* Scan ID Active Filter Banner */}
-      {scanIdParam && (
+      {/* Target Active Filter Banner */}
+      {targetParam && (
         <div style={{ background: "linear-gradient(135deg, #0284c722 0%, #0369a122 100%)", border: "1px solid #0284c755", padding: "12px 16px", borderRadius: "8px", marginBottom: "20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
             <span style={{ fontSize: "1.4rem" }}>🎯</span>
             <div>
               <div style={{ color: "#38bdf8", fontWeight: 700, fontSize: "0.95rem" }}>
-                Filtered Results for Scan Campaign #{scanIdParam}
+                Filtered Vulnerability Findings for Target: <code style={{ background: "#1e293b", padding: "2px 6px", borderRadius: "4px", color: "#34d399" }}>{targetParam}</code>
               </div>
               <div style={{ fontSize: "0.75rem", color: "#94a3b8", marginTop: "2px" }}>
-                Displaying {filteredAndSortedFindings.length} security vulnerability findings discovered strictly by this scan execution.
+                Displaying {filteredAndSortedFindings.length} security findings matching target IP, CIDR block, or URL.
               </div>
             </div>
           </div>
