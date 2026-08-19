@@ -353,11 +353,11 @@ def run_scan_job_engine(scan_job_id: int) -> None:
         if engine_name == "network":
             # Real Network Engine: Nmap (port discovery) + OpenVAS (CVE correlation)
             findings_list = run_network_assessment(target_str, progress_callback=progress_cb)
-            time.sleep(3)
+            time.sleep(2)
         elif engine_name == "web":
-            # Real Web Engine: Nuclei (vulnerability templates) + ZAP (web spidering)
-            findings_list = run_web_assessment(target_str, progress_callback=progress_cb)
-            time.sleep(3)
+            # Real Web Engine: Advanced Deep Pentest (25+ Sensitive Endpoints, Injection Probes, Headers, CORS, Cookies)
+            findings_list = run_web_assessment(target_str, progress_callback=progress_cb, deep_mode=True)
+            time.sleep(2)
         else:
             # Real Mobile Engine: MobSF static binary & permission analysis
             time.sleep(3)

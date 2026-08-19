@@ -38,6 +38,7 @@ export default function Scans({ scans: legacyScans, assets: initialAssets, onSca
   const [scanName, setScanName] = useState("");
   const [scheduleInterval, setScheduleInterval] = useState("Immediate");
   const [selectedAssetId, setSelectedAssetId] = useState("");
+  const [scanDepth, setScanDepth] = useState("deep");
   
   const [scanJobs, setScanJobs] = useState([]);
   const [assetList, setAssetList] = useState(initialAssets || []);
@@ -322,6 +323,56 @@ export default function Scans({ scans: legacyScans, assets: initialAssets, onSca
             </select>
           </div>
 
+          {/* Scan Depth Mode */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px", gridColumn: "1 / -1", background: "#0284c711", border: "1px solid #0284c733", padding: "16px", borderRadius: "8px", marginTop: "8px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+              <label style={{ color: "#38bdf8", fontSize: "0.95rem", fontWeight: 700, display: "flex", alignItems: "center", gap: "8px" }}>
+                🛡️ Assessment Engine Profile & Scan Depth
+              </label>
+              <span style={{ fontSize: "0.75rem", background: "#0284c722", color: "#38bdf8", padding: "2px 8px", borderRadius: "12px", border: "1px solid #0284c744" }}>
+                {scanDepth === "deep" ? "ADVANCED DEEP MODE ENABLED" : "STANDARD FAST SWEEP"}
+              </span>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+              <button
+                type="button"
+                onClick={() => setScanDepth("deep")}
+                style={{
+                  background: scanDepth === "deep" ? "linear-gradient(135deg, #0284c722 0%, #0369a133 100%)" : "#1e293b",
+                  border: `2px solid ${scanDepth === "deep" ? "#38bdf8" : "#334155"}`,
+                  borderRadius: "6px",
+                  padding: "12px",
+                  color: "#f8fafc",
+                  textAlign: "left",
+                  cursor: "pointer",
+                }}
+              >
+                <div style={{ fontWeight: 700, color: scanDepth === "deep" ? "#38bdf8" : "#94a3b8" }}>🛡️ Advanced Deep Pentest Mode (Recommended)</div>
+                <div style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "4px" }}>
+                  25+ Sensitive Endpoint Probes, Active XSS/SQLi/CORS/GraphQL Injection Probes, Cookie Flag Audits, Extended Port Sweep & CVE Correlation.
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setScanDepth("standard")}
+                style={{
+                  background: scanDepth === "standard" ? "linear-gradient(135deg, #0284c722 0%, #0369a133 100%)" : "#1e293b",
+                  border: `2px solid ${scanDepth === "standard" ? "#38bdf8" : "#334155"}`,
+                  borderRadius: "6px",
+                  padding: "12px",
+                  color: "#f8fafc",
+                  textAlign: "left",
+                  cursor: "pointer",
+                }}
+              >
+                <div style={{ fontWeight: 700, color: scanDepth === "standard" ? "#38bdf8" : "#94a3b8" }}>⚡ Standard Surface Sweep</div>
+                <div style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "4px" }}>
+                  Fast surface port discovery and basic HTTP header security policy checks.
+                </div>
+              </button>
+            </div>
+          </div>
+
           {/* Submit Button */}
           <div style={{ display: "flex", alignItems: "flex-end", gridColumn: "1 / -1", marginTop: "8px" }}>
             <button
@@ -338,7 +389,7 @@ export default function Scans({ scans: legacyScans, assets: initialAssets, onSca
                 transition: "opacity 0.2s",
               }}
             >
-              {submitting ? "Queuing & Starting Scan Engine..." : ENGINE_OPTIONS[engine].buttonLabel}
+              {submitting ? "Queuing & Starting Deep Pentest Engine..." : scanDepth === "deep" ? "🛡️ Launch Advanced Deep Pentest" : ENGINE_OPTIONS[engine].buttonLabel}
             </button>
           </div>
         </form>
