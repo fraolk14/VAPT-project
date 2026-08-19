@@ -428,28 +428,39 @@ def download_report_file_get(
 ):
     normalized_mode = _normalize_mode(type)
     fmt = (format or "pdf").strip().lower()
-    findings = db.query(Finding).all()
+    
+    # Query findings specifically for this scan job ID if specified
+    scan = db.query(Scan).filter(Scan.id == scan_job_id).first()
+    if scan:
+        findings = db.query(Finding).filter(Finding.scan_id == scan.id).all()
+        if not report_title:
+            report_title = f"{scan.scan_name} ({scan.engine} Assessment: {scan.target})"
+    else:
+        # Fallback query by string scan_id
+        findings = db.query(Finding).filter(Finding.scan_id == scan_job_id).all()
+        if not findings and scan_job_id in ["all", "latest", "default"]:
+            findings = db.query(Finding).all()
 
     if fmt == "csv":
         csv_data = export_findings_csv(findings)
         return Response(
             content=csv_data,
             media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=report-{scan_job_id}-{normalized_mode}.csv"},
+            headers={"Content-Disposition": f"attachment; filename=VAPT_Scan_Report_{scan_job_id}_{normalized_mode}.csv"},
         )
     if fmt == "json":
         data_json = export_findings_json(findings)
         return Response(
             content=data_json,
             media_type="application/json",
-            headers={"Content-Disposition": f"attachment; filename=report-{scan_job_id}-{normalized_mode}.json"},
+            headers={"Content-Disposition": f"attachment; filename=VAPT_Scan_Report_{scan_job_id}_{normalized_mode}.json"},
         )
     if fmt == "docx":
         docx_bytes = export_findings_docx(findings, mode=normalized_mode, report_title=report_title, company_name=company_name)
         return Response(
             content=docx_bytes,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f"attachment; filename=report-{scan_job_id}-{normalized_mode}.docx"},
+            headers={"Content-Disposition": f"attachment; filename=VAPT_Scan_Report_{scan_job_id}_{normalized_mode}.docx"},
         )
 
     # Default to PDF
@@ -457,5 +468,5 @@ def download_report_file_get(
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename=report-{scan_job_id}-{normalized_mode}.pdf"},
+        headers={"Content-Disposition": f"attachment; filename=VAPT_Scan_Report_{scan_job_id}_{normalized_mode}.pdf"},
     )

@@ -190,13 +190,21 @@ export default function Findings({ findings, users, groups }) {
   const [expandedDetails, setExpandedDetails] = useState({});
   const [columnWidths, setColumnWidths] = useState(DEFAULT_COLUMN_WIDTHS);
   
+  const scanIdParam = searchParams.get("scan_id") || "";
+  const tabParam = searchParams.get("tab") || "";
   const selectedTarget = searchParams.get("target") || "";
-  const queryParam = searchParams.get("q") || "";
+  const queryParam = searchParams.get("search") || searchParams.get("q") || "";
   const [queryText, setQueryText] = useState(queryParam);
 
   useEffect(() => {
     setQueryText(queryParam);
   }, [queryParam]);
+
+  useEffect(() => {
+    if (tabParam && ["all", "endpoint", "openvas", "zap", "mobsf"].includes(tabParam)) {
+      setActiveTab(tabParam);
+    }
+  }, [tabParam]);
 
   useEffect(() => {
     setLocalFindings(findings || []);
@@ -218,13 +226,18 @@ export default function Findings({ findings, users, groups }) {
 
   useEffect(() => {
     setPageIndex(0);
-  }, [activeTab, severityFilter, statusFilter, verificationFilter, pageSize, sortState, queryText]);
+  }, [activeTab, severityFilter, statusFilter, verificationFilter, pageSize, sortState, queryText, scanIdParam]);
 
   // Multi-criteria Filtering & Sorting
   const filteredAndSortedFindings = useMemo(() => {
     const needle = (queryText || selectedTarget).trim().toLowerCase();
     
     const filtered = localFindings.filter((finding) => {
+      // 0. Strict Scan Job ID filter if scan_id query param is present
+      if (scanIdParam && String(finding.scan_id) !== String(scanIdParam)) {
+        return false;
+      }
+
       // 1. Tab source filter
       if (!findingMatchesTab(finding, activeTab)) return false;
 
@@ -398,6 +411,26 @@ export default function Findings({ findings, users, groups }) {
 
   return (
     <section className="panel" style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "12px", padding: "24px" }}>
+      {/* Scan ID Active Filter Banner */}
+      {scanIdParam && (
+        <div style={{ background: "linear-gradient(135deg, #0284c722 0%, #0369a122 100%)", border: "1px solid #0284c755", padding: "12px 16px", borderRadius: "8px", marginBottom: "20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            <span style={{ fontSize: "1.4rem" }}>🎯</span>
+            <div>
+              <div style={{ color: "#38bdf8", fontWeight: 700, fontSize: "0.95rem" }}>
+                Filtered Results for Scan Campaign #{scanIdParam}
+              </div>
+              <div style={{ fontSize: "0.75rem", color: "#94a3b8", marginTop: "2px" }}>
+                Displaying {filteredAndSortedFindings.length} security vulnerability findings discovered strictly by this scan execution.
+              </div>
+            </div>
+          </div>
+          <Link to="/findings" style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "6px 14px", borderRadius: "6px", fontSize: "0.8rem", textDecoration: "none", fontWeight: 600, transition: "background 0.2s" }}>
+            Show All Findings ✕
+          </Link>
+        </div>
+      )}
+
       {/* Panel Header & Controls */}
       <div className="panel__header" style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: "16px", marginBottom: "20px" }}>
         <div>
