@@ -583,7 +583,7 @@ def _http_probe_bundle(host: str, port: int, tls: bool) -> list[dict[str, Any]]:
 
 def _probe_port(host: str, port: int, service_hint: str) -> list[dict[str, Any]]:
     try:
-        with socket.create_connection((host, port), timeout=0.35):
+        with socket.create_connection((host, port), timeout=1.2):
             pass
     except OSError:
         return []
