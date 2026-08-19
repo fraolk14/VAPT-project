@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import api from "../api/client";
 
 const ENGINE_OPTIONS = {
@@ -505,29 +505,32 @@ export default function Scans({ scans: legacyScans, assets: initialAssets, onSca
                     </td>
                     <td style={{ padding: "12px" }}>
                       <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                        <button
-                          onClick={() => {
-                            const tabKey = job.engine === "Network" ? "openvas" : (job.engine === "Web" ? "zap" : (job.engine === "Mobile" ? "mobsf" : "all"));
-                            const targetQuery = job.target ? `&search=${encodeURIComponent(job.target)}` : "";
-                            navigate(`/findings?tab=${tabKey}${targetQuery}`);
-                          }}
-                          style={{
-                            background: "linear-gradient(135deg, #10b98122 0%, #05966922 100%)",
-                            color: "#34d399",
-                            border: "1px solid #10b98144",
-                            padding: "4px 10px",
-                            borderRadius: "4px",
-                            cursor: "pointer",
-                            fontSize: "0.75rem",
-                            fontWeight: 700,
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: "4px",
-                          }}
-                          title="View findings discovered by this scan"
-                        >
-                          🔍 View Findings
-                        </button>
+                        {(() => {
+                          const tabKey = job.engine === "Network" ? "openvas" : (job.engine === "Web" ? "zap" : (job.engine === "Mobile" ? "mobsf" : "all"));
+                          const targetQuery = job.target ? `&search=${encodeURIComponent(job.target)}` : "";
+                          return (
+                            <Link
+                              to={`/findings?tab=${tabKey}${targetQuery}`}
+                              style={{
+                                background: "linear-gradient(135deg, #10b98122 0%, #05966922 100%)",
+                                color: "#34d399",
+                                border: "1px solid #10b98144",
+                                padding: "4px 10px",
+                                borderRadius: "4px",
+                                cursor: "pointer",
+                                fontSize: "0.75rem",
+                                fontWeight: 700,
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: "4px",
+                                textDecoration: "none",
+                              }}
+                              title="View findings discovered by this scan"
+                            >
+                              🔍 View Findings
+                            </Link>
+                          );
+                        })()}
                         <button
                           onClick={() => handleRescan(job.id)}
                           style={{ background: "#0284c722", color: "#38bdf8", border: "1px solid #0284c744", padding: "4px 10px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem", fontWeight: 600 }}
