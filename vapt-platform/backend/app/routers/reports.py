@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.finding import Finding
+from app.models.scan import Scan
 from app.services.security import decode_token, jwt, SECRET_KEY, ALGORITHM
 from app.services.reporting import (
     REPORT_UPLOADS_DIR,
@@ -426,20 +427,29 @@ def download_report_file_get(
     report_title: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
+    import uuid
     normalized_mode = _normalize_mode(type)
     fmt = (format or "pdf").strip().lower()
     
-    # Query findings specifically for this scan job ID if specified
-    scan = db.query(Scan).filter(Scan.id == scan_job_id).first()
+    scan = None
+    if scan_job_id and scan_job_id not in ["all", "latest", "default"]:
+        try:
+            valid_uuid = uuid.UUID(str(scan_job_id))
+            scan = db.query(Scan).filter(Scan.id == valid_uuid).first()
+        except (ValueError, TypeError):
+            # If scan_job_id is integer string, try finding by target or recent scan
+            scan = db.query(Scan).filter(Scan.target == scan_job_id).first()
+            if not scan:
+                scan = db.query(Scan).order_by(Scan.created_at.desc()).first()
+
     if scan:
         findings = db.query(Finding).filter(Finding.scan_id == scan.id).all()
+        if not findings and scan.target:
+            findings = db.query(Finding).filter(Finding.target.like(f"%{scan.target}%")).all()
         if not report_title:
-            report_title = f"{scan.scan_name} ({scan.engine} Assessment: {scan.target})"
+            report_title = f"{scan.scan_name} (Assessment: {scan.target})"
     else:
-        # Fallback query by string scan_id
-        findings = db.query(Finding).filter(Finding.scan_id == scan_job_id).all()
-        if not findings and scan_job_id in ["all", "latest", "default"]:
-            findings = db.query(Finding).all()
+        findings = db.query(Finding).all()
 
     if fmt == "csv":
         csv_data = export_findings_csv(findings)
