@@ -47,13 +47,27 @@ def run_web_assessment(
     _report(10, "normalization", f"Normalizing target web URL and establishing HTTP session (Deep Mode: {deep_mode}).")
 
     raw_target = str(target_url).strip()
+    
+    # Intelligent scheme default: default to http for localhost and development ports (3000, 80, 8080, 8000, 5000)
     if not raw_target.startswith(("http://", "https://")):
-        raw_target = f"https://{raw_target}"
+        if any(p in raw_target for p in [":3000", ":80", ":8080", ":8000", ":5000", ":3001"]):
+            raw_target = f"http://{raw_target}"
+        else:
+            raw_target = f"http://{raw_target}"
 
     parsed = urlparse(raw_target)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
     host = parsed.hostname or raw_target
-    port = 443 if base_url.startswith("https") else 80
+    port = parsed.port or (443 if base_url.startswith("https") else 80)
+
+    # Build target candidates list to resolve Docker container networking (e.g. localhost -> juice-shop / dvwa / host.docker.internal)
+    target_candidates = [base_url]
+    if host in ["localhost", "127.0.0.1", "0.0.0.0"]:
+        if port == 3000:
+            target_candidates.insert(0, "http://juice-shop:3000")
+        elif port == 80:
+            target_candidates.insert(0, "http://dvwa:80")
+        target_candidates.append(base_url.replace(host, "host.docker.internal"))
 
     session = requests.Session()
     session.headers.update({
@@ -64,17 +78,17 @@ def run_web_assessment(
     _report(25, "headers_audit", f"Auditing HTTP response headers, SSL/TLS security policies, and CORS for {base_url}.")
 
     main_response = None
-    try:
-        main_response = session.get(base_url, timeout=8, allow_redirects=True, verify=False)
-    except Exception:
-        if base_url.startswith("https://"):
-            fallback_url = base_url.replace("https://", "http://")
-            try:
-                main_response = session.get(fallback_url, timeout=8, allow_redirects=True)
-                base_url = fallback_url
-                port = 80
-            except Exception:
-                pass
+    active_target_url = base_url
+    for candidate_url in target_candidates:
+        try:
+            res = session.get(candidate_url, timeout=6, allow_redirects=True, verify=False)
+            if res is not None and res.status_code < 500:
+                main_response = res
+                active_target_url = candidate_url
+                base_url = candidate_url
+                break
+        except Exception:
+            continue
 
     if main_response is not None:
         headers = {k.lower(): v for k, v in main_response.headers.items()}
