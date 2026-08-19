@@ -574,7 +574,7 @@ export default function Findings({ findings, users, groups }) {
               return (
                 <tr
                   key={finding.id}
-                  className={targetLabel(finding) === selectedTarget ? "finding-row--selected" : ""}
+                  className={targetParam && targetLabel(finding).toLowerCase().includes(targetParam.toLowerCase()) ? "finding-row--selected" : ""}
                   style={{ borderBottom: "1px solid #1e293b" }}
                 >
                   {/* Date */}
