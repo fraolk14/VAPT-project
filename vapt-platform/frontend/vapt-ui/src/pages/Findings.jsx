@@ -270,30 +270,38 @@ export default function Findings({ findings, users, groups }) {
     });
 
     return sorted;
-  }, [localFindings, activeTab, severityFilter, statusFilter, verificationFilter, sortState, queryText, selectedTarget]);
+  }, [localFindings, activeTab, severityFilter, statusFilter, verificationFilter, sortState, queryText, targetParam, scanIdParam]);
 
   const totalPages = Math.max(1, Math.ceil(filteredAndSortedFindings.length / pageSize));
   const visibleFindings = filteredAndSortedFindings.slice(pageIndex * pageSize, pageIndex * pageSize + pageSize);
+  const visibleIdsKey = visibleFindings.map((finding) => finding.id).join(",");
 
-  // Fetch AI Recommendations
+  // Fetch AI Recommendations safely without infinite re-render loops
   useEffect(() => {
-    if (!visibleFindings.length) return;
-    const pendingIds = visibleFindings.map((finding) => finding.id).filter((id) => !aiRecommendations[id]);
-    if (!pendingIds.length) return;
+    if (!visibleIdsKey) return;
+    const pending = visibleFindings.filter((finding) => finding.id && !aiRecommendations[finding.id]);
+    if (!pending.length) return;
+    const pendingIds = pending.map((f) => f.id);
+
     api.post("/ai/finding-recommendations", { finding_ids: pendingIds }).then((response) => {
       setAiProvider(response.data.provider || "local-fallback");
       setAiStatus(response.data.provider === "nvidia-nim" ? "ready" : "fallback");
       setAiRecommendations((current) => {
         const next = { ...current };
+        for (const id of pendingIds) {
+          next[id] = "AI recommendation generated.";
+        }
         for (const item of response.data.items || []) {
-          next[item.finding_id] = item.recommendation;
+          if (item.finding_id) {
+            next[item.finding_id] = item.recommendation;
+          }
         }
         return next;
       });
     }).catch(() => {
       setAiStatus("error");
     });
-  }, [visibleFindings, aiRecommendations]);
+  }, [visibleIdsKey]);
 
   // Update Finding Assignment / Verification / Status
   const updateFinding = async (findingId) => {
