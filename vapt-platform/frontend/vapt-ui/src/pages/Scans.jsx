@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import api from "../api/client";
 
 const ENGINE_OPTIONS = {
@@ -32,6 +33,7 @@ const ENGINE_OPTIONS = {
 };
 
 export default function Scans({ scans: legacyScans, assets: initialAssets, onScanQueued, onScanUpdated }) {
+  const navigate = useNavigate();
   const [engine, setEngine] = useState("Network");
   const [targetType, setTargetType] = useState("IP");
   const [target, setTarget] = useState("");
@@ -505,11 +507,9 @@ export default function Scans({ scans: legacyScans, assets: initialAssets, onSca
                       <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
                         <button
                           onClick={() => {
-                            if (window.location.hash !== undefined) {
-                              window.location.hash = "#/findings";
-                            } else {
-                              window.location.pathname = "/findings";
-                            }
+                            const tabKey = job.engine === "Network" ? "openvas" : (job.engine === "Web" ? "zap" : (job.engine === "Mobile" ? "mobsf" : "all"));
+                            const targetQuery = job.target ? `&search=${encodeURIComponent(job.target)}` : "";
+                            navigate(`/findings?tab=${tabKey}${targetQuery}`);
                           }}
                           style={{
                             background: "linear-gradient(135deg, #10b98122 0%, #05966922 100%)",
