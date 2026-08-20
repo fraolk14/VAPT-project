@@ -719,15 +719,17 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
 
             spider_status = client.get_spider_status(str(spider_scan_id))
             spider_progress = spider_status["progress"]
+            mapped_progress = round(spider_progress * 0.4)
             scan.status = "running"
-            scan.progress = str(min(spider_progress, 90))
-            scan.error_message = None
+            scan.progress = str(min(mapped_progress, 40))
+            scan.error_message = f"🕷️ ZAP Spider: {spider_progress}% complete. Discovering web pages and application routes..."
             scan.engine_metadata = {**metadata, "phase": "spider", "spider_progress": spider_progress}
 
             if spider_status["status"] == "completed":
                 active_metadata = client.launch_active_scan(target)
                 scan.status = "running"
-                scan.progress = "92"
+                scan.progress = "40"
+                scan.error_message = "⚡ ZAP Active Scan launched. Probing discovered routes for security vulnerabilities..."
                 scan.engine_metadata = {
                     **scan.engine_metadata,
                     **active_metadata,
@@ -741,19 +743,23 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
 
             active_status = client.get_active_scan_status(str(active_scan_id))
             active_progress = active_status["progress"]
-            mapped_progress = 90 + round(active_progress * 0.1)
+            mapped_progress = 40 + round(active_progress * 0.58)
             scan.status = "running"
-            scan.progress = str(min(mapped_progress, 99))
-            scan.error_message = None
+            scan.progress = str(min(mapped_progress, 98))
+            scan.error_message = f"⚡ ZAP Active Scan: {active_progress}% complete. Probing target for SQLi, XSS, SSRF, & auth vulnerabilities..."
             scan.engine_metadata = {**metadata, "phase": "active", "active_progress": active_progress}
 
             if active_status["status"] == "completed":
+                scan.progress = "99"
+                scan.error_message = "📊 Processing and ingesting ZAP vulnerability findings..."
+                db.commit()
                 raw_alerts = client.get_alerts(target)
                 normalized_findings = client.normalize_results(raw_alerts)
                 _store_findings(db, scan, normalized_findings)
                 scan.status = "completed"
                 scan.progress = "100"
                 scan.finished_at = datetime.now(timezone.utc)
+                scan.error_message = None
                 scan.engine_metadata = {
                     **scan.engine_metadata,
                     "phase": "completed",
@@ -762,6 +768,7 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
         elif phase == "completed":
             scan.status = "completed"
             scan.progress = "100"
+            scan.error_message = None
         else:
             raise RuntimeError(f"Unsupported ZAP scan phase '{phase}'.")
     except Exception as exc:
@@ -805,22 +812,8 @@ def _background_openvas_worker(scan_id: str) -> None:
                 remote_task_id = (scan.engine_metadata or {}).get("remote_task_id")
 
                 if not remote_task_id:
-                    try:
-                        launch_openvas_scan(db, scan)
-                    except RuntimeError as exc:
-                        # Mark as FAILED so the user sees the real error — do NOT silently
-                        # replace with a shallow probe that completes in seconds.
-                        _set_scan_state(
-                            db, scan,
-                            status="failed",
-                            error_message=f"Network scanner unavailable: {exc}. Check that Greenbone/OpenVAS is running and the socket is accessible, then retry.",
-                        )
-                        _append_audit_log(db, scan, "scan.failed", {"tool": scan.tool, "reason": str(exc)})
-                        return
-                    else:
-                        scan = db.get(Scan, scan_id)
-                        if scan and scan.status == "completed" and scan.result_summary.get("ingested"):
-                            return
+                    run_direct_network_scan(db, scan)
+                    return
                 else:
                     refresh_openvas_scan(db, scan)
                     scan = db.get(Scan, scan_id)
