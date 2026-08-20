@@ -1,8 +1,8 @@
 import { NavLink } from "react-router-dom";
+import { TbTarget } from "react-icons/tb";
 import {
   HiOutlineSquares2X2,
   HiOutlineComputerDesktop,
-  HiOutlineCrosshair,
   HiOutlineServerStack,
   HiOutlineShieldExclamation,
   HiOutlineCpuChip,
@@ -20,7 +20,7 @@ function navItemsForRole(role) {
   const items = [
     { to: "/", label: "Dashboard", icon: <HiOutlineSquares2X2 />, end: true },
     { to: "/assets", label: "Assets", icon: <HiOutlineComputerDesktop /> },
-    { to: "/scans", label: "Scans", icon: <HiOutlineCrosshair /> },
+    { to: "/scans", label: "Scans", icon: <TbTarget /> },
     { to: "/hosts", label: "Hosts", icon: <HiOutlineServerStack /> },
     { to: "/findings", label: "Findings", icon: <HiOutlineShieldExclamation /> },
     { to: "/ai-remediation", label: "AI Remediation", icon: <HiOutlineCpuChip /> },
