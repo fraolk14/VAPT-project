@@ -180,6 +180,42 @@ def _make_finding(
     }
 
 
+_HTTP_FINGERPRINT_RE = re.compile(r"HTTP/1\.[01]\s+\d{3}", re.IGNORECASE)
+_HTTP_HEADER_NAMES = {"content-type", "server", "x-powered-by", "access-control", "date", "set-cookie"}
+
+
+def _resolve_service_from_fingerprint(port_elem: ET.Element, nmap_service_name: str) -> str:
+    """
+    If Nmap guessed a wrong service name (e.g. 'ppp' for an HTTP port),
+    look at the fingerprint-strings script output and the raw servicefp
+    to override with the correct identification.
+    """
+    # Already a sensible name → keep
+    if nmap_service_name not in ("unknown", "ppp", "", "tcpwrapped"):
+        return nmap_service_name
+
+    # Check fingerprint-strings NSE script output
+    for script in port_elem.findall("script[@id='fingerprint-strings']"):
+        output = script.attrib.get("output", "")
+        if _HTTP_FINGERPRINT_RE.search(output):
+            return "http"
+        for hdr in _HTTP_HEADER_NAMES:
+            if hdr in output.lower():
+                return "http"
+
+    # Check raw servicefp attribute on <service>
+    svc_elem = port_elem.find("service")
+    if svc_elem is not None:
+        servicefp = svc_elem.attrib.get("servicefp", "")
+        if _HTTP_FINGERPRINT_RE.search(servicefp):
+            return "http"
+        for hdr in _HTTP_HEADER_NAMES:
+            if hdr in servicefp.lower():
+                return "http"
+
+    return nmap_service_name
+
+
 def _parse_host(host_elem: ET.Element) -> list[dict[str, Any]]:
     """Parse a single <host> element from Nmap XML output."""
     findings: list[dict[str, Any]] = []
@@ -215,6 +251,9 @@ def _parse_host(host_elem: ET.Element) -> list[dict[str, Any]]:
         svc_version = svc_elem.attrib.get("version", "") if svc_elem is not None else ""
         svc_extra = svc_elem.attrib.get("extrainfo", "") if svc_elem is not None else ""
         tunnel = svc_elem.attrib.get("tunnel", "") if svc_elem is not None else ""
+
+        # Override bad service name using fingerprint evidence
+        svc_name = _resolve_service_from_fingerprint(port_elem, svc_name)
 
         full_version = " ".join(filter(None, [svc_product, svc_version, svc_extra])).strip()
         display_service = full_version or svc_name
