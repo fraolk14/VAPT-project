@@ -24,13 +24,13 @@ SEVERITY_SORT = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
 
 def _finding_target(finding: Finding) -> str:
     metadata = finding.finding_metadata or {}
-    if finding.source == "zap":
-        return metadata.get("url") or ""
-    if finding.source in {"openvas", "network-db"}:
-        return metadata.get("host") or ""
-    if finding.source == "mobsf":
-        return metadata.get("file") or ""
-    return ""
+    if finding.source in {"zap", "web", "web-scan", "web-db"} or finding.category == "web":
+        return metadata.get("url") or metadata.get("host") or ""
+    if finding.category == "network" or finding.source in {"openvas", "network-db", "nmap", "socket", "nmap+socket", "network", "host"}:
+        return metadata.get("host") or metadata.get("ip_address") or ""
+    if finding.source in {"mobsf", "mobile"} or finding.category == "mobile":
+        return metadata.get("file") or metadata.get("package_name") or metadata.get("stored_file_name") or ""
+    return metadata.get("host") or metadata.get("url") or metadata.get("ip_address") or ""
 
 
 def _display_identifier(payload: dict) -> str | None:
@@ -87,8 +87,12 @@ def _serialize_finding(finding: Finding, scan_finished_at, asset: Asset | None =
         normalized_status = "resolved"
     elif finding.verification_state == "scheduled" and normalized_status == "open":
         normalized_status = "in_progress"
+
+    target_val = _finding_target(finding) or (asset.ip_address if asset else None) or (asset.url if asset else None) or (asset.hostname if asset else None)
+
     payload = {
         **finding.__dict__,
+        "target": target_val or "n/a",
         "status": normalized_status,
         "scan_finished_at": scan_finished_at,
         "duplicate_count": 1,

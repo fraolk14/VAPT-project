@@ -14,7 +14,7 @@ const TAB_OPTIONS = [
 const TAB_SOURCE_MAP = {
   all: null,
   endpoint: ["endpoint-agent", "agent", "windows-agent", "Endpoint", "VAP Agent"],
-  openvas: ["openvas", "network-db", "host", "host-scan", "network", "nmap", "Network"],
+  openvas: ["openvas", "network-db", "host", "host-scan", "network", "nmap", "socket", "nmap+socket", "Network"],
   zap: ["zap", "web", "web-scan", "web-db", "zap-proxy", "owasp", "nuclei", "Web"],
   mobsf: ["mobsf", "mobile", "apk", "ipa", "Mobile"],
 };
@@ -53,31 +53,80 @@ function severityLabel(value) {
   return (value || "info").toLowerCase();
 }
 
-const IS_ENDPOINT_SOURCE = (src) => TAB_SOURCE_MAP.endpoint.includes(src) || (src || "").toLowerCase().includes("agent") || (src || "").toLowerCase().includes("endpoint");
-const IS_WEB_SOURCE = (src) => TAB_SOURCE_MAP.zap.includes(src) || (src || "").toLowerCase().includes("web");
-const IS_NETWORK_SOURCE = (src) => TAB_SOURCE_MAP.openvas.includes(src) || (src || "").toLowerCase().includes("network") || (src || "").toLowerCase().includes("host");
+const IS_ENDPOINT_SOURCE = (src, cat) =>
+  (cat || "").toLowerCase() === "endpoint" ||
+  TAB_SOURCE_MAP.endpoint.some((s) => (src || "").toLowerCase().includes(s.toLowerCase())) ||
+  (src || "").toLowerCase().includes("agent") ||
+  (src || "").toLowerCase().includes("endpoint");
+
+const IS_WEB_SOURCE = (src, cat) =>
+  (cat || "").toLowerCase() === "web" ||
+  TAB_SOURCE_MAP.zap.some((s) => (src || "").toLowerCase().includes(s.toLowerCase())) ||
+  (src || "").toLowerCase().includes("web") ||
+  (src || "").toLowerCase().includes("zap");
+
+const IS_NETWORK_SOURCE = (src, cat) =>
+  (cat || "").toLowerCase() === "network" ||
+  TAB_SOURCE_MAP.openvas.some((s) => (src || "").toLowerCase().includes(s.toLowerCase())) ||
+  (src || "").toLowerCase().includes("network") ||
+  (src || "").toLowerCase().includes("host") ||
+  (src || "").toLowerCase().includes("nmap") ||
+  (src || "").toLowerCase().includes("socket") ||
+  (src || "").toLowerCase().includes("openvas");
+
+const IS_MOBILE_SOURCE = (src, cat) =>
+  (cat || "").toLowerCase() === "mobile" ||
+  TAB_SOURCE_MAP.mobsf.some((s) => (src || "").toLowerCase().includes(s.toLowerCase())) ||
+  (src || "").toLowerCase().includes("mobile") ||
+  (src || "").toLowerCase().includes("mobsf") ||
+  (src || "").toLowerCase().includes("apk") ||
+  (src || "").toLowerCase().includes("ipa");
+
+function resolveHost(finding) {
+  const meta = finding.finding_metadata || {};
+  const details = finding.target_details || {};
+  if (finding.target && finding.target !== "n/a") return finding.target;
+  if (meta.host && meta.host !== "n/a") return meta.host;
+  if (details.host && details.host !== "n/a") return details.host;
+  if (meta.ip_address && meta.ip_address !== "n/a") return meta.ip_address;
+  if (details.ip_address && details.ip_address !== "n/a") return details.ip_address;
+  if (meta.hostname && meta.hostname !== "n/a") return meta.hostname;
+  if (details.hostname && details.hostname !== "n/a") return details.hostname;
+  if (finding.asset_name && finding.asset_name !== "n/a") return finding.asset_name;
+  return "n/a";
+}
 
 function targetLabel(finding) {
-  const src = finding.source;
-  if (IS_ENDPOINT_SOURCE(src)) return finding.finding_metadata?.ip_address || finding.target || finding.finding_metadata?.hostname || "n/a";
-  if (IS_WEB_SOURCE(src)) return finding.finding_metadata?.url || finding.finding_metadata?.host || finding.target || "n/a";
-  if (IS_NETWORK_SOURCE(src)) return finding.finding_metadata?.host || finding.target || (finding.port ? `${finding.port}/${finding.protocol}` : "n/a");
-  return finding.finding_metadata?.file || finding.target || "n/a";
+  const src = finding.source || "";
+  const cat = finding.category || "";
+  const meta = finding.finding_metadata || {};
+  const details = finding.target_details || {};
+
+  if (IS_ENDPOINT_SOURCE(src, cat)) return meta.ip_address || resolveHost(finding);
+  if (IS_WEB_SOURCE(src, cat)) return meta.url || details.url || meta.host || resolveHost(finding);
+  if (IS_NETWORK_SOURCE(src, cat)) return resolveHost(finding);
+  if (IS_MOBILE_SOURCE(src, cat)) return meta.file || meta.package_name || meta.stored_file_name || resolveHost(finding);
+  return resolveHost(finding);
 }
 
 function targetSummary(finding) {
-  const src = finding.source;
-  if (IS_ENDPOINT_SOURCE(src)) {
-    const ip = finding.finding_metadata?.ip_address || finding.target || "n/a";
-    const host = finding.finding_metadata?.hostname;
+  const src = finding.source || "";
+  const cat = finding.category || "";
+  const meta = finding.finding_metadata || {};
+  const details = finding.target_details || {};
+  const host = resolveHost(finding);
+
+  if (IS_ENDPOINT_SOURCE(src, cat)) {
+    const ip = meta.ip_address || details.ip_address || host;
+    const hostname = meta.hostname || details.hostname;
     return {
       primary: ip,
-      secondary: host ? `Host: ${host}` : "VAP Agent Device",
+      secondary: hostname ? `Host: ${hostname}` : "VAP Agent Device",
     };
   }
 
-  if (IS_WEB_SOURCE(src)) {
-    const rawUrl = finding.finding_metadata?.url || finding.finding_metadata?.host || finding.target || "";
+  if (IS_WEB_SOURCE(src, cat)) {
+    const rawUrl = meta.url || details.url || meta.host || host;
     try {
       const parsed = new URL(rawUrl.startsWith("http") ? rawUrl : `http://${rawUrl}`);
       return {
@@ -89,16 +138,23 @@ function targetSummary(finding) {
     }
   }
 
-  if (IS_NETWORK_SOURCE(src)) {
+  if (IS_NETWORK_SOURCE(src, cat) || (!IS_MOBILE_SOURCE(src, cat) && (finding.port || meta.host || details.host))) {
     return {
-      primary: finding.finding_metadata?.host || finding.target || "n/a",
+      primary: host,
       secondary: finding.port ? `${finding.port}/${finding.protocol || "tcp"}` : "Network host",
     };
   }
 
+  if (IS_MOBILE_SOURCE(src, cat)) {
+    return {
+      primary: meta.file || meta.package_name || meta.stored_file_name || host,
+      secondary: "Mobile package",
+    };
+  }
+
   return {
-    primary: finding.finding_metadata?.file || finding.target || "n/a",
-    secondary: "Mobile package",
+    primary: host,
+    secondary: finding.port ? `${finding.port}/${finding.protocol || "tcp"}` : "Discovered Target",
   };
 }
 
