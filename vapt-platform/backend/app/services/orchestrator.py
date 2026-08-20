@@ -14,6 +14,8 @@ from app.models.scan import Scan
 from app.services.integrations import MobSFClient, OpenVASClient, ZAPClient
 from app.services.mobile_analysis import local_mobile_static_analysis
 from app.services.network_assessment import run_network_assessment
+from app.services.nmap_scanner import run_nmap_scan
+from app.services.scan_correlator import build_correlation_summary, correlate_network_findings
 from app.services.vulnerability_correlation import correlate_finding
 
 _active_workers: set[str] = set()
@@ -408,52 +410,129 @@ def launch_openvas_scan(db: Session, scan: Scan) -> Scan:
 
 
 def run_direct_network_scan(db: Session, scan: Scan) -> Scan:
+    """
+    Dual-engine network scan:
+      1. Nmap (service detection + NSE scripts) ── runs in a thread
+      2. Python socket scanner (deep port sweep + banner analysis) ── runs in a thread
+    Both run in parallel, then findings are correlated and merged.
+    """
+    import concurrent.futures
+
     try:
         scan.status = "running"
         scan.started_at = scan.started_at or datetime.now(timezone.utc)
-        scan.progress = "10"
-        scan.error_message = "Deep network assessment is running. Evidence collection and correlation may take longer than a quick surface scan."
+        scan.progress = "5"
+        scan.error_message = "Dual-engine network scan started: Nmap + socket scanner running in parallel."
         scan.engine_metadata = {
             **scan.engine_metadata,
-            "engine": "network-db",
-            "execution_mode": "direct-correlation",
+            "engine": "nmap+socket",
+            "execution_mode": "dual-engine-correlation",
         }
         db.commit()
         db.refresh(scan)
 
-        def _progress_callback(progress: int, detail: dict[str, Any]) -> None:
-            scan.progress = str(progress)
-            scan.error_message = detail.get("message")
-            scan.engine_metadata = {
-                **scan.engine_metadata,
-                "assessment_phase": detail.get("phase"),
-                "assessment_detail": detail,
-            }
-            db.commit()
-            db.refresh(scan)
+        # ── Shared progress state ─────────────────────────────────────────────
+        # We map socket scanner progress (10-95) to overall 30-75 range
+        # and let Nmap cover 10-30. Correlation is 75-95.
+        nmap_findings: list[dict[str, Any]] = []
+        socket_findings: list[dict[str, Any]] = []
+        nmap_meta: dict[str, Any] = {}
+        nmap_error: str | None = None
+        socket_error: str | None = None
 
-        normalized_findings = run_network_assessment(scan.target, progress_callback=_progress_callback)
-        scan.progress = "92"
-        scan.error_message = "Deep assessment completed evidence collection. Correlating results with the vulnerability catalog."
-        db.commit()
-        db.refresh(scan)
-        _store_findings(db, scan, normalized_findings)
+        def _update_progress(progress: int, message: str) -> None:
+            """Thread-safe progress write."""
+            try:
+                scan.progress = str(progress)
+                scan.error_message = message
+                db.commit()
+            except Exception:
+                pass
+
+        # ── Engine 1: Nmap ───────────────────────────────────────────────────
+        def _run_nmap() -> None:
+            nonlocal nmap_findings, nmap_meta, nmap_error
+            try:
+                _update_progress(10, "🔍 Nmap: launching service version scan + NSE scripts…")
+                findings, meta = run_nmap_scan(scan.target)
+                nmap_findings = findings
+                nmap_meta = meta
+                _update_progress(28, f"🔍 Nmap: completed — {len(findings)} raw findings.")
+            except Exception as exc:
+                nmap_error = str(exc)
+                _update_progress(28, f"⚠️ Nmap scan failed: {exc}")
+
+        # ── Engine 2: Python socket scanner ──────────────────────────────────
+        def _run_socket() -> None:
+            nonlocal socket_findings, socket_error
+            last_pct = [30]
+
+            def _socket_progress(inner_pct: int, detail: dict[str, Any]) -> None:
+                # Map inner 10-95 → overall 30-72
+                outer = 30 + int((inner_pct / 100) * 42)
+                if outer > last_pct[0]:
+                    last_pct[0] = outer
+                    _update_progress(
+                        outer,
+                        f"🔌 Socket scanner: {detail.get('message', 'scanning…')} ({inner_pct}%)",
+                    )
+
+            try:
+                findings = run_network_assessment(scan.target, progress_callback=_socket_progress)
+                socket_findings = findings
+            except Exception as exc:
+                socket_error = str(exc)
+                _update_progress(72, f"⚠️ Socket scanner failed: {exc}")
+
+        # ── Run both engines in parallel ──────────────────────────────────────
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            nmap_future   = pool.submit(_run_nmap)
+            socket_future = pool.submit(_run_socket)
+            concurrent.futures.wait([nmap_future, socket_future])
+
+        # ── Correlation phase ─────────────────────────────────────────────────
+        _update_progress(75, "⚙️ Correlating findings from both engines…")
+
+        correlated = correlate_network_findings(nmap_findings, socket_findings)
+        correlation_summary = build_correlation_summary(
+            correlated,
+            nmap_count=len(nmap_findings),
+            socket_count=len(socket_findings),
+        )
+
+        _update_progress(90, f"📊 Correlation complete: {len(correlated)} unique findings (Nmap: {len(nmap_findings)}, Socket: {len(socket_findings)}).")
+
+        # ── Store correlated findings ─────────────────────────────────────────
+        _store_findings(db, scan, correlated)
+
         scan.status = "completed"
         scan.progress = "100"
         scan.finished_at = datetime.now(timezone.utc)
         scan.error_message = None
+
+        error_notes: list[str] = []
+        if nmap_error:
+            error_notes.append(f"Nmap error: {nmap_error}")
+        if socket_error:
+            error_notes.append(f"Socket error: {socket_error}")
+        if error_notes:
+            scan.error_message = " | ".join(error_notes)
+
         scan.engine_metadata = {
             **scan.engine_metadata,
-            "execution_mode": "direct-correlation",
-            "network_probe_count": len(normalized_findings),
+            **nmap_meta,
+            "execution_mode": "dual-engine-correlation",
+            "correlation": correlation_summary,
+            "nmap_available": nmap_meta.get("nmap_available", False),
             "scan_depth": "deep",
         }
         db.commit()
         db.refresh(scan)
         return scan
+
     except Exception as exc:
         scan.status = "failed"
-        scan.error_message = f"Direct network assessment failed: {exc}"
+        scan.error_message = f"Dual-engine network assessment failed: {exc}"
         db.commit()
         db.refresh(scan)
         return scan
