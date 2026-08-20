@@ -1,24 +1,40 @@
 import { NavLink } from "react-router-dom";
+import {
+  HiOutlineSquares2X2,
+  HiOutlineComputerDesktop,
+  HiOutlineCrosshair,
+  HiOutlineServerStack,
+  HiOutlineShieldExclamation,
+  HiOutlineCpuChip,
+  HiOutlineGlobeAlt,
+  HiOutlineBolt,
+  HiOutlineEyeSlash,
+  HiOutlineWrenchScrewdriver,
+  HiOutlineNoSymbol,
+  HiOutlineSignal,
+  HiOutlineDocumentText,
+  HiOutlineUserGroup,
+} from "react-icons/hi2";
 
 function navItemsForRole(role) {
   const items = [
-    { to: "/", label: "Dashboard", icon: "📊", end: true },
-    { to: "/assets", label: "Assets", icon: "💻" },
-    { to: "/scans", label: "Scans", icon: "🎯" },
-    { to: "/hosts", label: "Hosts", icon: "🖥️" },
-    { to: "/findings", label: "Findings", icon: "🛡️" },
-    { to: "/ai-remediation", label: "AI Remediation", icon: "🤖" },
-    { to: "/attack-map", label: "Attack Map", icon: "🌐" },
-    { to: "/threat-intelligence", label: "Threat Intelligence", icon: "⚡" },
-    { to: "/shadow-it", label: "Shadow IT", icon: "🕵️" },
-    { to: "/misconfigurations", label: "Misconfigurations", icon: "⚙️" },
-    { to: "/unauthorized-software", label: "Unauthorized Software", icon: "🚫" },
-    { to: "/agent-management", label: "Endpoint Agents", icon: "📡" },
-    { to: "/reports", label: "Reports", icon: "📑" },
+    { to: "/", label: "Dashboard", icon: <HiOutlineSquares2X2 />, end: true },
+    { to: "/assets", label: "Assets", icon: <HiOutlineComputerDesktop /> },
+    { to: "/scans", label: "Scans", icon: <HiOutlineCrosshair /> },
+    { to: "/hosts", label: "Hosts", icon: <HiOutlineServerStack /> },
+    { to: "/findings", label: "Findings", icon: <HiOutlineShieldExclamation /> },
+    { to: "/ai-remediation", label: "AI Remediation", icon: <HiOutlineCpuChip /> },
+    { to: "/attack-map", label: "Attack Map", icon: <HiOutlineGlobeAlt /> },
+    { to: "/threat-intelligence", label: "Threat Intelligence", icon: <HiOutlineBolt /> },
+    { to: "/shadow-it", label: "Shadow IT", icon: <HiOutlineEyeSlash /> },
+    { to: "/misconfigurations", label: "Misconfigurations", icon: <HiOutlineWrenchScrewdriver /> },
+    { to: "/unauthorized-software", label: "Unauthorized Software", icon: <HiOutlineNoSymbol /> },
+    { to: "/agent-management", label: "Endpoint Agents", icon: <HiOutlineSignal /> },
+    { to: "/reports", label: "Reports", icon: <HiOutlineDocumentText /> },
   ];
 
   if (role === "admin") {
-    items.push({ to: "/admin", label: "Users & IAM", icon: "👥" });
+    items.push({ to: "/admin", label: "Users & IAM", icon: <HiOutlineUserGroup /> });
   }
 
   return items;
