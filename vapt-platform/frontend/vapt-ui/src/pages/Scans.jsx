@@ -140,10 +140,33 @@ export default function Scans() {
     }
   };
 
-  // ── Cancel a scan ──────────────────────────────────────────────────────────
+  // ── Pause a scan ───────────────────────────────────────────────────────────
+  const handlePause = async (scanId) => {
+    try {
+      await api.post(`/scans/${scanId}/pause`);
+      setMessage({ type: "success", text: "Scan paused." });
+      fetchScans();
+    } catch (err) {
+      alert(err?.response?.data?.detail || "Failed to pause scan.");
+    }
+  };
+
+  // ── Resume a scan ──────────────────────────────────────────────────────────
+  const handleResume = async (scanId) => {
+    try {
+      await api.post(`/scans/${scanId}/resume`);
+      setMessage({ type: "success", text: "Scan resumed." });
+      fetchScans();
+    } catch (err) {
+      alert(err?.response?.data?.detail || "Failed to resume scan.");
+    }
+  };
+
+  // ── Cancel a scan (cancels & deletes scan) ─────────────────────────────────
   const handleCancel = async (scanId) => {
     try {
       await api.post(`/scans/${scanId}/cancel`);
+      setMessage({ type: "success", text: "Scan cancelled and removed." });
       fetchScans();
     } catch (err) {
       alert(err?.response?.data?.detail || "Failed to cancel scan.");
@@ -342,18 +365,20 @@ export default function Scans() {
                 </tr>
               </thead>
               <tbody>
-                {scans.map((scan) => {
+                {scans.filter((s) => (s.status || "").toLowerCase() !== "cancelled").map((scan) => {
                   const c = statusColor(scan.status);
                   const { tab } = toolLabel(scan.tool);
                   const pct = parseInt(scan.progress || "0", 10);
-                  const isActive = ["running", "waiting", "queued"].includes((scan.status || "").toLowerCase());
+                  const statusLower = (scan.status || "").toLowerCase();
+                  const isActive = ["running", "waiting", "queued"].includes(statusLower);
+                  const isPaused = statusLower === "paused";
 
                   return (
                     <tr key={scan.id} style={{ borderBottom: "1px solid #1e293b" }}>
                       {/* Name */}
                       <td style={{ padding: "12px" }}>
                         <strong style={{ color: "#f8fafc" }}>{scan.scan_name || "Unnamed Scan"}</strong>
-                        {scan.error_message && !isActive && (
+                        {scan.error_message && !isActive && !isPaused && (
                           <div style={{ color: "#fda4af", fontSize: "0.72rem", marginTop: "4px", maxWidth: "260px" }}>
                             {scan.error_message.slice(0, 120)}{scan.error_message.length > 120 ? "…" : ""}
                           </div>
@@ -400,6 +425,9 @@ export default function Scans() {
                             <span style={{ fontSize: "0.7rem", color: "#38bdf8", fontStyle: "italic" }}>
                               {progressLabel(scan)}
                             </span>
+                          )}
+                          {isPaused && (
+                            <span style={{ fontSize: "0.7rem", color: "#f59e0b" }}>⏸️ Paused</span>
                           )}
                           {scan.status?.toLowerCase() === "completed" && (
                             <span style={{ fontSize: "0.7rem", color: "#34d399" }}>✅ Done</span>
@@ -458,8 +486,48 @@ export default function Scans() {
                             📥 PDF
                           </a>
 
-                          {/* Rescan button */}
-                          {!isActive && (
+                          {/* Pause button for running scans */}
+                          {statusLower === "running" && (
+                            <button
+                              onClick={() => handlePause(scan.id)}
+                              title="Pause scan execution"
+                              style={{
+                                background: "#451a03",
+                                color: "#fbbf24",
+                                border: "1px solid #78350f",
+                                padding: "4px 10px",
+                                borderRadius: "5px",
+                                cursor: "pointer",
+                                fontSize: "0.75rem",
+                                fontWeight: 700,
+                              }}
+                            >
+                              ⏸️ Pause
+                            </button>
+                          )}
+
+                          {/* Resume button for paused scans */}
+                          {isPaused && (
+                            <button
+                              onClick={() => handleResume(scan.id)}
+                              title="Resume scan execution"
+                              style={{
+                                background: "#064e3b",
+                                color: "#34d399",
+                                border: "1px solid #047857",
+                                padding: "4px 10px",
+                                borderRadius: "5px",
+                                cursor: "pointer",
+                                fontSize: "0.75rem",
+                                fontWeight: 700,
+                              }}
+                            >
+                              ▶️ Resume
+                            </button>
+                          )}
+
+                          {/* Rescan button for finished/failed scans */}
+                          {!isActive && !isPaused && (
                             <button
                               onClick={() => handleRescan(scan.id, scan.scan_name || scan.target)}
                               title="Re-trigger security scan for this target"
@@ -478,8 +546,8 @@ export default function Scans() {
                             </button>
                           )}
 
-                          {/* Re-ingest (reprocess results) */}
-                          {!isActive && (
+                          {/* Re-ingest button */}
+                          {!isActive && !isPaused && (
                             <button
                               onClick={() => handleReprocess(scan.id)}
                               title="Re-ingest and re-evaluate findings from scanner"
@@ -498,10 +566,11 @@ export default function Scans() {
                             </button>
                           )}
 
-                          {/* Cancel for active scans */}
-                          {isActive && (
+                          {/* Cancel for active or paused scans */}
+                          {(isActive || isPaused) && (
                             <button
                               onClick={() => handleCancel(scan.id)}
+                              title="Cancel scan and remove from list"
                               style={{
                                 background: "#450a0a",
                                 color: "#fca5a5",
@@ -510,6 +579,7 @@ export default function Scans() {
                                 borderRadius: "5px",
                                 cursor: "pointer",
                                 fontSize: "0.75rem",
+                                fontWeight: 600,
                               }}
                             >
                               ✕ Cancel
@@ -517,7 +587,7 @@ export default function Scans() {
                           )}
 
                           {/* Delete button */}
-                          {!isActive && (
+                          {!isActive && !isPaused && (
                             <button
                               onClick={() => handleDelete(scan.id, scan.scan_name || scan.target)}
                               title="Delete scan record from history"
