@@ -351,13 +351,19 @@ def run_scan_job_engine(scan_job_id: int) -> None:
         findings_list: list[dict[str, Any]] = []
 
         if engine_name == "network":
-            # Real Network Engine: Nmap (port discovery) + OpenVAS (CVE correlation)
+            # Real Network Engine: Nmap CLI active scanning + Banner & CVE Vulnerability Correlation
+            from app.services.nmap_service import process_nmap_scan
+            try:
+                # 1. Run live Nmap CLI scan & store findings
+                process_nmap_scan(db, target_str)
+            except Exception as nmap_err:
+                print(f"[ScanEngine] Nmap CLI warning: {nmap_err}")
+
+            # 2. Run deep network assessment probes (port sweep, banner grab, service exposure checks)
             findings_list = run_network_assessment(target_str, progress_callback=progress_cb)
-            time.sleep(2)
         elif engine_name == "web":
-            # Real Web Engine: Advanced Deep Pentest (25+ Sensitive Endpoints, Injection Probes, Headers, CORS, Cookies)
+            # Real Web Engine: Advanced Deep Pentest (Sensitive Endpoints, Injection Probes, Headers, CORS, Cookies)
             findings_list = run_web_assessment(target_str, progress_callback=progress_cb, deep_mode=True)
-            time.sleep(2)
         else:
             # Real Mobile Engine: MobSF static binary & permission analysis
             time.sleep(3)
