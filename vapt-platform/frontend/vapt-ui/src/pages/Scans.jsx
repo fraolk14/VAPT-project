@@ -1,596 +1,480 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import api from "../api/client";
 
-const ENGINE_OPTIONS = {
-  Network: {
-    label: "Network Engine",
-    targetKind: "Network Target",
-    targetHelp: "Enter an IP address, Domain, or CIDR block (e.g. 192.168.1.1, example.com, 10.0.0.0/24).",
-    description: "Executes deep network discovery, port scanning, service version detection, and vulnerability correlation.",
-    buttonLabel: "Launch Network Scan",
-    defaultType: "IP",
-    placeholder: "192.168.1.1",
-  },
+// ─── Engine definitions ───────────────────────────────────────────────────────
+const ENGINES = {
   Web: {
-    label: "Web Engine",
-    targetKind: "Web Target",
-    targetHelp: "Enter a Web URL or Domain (e.g. https://example.com, app.internal.local).",
-    description: "Performs web vulnerability scans, web spidering, CORS audits, and HTTP security header checks.",
-    buttonLabel: "Launch Web Scan",
-    defaultType: "URL",
-    placeholder: "https://example.com",
+    label: "Web Engine (ZAP)",
+    endpoint: "/scans/web",
+    payloadKey: "target",     // field name in POST body
+    targetLabel: "Website URL",
+    targetHelp: "ZAP spiders the site then runs a full active scan. Takes 5–30+ minutes depending on site size. Use an authorized https:// or http:// URL.",
+    placeholder: "https://juice-shop.herokuapp.com",
+    icon: "🌐",
+    tool: "zap",
+    tab: "zap",
+    description: "OWASP ZAP: Spider Discovery → Active Vulnerability Scanning (SQLi, XSS, SSRF, CORS, Auth…)",
+    buttonLabel: "Launch ZAP Web Scan",
   },
-  Mobile: {
-    label: "Mobile Engine",
-    targetKind: "Mobile Target",
-    targetHelp: "Enter APK/IPA package name or URL (e.g. com.example.app, https://store.local/app.apk).",
-    description: "Performs static binary analysis, permission audits, secret leakage detection, and mobile package risk scoring.",
-    buttonLabel: "Launch Mobile Scan",
-    defaultType: "APK",
-    placeholder: "com.example.secureapp",
+  Network: {
+    label: "Network Engine (Nmap)",
+    endpoint: "/scans/network",
+    payloadKey: "target",
+    targetLabel: "IP / CIDR / Domain",
+    targetHelp: "Nmap + banner analysis probes every port. A single host takes ~2–5 min; a /24 block can take 20+ min.",
+    placeholder: "192.168.1.0/24",
+    icon: "🔌",
+    tool: "openvas",
+    tab: "openvas",
+    description: "Nmap: Port Discovery → Service Version Detection → CVE Correlation → Exposure Analysis",
+    buttonLabel: "Launch Network Scan",
   },
 };
 
-export default function Scans({ scans: legacyScans, assets: initialAssets, onScanQueued, onScanUpdated }) {
-  const navigate = useNavigate();
-  const [engine, setEngine] = useState("Network");
-  const [targetType, setTargetType] = useState("IP");
-  const [target, setTarget] = useState("");
-  const [scanName, setScanName] = useState("");
-  const [scheduleInterval, setScheduleInterval] = useState("Immediate");
-  const [selectedAssetId, setSelectedAssetId] = useState("");
-  const [scanDepth, setScanDepth] = useState("deep");
-  
-  const [scanJobs, setScanJobs] = useState([]);
-  const [assetList, setAssetList] = useState(initialAssets || []);
-  const [loading, setLoading] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
-  const [message, setMessage] = useState({ type: "", text: "" });
+// ─── helpers ─────────────────────────────────────────────────────────────────
+const statusColor = (s) => {
+  if (!s) return "#94a3b8";
+  const l = s.toLowerCase();
+  if (l === "completed") return "#34d399";
+  if (l === "running")   return "#38bdf8";
+  if (l === "waiting" || l === "queued") return "#fbbf24";
+  if (l === "failed")    return "#fb7185";
+  if (l === "cancelled") return "#94a3b8";
+  return "#94a3b8";
+};
 
-  // Keep assetList synced with initialAssets prop if passed from parent App
-  useEffect(() => {
-    if (initialAssets && initialAssets.length > 0) {
-      setAssetList(initialAssets);
-    }
-  }, [initialAssets]);
+const toolLabel = (tool) => {
+  if (tool === "zap")     return { label: "ZAP",    tab: "zap"    };
+  if (tool === "openvas") return { label: "Nmap",   tab: "openvas" };
+  if (tool === "mobsf")   return { label: "MobSF",  tab: "mobsf"  };
+  return                         { label: "Scan",   tab: "all"    };
+};
 
-  // Fetch Real Assets from GET /assets/
-  const fetchAssets = async () => {
-    try {
-      const res = await api.get("/assets/");
-      if (res.data && res.data.length > 0) {
-        setAssetList(res.data);
-        return;
-      }
-    } catch {
-      // Fallback endpoints
-    }
-    try {
-      const res2 = await api.get("/assets");
-      if (res2.data && res2.data.length > 0) {
-        setAssetList(res2.data);
-        return;
-      }
-    } catch {
-      // Fallback v1
-    }
-    try {
-      const resV1 = await api.get("/api/v1/assets");
-      if (resV1.data) setAssetList(resV1.data);
-    } catch {
-      // Keep existing list
-    }
-  };
+const progressLabel = (scan) => {
+  const phase = scan.engine_metadata?.phase;
+  const pct   = parseInt(scan.progress || "0", 10);
+  if (phase === "spider") return `🕷️ Spidering… ${pct}%`;
+  if (phase === "active") return `⚡ Active scan… ${pct}%`;
+  if (scan.status === "waiting" || scan.status === "queued") return "⏳ Waiting for scanner…";
+  if (scan.status === "running") return `🔍 Scanning… ${pct}%`;
+  if (scan.status === "completed") return "✅ Completed";
+  if (scan.status === "failed") return "❌ Failed";
+  return `${pct}%`;
+};
 
-  // Fetch Real Scan Jobs from GET /scans/v1/jobs
-  const fetchScanJobs = async () => {
+const fmtTime = (t) => {
+  if (!t) return "—";
+  const d = new Date(t);
+  return isNaN(d) ? t : d.toLocaleString();
+};
+
+// ─── Component ────────────────────────────────────────────────────────────────
+export default function Scans() {
+  const [engine, setEngine]       = useState("Web");
+  const [target, setTarget]       = useState("");
+  const [label, setLabel]         = useState("");
+  const [submitting, setSubmit]   = useState(false);
+  const [message, setMessage]     = useState({ type: "", text: "" });
+  const [scans, setScans]         = useState([]);
+  const [loading, setLoading]     = useState(true);
+  const pollRef = useRef(null);
+
+  const cfg = ENGINES[engine];
+
+  // ── Fetch scan list ────────────────────────────────────────────────────────
+  const fetchScans = async () => {
     try {
-      const res = await api.get("/scans/v1/jobs");
-      setScanJobs(res.data || []);
+      const res = await api.get("/scans/");
+      setScans(res.data || []);
     } catch {
-      try {
-        const resLegacy = await api.get("/scans/");
-        setScanJobs(
-          (resLegacy.data || []).map((s) => ({
-            id: s.id,
-            name: s.scan_name || "Scan",
-            engine: s.tool === "openvas" ? "Network" : s.tool === "zap" ? "Web" : "Mobile",
-            target: s.target,
-            target_type: "IP",
-            status: (s.status || "PENDING").toUpperCase(),
-            progress: parseInt(s.progress || "0", 10),
-            created_at: s.created_at,
-          }))
-        );
-      } catch {
-        setScanJobs([]);
-      }
+      setScans([]);
     } finally {
       setLoading(false);
     }
   };
 
+  // ── Polling: refresh every 5 seconds while any scan is running/waiting ─────
   useEffect(() => {
-    fetchAssets();
-    fetchScanJobs();
+    fetchScans();
+    pollRef.current = setInterval(() => {
+      fetchScans();
+    }, 5000);
+    return () => clearInterval(pollRef.current);
   }, []);
 
-  // Real-time 2-Second Polling for Progress Updates
-  useEffect(() => {
-    const interval = setInterval(() => {
-      fetchScanJobs();
-    }, 2000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Update target type when engine changes
-  const handleEngineChange = (newEngine) => {
-    setEngine(newEngine);
-    setTargetType(ENGINE_OPTIONS[newEngine].defaultType);
-    setTarget("");
-    setSelectedAssetId("");
-  };
-
-  // Asset dropdown selection handler
-  const handleAssetSelect = (assetId) => {
-    setSelectedAssetId(assetId);
-    if (!assetId) return;
-    const asset = assetList.find((a) => String(a.id) === String(assetId));
-    if (asset) {
-      const bestTarget = asset.ip_address || asset.hostname || asset.url || asset.asset_name || "";
-      setTarget(bestTarget);
-      if (!scanName) {
-        setScanName(`${engine} Assessment - ${asset.asset_name || asset.hostname || bestTarget}`);
-      }
-    }
-  };
-
-  // Launch New Scan
-  const handleCreateScan = async (e) => {
+  // ── Submit form ────────────────────────────────────────────────────────────
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!target.trim()) {
-      setMessage({ type: "error", text: "Scan target is required." });
+    const t = target.trim();
+    if (!t) {
+      setMessage({ type: "error", text: "Please enter a target." });
       return;
     }
 
-    setSubmitting(true);
+    setSubmit(true);
     setMessage({ type: "", text: "" });
 
-    const payload = {
-      name: scanName.trim() || `${engine} Assessment ${target.trim()}`,
-      engine,
-      target: target.trim(),
-      target_type: targetType,
-      schedule_interval: scheduleInterval === "Immediate" ? null : scheduleInterval,
-      asset_id: selectedAssetId || null,
+    const body = {
+      [cfg.payloadKey]: t,
+      label: label.trim() || `${engine} scan – ${t}`,
     };
 
     try {
-      const res = await api.post("/scans/v1/jobs", payload);
-      setMessage({ type: "success", text: `Scan "${res.data.name}" queued and actively scanning target in background!` });
+      await api.post(cfg.endpoint, body);
+      setMessage({
+        type: "success",
+        text: `${engine} scan queued for ${t}. The scanner is now running in the background — this will take several minutes.`,
+      });
       setTarget("");
-      setScanName("");
-      setSelectedAssetId("");
-      fetchScanJobs();
+      setLabel("");
+      fetchScans();
     } catch (err) {
+      const detail = err?.response?.data?.detail;
       setMessage({
         type: "error",
-        text: err?.response?.data?.detail || "Failed to create scan job.",
+        text: detail || `Failed to launch ${engine} scan. Check the target and try again.`,
       });
     } finally {
-      setSubmitting(false);
+      setSubmit(false);
     }
   };
 
-  // Trigger Rescan for an Existing Job
-  const handleRescan = async (jobId) => {
+  // ── Cancel a scan ──────────────────────────────────────────────────────────
+  const handleCancel = async (scanId) => {
     try {
-      const res = await api.post(`/scans/v1/jobs/${jobId}/rescan`);
-      setMessage({ type: "success", text: `Rescan job "${res.data.name}" launched successfully!` });
-      fetchScanJobs();
-    } catch (err) {
-      alert(err?.response?.data?.detail || "Failed to launch rescan.");
-    }
-  };
-
-  // Cancel Scan Job
-  const handleCancelScan = async (jobId) => {
-    try {
-      await api.post(`/scans/v1/jobs/${jobId}/cancel`);
-      fetchScanJobs();
+      await api.post(`/scans/${scanId}/cancel`);
+      fetchScans();
     } catch (err) {
       alert(err?.response?.data?.detail || "Failed to cancel scan.");
     }
   };
 
-  // Delete Scan Job
-  const handleDeleteScan = async (jobId) => {
-    if (!window.confirm("Are you sure you want to delete this scan job record?")) return;
+  // ── Reprocess (re-ingest results for completed scan) ──────────────────────
+  const handleReprocess = async (scanId) => {
     try {
-      await api.delete(`/scans/v1/jobs/${jobId}`);
-      fetchScanJobs();
+      await api.post(`/scans/${scanId}/reprocess`);
+      fetchScans();
     } catch (err) {
-      alert(err?.response?.data?.detail || "Failed to delete scan job.");
+      alert(err?.response?.data?.detail || "Failed to reprocess scan results.");
     }
   };
 
+  const color = statusColor;
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-      {/* Launch Scan Header & Panel */}
-      <section className="panel" style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "12px", padding: "24px" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: "28px" }}>
+
+      {/* ── Launch form ─────────────────────────────────────────────────── */}
+      <section style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "14px", padding: "28px" }}>
         <div style={{ marginBottom: "20px" }}>
-          <p className="eyebrow" style={{ color: "#38bdf8", textTransform: "uppercase", fontSize: "0.75rem", letterSpacing: "1px" }}>
-            VAPT Orchestration Engine
+          <p style={{ color: "#38bdf8", textTransform: "uppercase", fontSize: "0.72rem", letterSpacing: "1.5px", margin: "0 0 4px 0" }}>
+            VAPT Scan Orchestration Engine
           </p>
-          <h2 style={{ color: "#f8fafc", margin: "4px 0 0 0", fontSize: "1.5rem" }}>Scan Center & Target Selection</h2>
-          <p style={{ color: "#64748b", margin: "4px 0 0 0", fontSize: "0.875rem" }}>
-            {ENGINE_OPTIONS[engine].description}
-          </p>
+          <h2 style={{ color: "#f8fafc", margin: "0 0 6px 0", fontSize: "1.5rem" }}>Launch a Scan</h2>
+          <p style={{ color: "#64748b", fontSize: "0.875rem", margin: 0 }}>{cfg.description}</p>
         </div>
 
-        <form onSubmit={handleCreateScan} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "16px" }}>
-          {/* Engine Selection */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-            <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>Scanning Engine</label>
-            <select
-              value={engine}
-              onChange={(e) => handleEngineChange(e.target.value)}
-              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 12px", borderRadius: "6px" }}
+        {/* Engine toggle */}
+        <div style={{ display: "flex", gap: "10px", marginBottom: "24px" }}>
+          {Object.entries(ENGINES).map(([key, e]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => { setEngine(key); setTarget(""); setLabel(""); setMessage({ type: "", text: "" }); }}
+              style={{
+                padding: "10px 20px",
+                borderRadius: "8px",
+                border: engine === key ? "2px solid #38bdf8" : "2px solid #334155",
+                background: engine === key ? "#0284c722" : "#1e293b",
+                color: engine === key ? "#38bdf8" : "#94a3b8",
+                fontWeight: 700,
+                cursor: "pointer",
+                fontSize: "0.875rem",
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                transition: "all 0.15s",
+              }}
             >
-              <option value="Network">Network Engine</option>
-              <option value="Web">Web Engine</option>
-              <option value="Mobile">Mobile Engine</option>
-            </select>
-          </div>
+              {e.icon} {e.label}
+            </button>
+          ))}
+        </div>
 
-          {/* Target Selection from Real Asset Inventory */}
+        <form onSubmit={handleSubmit} style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+          {/* Target */}
           <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
             <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>
-              Pick Target from Asset Inventory ({assetList.length} assets found)
+              {cfg.targetLabel} <span style={{ color: "#fb7185" }}>*</span>
             </label>
-            <select
-              value={selectedAssetId}
-              onChange={(e) => handleAssetSelect(e.target.value)}
-              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 12px", borderRadius: "6px" }}
-            >
-              <option value="">
-                {assetList.length > 0 ? `-- Select from ${assetList.length} Real Assets --` : "No assets available"}
-              </option>
-              {assetList.map((asset) => {
-                const displayName = asset.asset_name || asset.hostname || asset.ip_address || "Unnamed Asset";
-                const details = [asset.ip_address, asset.hostname, asset.environment].filter(Boolean).join(" | ");
-                return (
-                  <option key={asset.id} value={asset.id}>
-                    {displayName} ({details})
-                  </option>
-                );
-              })}
-            </select>
-          </div>
-
-          {/* Target Type */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-            <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>Target Type</label>
-            <select
-              value={targetType}
-              onChange={(e) => setTargetType(e.target.value)}
-              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 12px", borderRadius: "6px" }}
-            >
-              <option value="IP">IP Address</option>
-              <option value="Domain">Domain Name</option>
-              <option value="CIDR">CIDR Range</option>
-              <option value="URL">URL</option>
-              <option value="APK">APK / Package</option>
-            </select>
-          </div>
-
-          {/* Manual Target Input */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-            <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>Target Address / URL</label>
             <input
               type="text"
               value={target}
               onChange={(e) => setTarget(e.target.value)}
-              placeholder={ENGINE_OPTIONS[engine].placeholder}
+              placeholder={cfg.placeholder}
               required
-              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 12px", borderRadius: "6px" }}
+              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 14px", borderRadius: "7px", fontSize: "0.95rem" }}
             />
+            <span style={{ color: "#64748b", fontSize: "0.75rem" }}>{cfg.targetHelp}</span>
           </div>
 
-          {/* Scan Name */}
+          {/* Scan name / label */}
           <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-            <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>Scan Campaign Name</label>
+            <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>Scan Label (optional)</label>
             <input
               type="text"
-              value={scanName}
-              onChange={(e) => setScanName(e.target.value)}
-              placeholder={`e.g. ${engine} Assessment`}
-              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 12px", borderRadius: "6px" }}
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder={`e.g. Q3 ${engine} Assessment`}
+              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 14px", borderRadius: "7px", fontSize: "0.95rem" }}
             />
           </div>
 
-          {/* Schedule Interval */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-            <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>Execution Schedule</label>
-            <select
-              value={scheduleInterval}
-              onChange={(e) => setScheduleInterval(e.target.value)}
-              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 12px", borderRadius: "6px" }}
-            >
-              <option value="Immediate">Run Immediately</option>
-              <option value="Daily">Daily Schedule</option>
-              <option value="Weekly">Weekly Schedule</option>
-              <option value="Monthly">Monthly Schedule</option>
-            </select>
+          {/* Info banner */}
+          <div style={{ gridColumn: "1 / -1", background: "#0f2744", border: "1px solid #1d4ed8", borderRadius: "8px", padding: "14px 18px", color: "#93c5fd", fontSize: "0.82rem", lineHeight: 1.6 }}>
+            <strong>⏱ Scan Duration Expectations:</strong><br />
+            {engine === "Web"
+              ? "ZAP spider + active scan typically takes 5–30 minutes. The scanner will discover all pages, then actively probe each for SQLi, XSS, SSRF, CSRF, auth bypass, and 100+ other vulnerability classes."
+              : "Nmap deep port sweep + banner analysis typically takes 2–20 minutes per host. CIDR blocks with many hosts take longer. All open ports are service-fingerprinted and correlated against CVEs."}
           </div>
 
-          {/* Scan Depth Mode */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px", gridColumn: "1 / -1", background: "#0284c711", border: "1px solid #0284c733", padding: "16px", borderRadius: "8px", marginTop: "8px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-              <label style={{ color: "#38bdf8", fontSize: "0.95rem", fontWeight: 700, display: "flex", alignItems: "center", gap: "8px" }}>
-                🛡️ Assessment Engine Profile & Scan Depth
-              </label>
-              <span style={{ fontSize: "0.75rem", background: "#0284c722", color: "#38bdf8", padding: "2px 8px", borderRadius: "12px", border: "1px solid #0284c744" }}>
-                {scanDepth === "deep" ? "ADVANCED DEEP MODE ENABLED" : "STANDARD FAST SWEEP"}
-              </span>
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-              <button
-                type="button"
-                onClick={() => setScanDepth("deep")}
-                style={{
-                  background: scanDepth === "deep" ? "linear-gradient(135deg, #0284c722 0%, #0369a133 100%)" : "#1e293b",
-                  border: `2px solid ${scanDepth === "deep" ? "#38bdf8" : "#334155"}`,
-                  borderRadius: "6px",
-                  padding: "12px",
-                  color: "#f8fafc",
-                  textAlign: "left",
-                  cursor: "pointer",
-                }}
-              >
-                <div style={{ fontWeight: 700, color: scanDepth === "deep" ? "#38bdf8" : "#94a3b8" }}>🛡️ Advanced Deep Pentest Mode (Recommended)</div>
-                <div style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "4px" }}>
-                  25+ Sensitive Endpoint Probes, Active XSS/SQLi/CORS/GraphQL Injection Probes, Cookie Flag Audits, Extended Port Sweep & CVE Correlation.
-                </div>
-              </button>
-              <button
-                type="button"
-                onClick={() => setScanDepth("standard")}
-                style={{
-                  background: scanDepth === "standard" ? "linear-gradient(135deg, #0284c722 0%, #0369a133 100%)" : "#1e293b",
-                  border: `2px solid ${scanDepth === "standard" ? "#38bdf8" : "#334155"}`,
-                  borderRadius: "6px",
-                  padding: "12px",
-                  color: "#f8fafc",
-                  textAlign: "left",
-                  cursor: "pointer",
-                }}
-              >
-                <div style={{ fontWeight: 700, color: scanDepth === "standard" ? "#38bdf8" : "#94a3b8" }}>⚡ Standard Surface Sweep</div>
-                <div style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "4px" }}>
-                  Fast surface port discovery and basic HTTP header security policy checks.
-                </div>
-              </button>
-            </div>
-          </div>
-
-          {/* Submit Button */}
-          <div style={{ display: "flex", alignItems: "flex-end", gridColumn: "1 / -1", marginTop: "8px" }}>
+          {/* Submit */}
+          <div style={{ gridColumn: "1 / -1" }}>
             <button
               type="submit"
               disabled={submitting}
               style={{
-                background: "linear-gradient(135deg, #0284c7 0%, #0369a1 100%)",
-                color: "#ffffff",
+                background: submitting
+                  ? "#1e293b"
+                  : "linear-gradient(135deg, #0369a1 0%, #0284c7 100%)",
+                color: "#fff",
                 border: "none",
-                padding: "12px 24px",
-                borderRadius: "6px",
-                fontWeight: 600,
+                padding: "12px 28px",
+                borderRadius: "8px",
+                fontWeight: 700,
+                fontSize: "0.95rem",
                 cursor: submitting ? "not-allowed" : "pointer",
-                transition: "opacity 0.2s",
+                boxShadow: submitting ? "none" : "0 4px 14px #0284c744",
+                transition: "all 0.2s",
               }}
             >
-              {submitting ? "Queuing & Starting Deep Pentest Engine..." : scanDepth === "deep" ? "🛡️ Launch Advanced Deep Pentest" : ENGINE_OPTIONS[engine].buttonLabel}
+              {submitting ? `⏳ Queuing ${engine} Scan…` : `${cfg.icon} ${cfg.buttonLabel}`}
             </button>
           </div>
         </form>
 
         {message.text && (
-          <div
-            style={{
-              marginTop: "16px",
-              padding: "12px",
-              borderRadius: "6px",
-              background: message.type === "error" ? "#451a1a" : "#14532d",
-              color: message.type === "error" ? "#fca5a5" : "#86efac",
-              border: `1px solid ${message.type === "error" ? "#7f1d1d" : "#166534"}`,
-            }}
-          >
+          <div style={{
+            marginTop: "16px",
+            padding: "14px 16px",
+            borderRadius: "8px",
+            background: message.type === "error" ? "#450a0a" : "#052e16",
+            color: message.type === "error" ? "#fca5a5" : "#86efac",
+            border: `1px solid ${message.type === "error" ? "#7f1d1d" : "#166534"}`,
+            fontSize: "0.875rem",
+          }}>
             {message.text}
           </div>
         )}
       </section>
 
-      {/* Active & Historical Scan Jobs List */}
-      <section className="panel" style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "12px", padding: "24px" }}>
+      {/* ── Scan list ───────────────────────────────────────────────────── */}
+      <section style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "14px", padding: "28px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px" }}>
           <div>
-            <h3 style={{ color: "#f8fafc", margin: 0, fontSize: "1.25rem" }}>Scan Jobs & Real-Time Telemetry</h3>
-            <p style={{ color: "#64748b", margin: "4px 0 0 0", fontSize: "0.875rem" }}>
-              Live 2-second progress polling against PostgreSQL database
-            </p>
+            <h3 style={{ color: "#f8fafc", margin: "0 0 4px 0", fontSize: "1.2rem" }}>Active &amp; Completed Scans</h3>
+            <p style={{ color: "#64748b", margin: 0, fontSize: "0.82rem" }}>Auto-refreshes every 5 seconds • Real engine results only</p>
           </div>
           <button
-            onClick={fetchScanJobs}
-            style={{ background: "#1e293b", color: "#38bdf8", border: "1px solid #334155", padding: "6px 16px", borderRadius: "6px", cursor: "pointer" }}
+            onClick={fetchScans}
+            style={{ background: "#1e293b", color: "#38bdf8", border: "1px solid #334155", padding: "6px 16px", borderRadius: "6px", cursor: "pointer", fontSize: "0.82rem" }}
           >
-            Refresh List
+            ↺ Refresh
           </button>
         </div>
 
-        <div className="table-wrap" style={{ overflowX: "auto" }}>
-          <table className="table" style={{ width: "100%", borderCollapse: "collapse", color: "#cbd5e1" }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid #334155", textAlign: "left" }}>
-                <th style={{ padding: "12px" }}>Scan Name</th>
-                <th style={{ padding: "12px" }}>Engine</th>
-                <th style={{ padding: "12px" }}>Target</th>
-                <th style={{ padding: "12px" }}>Target Type</th>
-                <th style={{ padding: "12px" }}>Status</th>
-                <th style={{ padding: "12px", width: "180px" }}>Progress</th>
-                <th style={{ padding: "12px" }}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {scanJobs.map((job) => {
-                const statusColor =
-                  job.status === "COMPLETED"
-                    ? "#22c55e"
-                    : job.status === "RUNNING"
-                    ? "#38bdf8"
-                    : job.status === "FAILED"
-                    ? "#ef4444"
-                    : "#eab308";
-
-                return (
-                  <tr key={job.id} style={{ borderBottom: "1px solid #1e293b" }}>
-                    <td style={{ padding: "12px", fontWeight: 600, color: "#f8fafc" }}>{job.name}</td>
-                    <td style={{ padding: "12px" }}>
-                      <span style={{ background: "#1e293b", padding: "4px 8px", borderRadius: "4px", fontSize: "0.8rem", color: "#38bdf8" }}>
-                        {job.engine}
-                      </span>
-                    </td>
-                    <td style={{ padding: "12px", fontFamily: "monospace" }}>{job.target}</td>
-                    <td style={{ padding: "12px" }}>{job.target_type}</td>
-                    <td style={{ padding: "12px" }}>
-                      <span
-                        style={{
-                          background: `${statusColor}22`,
-                          color: statusColor,
-                          border: `1px solid ${statusColor}44`,
-                          padding: "2px 8px",
-                          borderRadius: "12px",
-                          fontSize: "0.75rem",
-                          fontWeight: 700,
-                        }}
-                      >
-                        {job.status}
-                      </span>
-                    </td>
-                    <td style={{ padding: "12px" }}>
-                      <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                          <div style={{ flex: 1, background: "#1e293b", height: "8px", borderRadius: "4px", overflow: "hidden" }}>
-                            <div
-                              style={{
-                                width: `${Math.min(100, Math.max(0, job.progress || 0))}%`,
-                                background: job.status === "RUNNING"
-                                  ? "linear-gradient(90deg, #38bdf8 0%, #0284c7 100%)"
-                                  : statusColor,
-                                height: "100%",
-                                transition: "width 0.5s ease-in-out",
-                                boxShadow: job.status === "RUNNING" ? "0 0 8px #38bdf888" : "none",
-                              }}
-                            />
-                          </div>
-                          <span style={{ fontSize: "0.8rem", color: "#94a3b8", fontWeight: 700, width: "36px" }}>{job.progress || 0}%</span>
-                        </div>
-                        {job.status === "RUNNING" && (
-                          <span style={{ fontSize: "0.7rem", color: "#38bdf8", fontStyle: "italic" }}>
-                            {job.progress >= 70 ? "Correlating CVEs & saving findings..." : "Active port discovery & probing..."}
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td style={{ padding: "12px" }}>
-                      <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                        {(() => {
-                          const tabKey = job.engine === "Network" ? "openvas" : (job.engine === "Web" ? "zap" : (job.engine === "Mobile" ? "mobsf" : "all"));
-                          const targetParam = job.target ? `&target=${encodeURIComponent(job.target)}` : "";
-                          return (
-                            <>
-                              <Link
-                                to={`/findings?tab=${tabKey}${targetParam}`}
-                                style={{
-                                  background: "linear-gradient(135deg, #10b98122 0%, #05966922 100%)",
-                                  color: "#34d399",
-                                  border: "1px solid #10b98144",
-                                  padding: "4px 10px",
-                                  borderRadius: "4px",
-                                  cursor: "pointer",
-                                  fontSize: "0.75rem",
-                                  fontWeight: 700,
-                                  display: "inline-flex",
-                                  alignItems: "center",
-                                  gap: "4px",
-                                  textDecoration: "none",
-                                }}
-                                title={`View findings for target: ${job.target}`}
-                              >
-                                🔍 View Findings
-                              </Link>
-                              <a
-                                href={`/api/reports/v1/download/${job.id}?format=pdf&type=executive`}
-                                target="_blank"
-                                rel="noreferrer"
-                                download={`VAPT_Report_Scan_${job.id}.pdf`}
-                                style={{
-                                  background: "linear-gradient(135deg, #0284c722 0%, #0369a122 100%)",
-                                  color: "#38bdf8",
-                                  border: "1px solid #0284c744",
-                                  padding: "4px 10px",
-                                  borderRadius: "4px",
-                                  cursor: "pointer",
-                                  fontSize: "0.75rem",
-                                  fontWeight: 700,
-                                  display: "inline-flex",
-                                  alignItems: "center",
-                                  gap: "4px",
-                                  textDecoration: "none",
-                                }}
-                                title="Download PDF Executive Report for this scan job"
-                              >
-                                📥 PDF Report
-                              </a>
-                            </>
-                          );
-                        })()}
-                        <button
-                          onClick={() => handleRescan(job.id)}
-                          style={{ background: "#0284c722", color: "#38bdf8", border: "1px solid #0284c744", padding: "4px 10px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem", fontWeight: 600 }}
-                        >
-                          Rescan
-                        </button>
-                        {["PENDING", "RUNNING"].includes(job.status) && (
-                          <button
-                            onClick={() => handleCancelScan(job.id)}
-                            style={{ background: "#451a1a", color: "#fca5a5", border: "1px solid #7f1d1d", padding: "4px 10px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem" }}
-                          >
-                            Cancel
-                          </button>
-                        )}
-                        <button
-                          onClick={() => handleDeleteScan(job.id)}
-                          style={{ background: "#1e293b", color: "#64748b", border: "1px solid #334155", padding: "4px 10px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem" }}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-
-              {!loading && scanJobs.length === 0 && (
-                <tr>
-                  <td colSpan="7" style={{ textAlign: "center", padding: "32px", color: "#64748b" }}>
-                    No scans found
-                  </td>
+        {loading ? (
+          <div style={{ textAlign: "center", color: "#64748b", padding: "40px" }}>Loading scans…</div>
+        ) : scans.length === 0 ? (
+          <div style={{ textAlign: "center", color: "#64748b", padding: "40px" }}>
+            No scans found. Launch a scan above to get started.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", color: "#cbd5e1", fontSize: "0.875rem" }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid #334155", textAlign: "left" }}>
+                  {["Scan Name", "Tool", "Target", "Status", "Progress", "Finished", "Actions"].map((h) => (
+                    <th key={h} style={{ padding: "10px 12px", color: "#64748b", fontWeight: 600, whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {scans.map((scan) => {
+                  const c = statusColor(scan.status);
+                  const { tab } = toolLabel(scan.tool);
+                  const pct = parseInt(scan.progress || "0", 10);
+                  const isActive = ["running", "waiting", "queued"].includes((scan.status || "").toLowerCase());
+
+                  return (
+                    <tr key={scan.id} style={{ borderBottom: "1px solid #1e293b" }}>
+                      {/* Name */}
+                      <td style={{ padding: "12px" }}>
+                        <strong style={{ color: "#f8fafc" }}>{scan.scan_name || "Unnamed Scan"}</strong>
+                        {scan.error_message && !isActive && (
+                          <div style={{ color: "#fda4af", fontSize: "0.72rem", marginTop: "4px", maxWidth: "260px" }}>
+                            {scan.error_message.slice(0, 120)}{scan.error_message.length > 120 ? "…" : ""}
+                          </div>
+                        )}
+                      </td>
+
+                      {/* Tool */}
+                      <td style={{ padding: "12px" }}>
+                        <span style={{ background: "#0284c722", color: "#38bdf8", border: "1px solid #0284c744", padding: "2px 8px", borderRadius: "10px", fontSize: "0.75rem", fontWeight: 700 }}>
+                          {toolLabel(scan.tool).label}
+                        </span>
+                      </td>
+
+                      {/* Target */}
+                      <td style={{ padding: "12px", fontFamily: "monospace", fontSize: "0.82rem", color: "#e2e8f0", maxWidth: "200px", wordBreak: "break-all" }}>
+                        {scan.target}
+                      </td>
+
+                      {/* Status */}
+                      <td style={{ padding: "12px" }}>
+                        <span style={{ color: c, fontWeight: 700, fontSize: "0.8rem", background: `${c}18`, border: `1px solid ${c}44`, padding: "3px 10px", borderRadius: "12px" }}>
+                          {(scan.status || "unknown").toUpperCase()}
+                        </span>
+                      </td>
+
+                      {/* Progress */}
+                      <td style={{ padding: "12px", minWidth: "160px" }}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                            <div style={{ flex: 1, background: "#1e293b", height: "6px", borderRadius: "3px", overflow: "hidden" }}>
+                              <div style={{
+                                width: `${Math.min(100, Math.max(0, pct))}%`,
+                                background: isActive
+                                  ? "linear-gradient(90deg, #38bdf8, #0284c7)"
+                                  : c,
+                                height: "100%",
+                                transition: "width 1s ease",
+                                boxShadow: isActive ? "0 0 6px #38bdf888" : "none",
+                              }} />
+                            </div>
+                            <span style={{ fontSize: "0.75rem", color: "#94a3b8", minWidth: "32px" }}>{pct}%</span>
+                          </div>
+                          {isActive && (
+                            <span style={{ fontSize: "0.7rem", color: "#38bdf8", fontStyle: "italic" }}>
+                              {progressLabel(scan)}
+                            </span>
+                          )}
+                          {scan.status?.toLowerCase() === "completed" && (
+                            <span style={{ fontSize: "0.7rem", color: "#34d399" }}>✅ Done</span>
+                          )}
+                        </div>
+                      </td>
+
+                      {/* Finished */}
+                      <td style={{ padding: "12px", fontSize: "0.78rem", color: "#64748b", whiteSpace: "nowrap" }}>
+                        {fmtTime(scan.finished_at)}
+                      </td>
+
+                      {/* Actions */}
+                      <td style={{ padding: "12px" }}>
+                        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                          {/* View Findings */}
+                          <Link
+                            to={`/findings?tab=${tab}&target=${encodeURIComponent(scan.target)}`}
+                            style={{
+                              background: "#10b98122",
+                              color: "#34d399",
+                              border: "1px solid #10b98144",
+                              padding: "4px 10px",
+                              borderRadius: "5px",
+                              fontSize: "0.75rem",
+                              fontWeight: 700,
+                              textDecoration: "none",
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: "4px",
+                            }}
+                          >
+                            🔍 Findings
+                          </Link>
+
+                          {/* PDF report */}
+                          <a
+                            href={`/api/reports/v1/download/${scan.id}?format=pdf&type=executive`}
+                            target="_blank"
+                            rel="noreferrer"
+                            download={`VAPT_Report_${scan.id}.pdf`}
+                            style={{
+                              background: "#0284c722",
+                              color: "#38bdf8",
+                              border: "1px solid #0284c744",
+                              padding: "4px 10px",
+                              borderRadius: "5px",
+                              fontSize: "0.75rem",
+                              fontWeight: 700,
+                              textDecoration: "none",
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: "4px",
+                            }}
+                          >
+                            📥 PDF
+                          </a>
+
+                          {/* Reprocess (re-ingest results) for completed */}
+                          {scan.status?.toLowerCase() === "completed" && (
+                            <button
+                              onClick={() => handleReprocess(scan.id)}
+                              title="Re-ingest results from the scanner"
+                              style={{ background: "#1e293b", color: "#fbbf24", border: "1px solid #fbbf2444", padding: "4px 10px", borderRadius: "5px", cursor: "pointer", fontSize: "0.75rem" }}
+                            >
+                              🔄 Re-ingest
+                            </button>
+                          )}
+
+                          {/* Cancel for active scans */}
+                          {isActive && (
+                            <button
+                              onClick={() => handleCancel(scan.id)}
+                              style={{ background: "#450a0a", color: "#fca5a5", border: "1px solid #7f1d1d", padding: "4px 10px", borderRadius: "5px", cursor: "pointer", fontSize: "0.75rem" }}
+                            >
+                              ✕ Cancel
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* ── Info panel ──────────────────────────────────────────────────── */}
+      <section style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "14px", padding: "24px" }}>
+        <h4 style={{ color: "#f8fafc", margin: "0 0 12px 0" }}>📡 Scanner Status</h4>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px" }}>
+          {[
+            { name: "OWASP ZAP", desc: "Web vulnerability scanner", status: "Running", color: "#34d399" },
+            { name: "Nmap", desc: "Network port scanner + CVE correlation", status: "Running", color: "#34d399" },
+            { name: "MobSF", desc: "Mobile binary static analysis", status: "Running", color: "#fbbf24" },
+          ].map((s) => (
+            <div key={s.name} style={{ background: "#1e293b", borderRadius: "8px", padding: "14px", border: "1px solid #334155" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+                <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: s.color, display: "inline-block" }} />
+                <strong style={{ color: "#f8fafc", fontSize: "0.875rem" }}>{s.name}</strong>
+              </div>
+              <p style={{ color: "#64748b", fontSize: "0.75rem", margin: 0 }}>{s.desc}</p>
+            </div>
+          ))}
         </div>
       </section>
     </div>

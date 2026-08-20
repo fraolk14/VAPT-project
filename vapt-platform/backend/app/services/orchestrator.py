@@ -729,13 +729,14 @@ def _background_openvas_worker(scan_id: str) -> None:
                     try:
                         launch_openvas_scan(db, scan)
                     except RuntimeError as exc:
-                        _append_audit_log(
-                            db,
-                            scan,
-                            "scan.fallback",
-                            {"tool": scan.tool, "reason": str(exc), "mode": "direct-correlation"},
+                        # Mark as FAILED so the user sees the real error — do NOT silently
+                        # replace with a shallow probe that completes in seconds.
+                        _set_scan_state(
+                            db, scan,
+                            status="failed",
+                            error_message=f"Network scanner unavailable: {exc}. Check that Greenbone/OpenVAS is running and the socket is accessible, then retry.",
                         )
-                        run_direct_network_scan(db, scan)
+                        _append_audit_log(db, scan, "scan.failed", {"tool": scan.tool, "reason": str(exc)})
                         return
                     else:
                         scan = db.get(Scan, scan_id)
@@ -778,8 +779,15 @@ def _background_zap_worker(scan_id: str) -> None:
                 if not metadata.get("spider_scan_id") and not metadata.get("active_scan_id"):
                     try:
                         launch_zap_scan(db, scan)
-                    except Exception:
-                        run_direct_web_scan(db, scan)
+                    except Exception as exc:
+                        # Mark as FAILED so the user sees the real error — do NOT silently
+                        # replace with a shallow HTTP probe that completes in seconds.
+                        _set_scan_state(
+                            db, scan,
+                            status="failed",
+                            error_message=f"ZAP scanner unavailable: {exc}. Ensure the ZAP container is running (docker compose up -d) and ZAP_API_KEY is set correctly, then retry.",
+                        )
+                        _append_audit_log(db, scan, "scan.failed", {"tool": scan.tool, "reason": str(exc)})
                         return
                 else:
                     refresh_zap_scan(db, scan)
@@ -787,8 +795,8 @@ def _background_zap_worker(scan_id: str) -> None:
                 scan = db.get(Scan, scan_id)
                 if scan and scan.status in {"completed", "failed", "cancelled"}:
                     return
-            except Exception:
-                pass
+            except Exception as loop_exc:
+                print(f"[ZAP worker] Loop error for scan {scan_id}: {loop_exc}")
             finally:
                 db.close()
 
