@@ -256,7 +256,7 @@ def reprocess_scan_record(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    enforce_roles(current_user, "admin")
+    enforce_roles(current_user, "admin", "analyst")
     scan = db.get(Scan, scan_id)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
@@ -264,6 +264,59 @@ def reprocess_scan_record(
         return reprocess_scan_results(db, scan)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{scan_id}/rescan", response_model=ScanResponse)
+def rescan_record(
+    scan_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    enforce_roles(current_user, "admin", "analyst")
+    scan = db.get(Scan, scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    new_scan = Scan(
+        scan_name=f"{scan.scan_name} (Rescan)" if not (scan.scan_name or "").endswith("(Rescan)") else scan.scan_name,
+        scan_type=scan.scan_type,
+        tool=scan.tool,
+        target=scan.target,
+        profile=scan.profile,
+        schedule=scan.schedule,
+        engine_metadata={},
+        status="waiting",
+        progress="0",
+        error_message=f"{scan.scan_type.capitalize()} assessment queued. Re-scanning target in the background.",
+        triggered_by=current_user.id,
+    )
+    new_scan = create_scan(db, new_scan)
+    if new_scan.tool in {"openvas", "nmap"}:
+        background_tasks.add_task(enqueue_openvas_scan, str(new_scan.id))
+    elif new_scan.tool == "zap":
+        background_tasks.add_task(enqueue_zap_scan, str(new_scan.id))
+    elif new_scan.tool == "mobsf":
+        background_tasks.add_task(enqueue_mobsf_scan, str(new_scan.id))
+    return new_scan
+
+
+@router.delete("/{scan_id}")
+def delete_scan_record(
+    scan_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    enforce_roles(current_user, "admin", "analyst")
+    scan = db.get(Scan, scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    # Disassociate or delete findings for this scan
+    db.query(Finding).filter(Finding.scan_id == scan.id).delete(synchronize_session=False)
+    db.delete(scan)
+    db.commit()
+    return {"message": "Scan deleted successfully"}
 
 
 # -------------------------------------------------------------------------

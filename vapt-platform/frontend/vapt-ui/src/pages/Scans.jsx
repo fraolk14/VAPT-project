@@ -150,13 +150,44 @@ export default function Scans() {
     }
   };
 
-  // ── Reprocess (re-ingest results for completed scan) ──────────────────────
+  // ── Reprocess (re-ingest results for scan) ─────────────────────────────────
   const handleReprocess = async (scanId) => {
     try {
       await api.post(`/scans/${scanId}/reprocess`);
+      setMessage({
+        type: "success",
+        text: "Scan results re-ingested successfully.",
+      });
       fetchScans();
     } catch (err) {
       alert(err?.response?.data?.detail || "Failed to reprocess scan results.");
+    }
+  };
+
+  // ── Rescan (re-trigger scan for target) ────────────────────────────────────
+  const handleRescan = async (scanId, scanName) => {
+    try {
+      await api.post(`/scans/${scanId}/rescan`);
+      setMessage({
+        type: "success",
+        text: `Re-scan queued for ${scanName || "target"}. Scanner is running in background.`,
+      });
+      fetchScans();
+    } catch (err) {
+      alert(err?.response?.data?.detail || "Failed to trigger re-scan.");
+    }
+  };
+
+  // ── Delete a scan record ────────────────────────────────────────────────────
+  const handleDelete = async (scanId, scanName) => {
+    if (!window.confirm(`Are you sure you want to delete scan record "${scanName}"? This will also remove associated findings.`)) {
+      return;
+    }
+    try {
+      await api.delete(`/scans/${scanId}`);
+      fetchScans();
+    } catch (err) {
+      alert(err?.response?.data?.detail || "Failed to delete scan record.");
     }
   };
 
@@ -427,12 +458,41 @@ export default function Scans() {
                             📥 PDF
                           </a>
 
-                          {/* Reprocess (re-ingest results) for completed */}
-                          {scan.status?.toLowerCase() === "completed" && (
+                          {/* Rescan button */}
+                          {!isActive && (
+                            <button
+                              onClick={() => handleRescan(scan.id, scan.scan_name || scan.target)}
+                              title="Re-trigger security scan for this target"
+                              style={{
+                                background: "#0284c722",
+                                color: "#38bdf8",
+                                border: "1px solid #0284c744",
+                                padding: "4px 10px",
+                                borderRadius: "5px",
+                                cursor: "pointer",
+                                fontSize: "0.75rem",
+                                fontWeight: 700,
+                              }}
+                            >
+                              ⚡ Rescan
+                            </button>
+                          )}
+
+                          {/* Re-ingest (reprocess results) */}
+                          {!isActive && (
                             <button
                               onClick={() => handleReprocess(scan.id)}
-                              title="Re-ingest results from the scanner"
-                              style={{ background: "#1e293b", color: "#fbbf24", border: "1px solid #fbbf2444", padding: "4px 10px", borderRadius: "5px", cursor: "pointer", fontSize: "0.75rem" }}
+                              title="Re-ingest and re-evaluate findings from scanner"
+                              style={{
+                                background: "#1e293b",
+                                color: "#fbbf24",
+                                border: "1px solid #fbbf2444",
+                                padding: "4px 10px",
+                                borderRadius: "5px",
+                                cursor: "pointer",
+                                fontSize: "0.75rem",
+                                fontWeight: 600,
+                              }}
                             >
                               🔄 Re-ingest
                             </button>
@@ -442,9 +502,37 @@ export default function Scans() {
                           {isActive && (
                             <button
                               onClick={() => handleCancel(scan.id)}
-                              style={{ background: "#450a0a", color: "#fca5a5", border: "1px solid #7f1d1d", padding: "4px 10px", borderRadius: "5px", cursor: "pointer", fontSize: "0.75rem" }}
+                              style={{
+                                background: "#450a0a",
+                                color: "#fca5a5",
+                                border: "1px solid #7f1d1d",
+                                padding: "4px 10px",
+                                borderRadius: "5px",
+                                cursor: "pointer",
+                                fontSize: "0.75rem",
+                              }}
                             >
                               ✕ Cancel
+                            </button>
+                          )}
+
+                          {/* Delete button */}
+                          {!isActive && (
+                            <button
+                              onClick={() => handleDelete(scan.id, scan.scan_name || scan.target)}
+                              title="Delete scan record from history"
+                              style={{
+                                background: "#451a1a",
+                                color: "#fca5a5",
+                                border: "1px solid #7f1d1d",
+                                padding: "4px 10px",
+                                borderRadius: "5px",
+                                cursor: "pointer",
+                                fontSize: "0.75rem",
+                                fontWeight: 600,
+                              }}
+                            >
+                              🗑️ Delete
                             </button>
                           )}
                         </div>

@@ -335,13 +335,14 @@ def replace_scan_findings(db: Session, scan: Scan, normalized_findings: list[dic
 
 
 def reprocess_scan_results(db: Session, scan: Scan) -> Scan:
-    if scan.tool == "openvas":
+    if scan.tool in {"openvas", "nmap"}:
         metadata = scan.engine_metadata or {}
         report_id = metadata.get("remote_report_id")
-        if not report_id:
-          raise RuntimeError("No remote report is available for reprocessing.")
-        normalized_findings = OpenVASClient().get_report_results(str(report_id), task_id=str(metadata.get("remote_task_id") or ""))
-        replace_scan_findings(db, scan, normalized_findings)
+        if report_id:
+            normalized_findings = OpenVASClient().get_report_results(str(report_id), task_id=str(metadata.get("remote_task_id") or ""))
+            replace_scan_findings(db, scan, normalized_findings)
+        else:
+            run_direct_network_scan(db, scan)
     elif scan.tool == "zap":
         target = (scan.engine_metadata or {}).get("target") or scan.target
         normalized_findings = ZAPClient().normalize_results(ZAPClient().get_alerts(target))
