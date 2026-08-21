@@ -1003,17 +1003,21 @@ def resume_scan(db: Session, scan: Scan) -> Scan:
 
     metadata = scan.engine_metadata or {}
     remote_task_id = metadata.get("remote_task_id")
-    next_status = "queued" if remote_task_id else "waiting"
-    if scan.tool == "zap":
-        message = None if remote_task_id else "Web engine queued. Spidering and active scanning will begin automatically in the background."
-    elif scan.tool == "mobsf":
-        message = None if remote_task_id else "Mobile engine queued. Static analysis will begin automatically in the background."
+    next_status = "running" if not remote_task_id else "queued"
+    if scan.tool in {"zap", "web"}:
+        message = None if remote_task_id else "Web engine resumed. Assessment running in background."
+    elif scan.tool in {"mobsf", "mobile"}:
+        message = None if remote_task_id else "Mobile engine resumed. Analysis running in background."
     else:
-        message = None if remote_task_id else "Network engine queued. Discovery will begin automatically in the background."
+        message = None if remote_task_id else "Network engine resumed. Dual-engine scan running in background."
     _set_scan_state(db, scan, status=next_status, error_message=message)
     _append_audit_log(db, scan, "scan.resume")
 
-    if scan.tool == "openvas":
+    # Clear active worker lock if stuck so thread can launch cleanly
+    with _worker_lock:
+        _active_workers.discard(str(scan.id))
+
+    if scan.tool in {"openvas", "nmap"}:
         enqueue_openvas_scan(str(scan.id))
     elif scan.tool == "zap":
         enqueue_zap_scan(str(scan.id))
