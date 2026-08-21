@@ -61,6 +61,35 @@ services:
       - "1025:1025"
       - "8025:8025"
 
+  zap:
+    container_name: vapt-prod-zap
+    image: ghcr.io/zaproxy/zaproxy:stable
+    restart: always
+    command:
+      [
+        "zap.sh",
+        "-daemon",
+        "-host",
+        "0.0.0.0",
+        "-port",
+        "8080",
+        "-config",
+        "api.key=${ZAP_API_KEY:-zap}",
+        "-config",
+        "api.addrs.addr.name=.*",
+        "-config",
+        "api.addrs.addr.regex=true"
+      ]
+    ports:
+      - "8080:8080"
+
+  mobsf:
+    container_name: vapt-prod-mobsf
+    image: opensecurity/mobile-security-framework-mobsf:latest
+    restart: always
+    ports:
+      - "8001:8000"
+
 volumes:
   vapt_prod_pgdata:
     name: vapt_prod_pgdata

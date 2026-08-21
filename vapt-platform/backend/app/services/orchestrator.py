@@ -442,13 +442,18 @@ def run_direct_network_scan(db: Session, scan: Scan) -> Scan:
         socket_error: str | None = None
 
         def _update_progress(progress: int, message: str) -> None:
-            """Thread-safe progress write."""
+            """Thread-safe progress write with fresh DB session per call."""
+            local_db = SessionLocal()
             try:
-                scan.progress = str(progress)
-                scan.error_message = message
-                db.commit()
+                s = local_db.get(Scan, scan.id)
+                if s:
+                    s.progress = str(progress)
+                    s.error_message = message
+                    local_db.commit()
             except Exception:
-                pass
+                local_db.rollback()
+            finally:
+                local_db.close()
 
         # ── Engine 1: Nmap ───────────────────────────────────────────────────
         def _run_nmap() -> None:
@@ -503,32 +508,37 @@ def run_direct_network_scan(db: Session, scan: Scan) -> Scan:
 
         _update_progress(90, f"📊 Correlation complete: {len(correlated)} unique findings (Nmap: {len(nmap_findings)}, Socket: {len(socket_findings)}).")
 
-        # ── Store correlated findings ─────────────────────────────────────────
-        _store_findings(db, scan, correlated)
+        # ── Store correlated findings with fresh DB session ────────────────────
+        finish_db = SessionLocal()
+        try:
+            target_scan = finish_db.get(Scan, scan.id)
+            if target_scan:
+                _store_findings(finish_db, target_scan, correlated)
+                target_scan.status = "completed"
+                target_scan.progress = "100"
+                target_scan.finished_at = datetime.now(timezone.utc)
+                target_scan.error_message = None
 
-        scan.status = "completed"
-        scan.progress = "100"
-        scan.finished_at = datetime.now(timezone.utc)
-        scan.error_message = None
+                error_notes: list[str] = []
+                if nmap_error:
+                    error_notes.append(f"Nmap error: {nmap_error}")
+                if socket_error:
+                    error_notes.append(f"Socket error: {socket_error}")
+                if error_notes:
+                    target_scan.error_message = " | ".join(error_notes)
 
-        error_notes: list[str] = []
-        if nmap_error:
-            error_notes.append(f"Nmap error: {nmap_error}")
-        if socket_error:
-            error_notes.append(f"Socket error: {socket_error}")
-        if error_notes:
-            scan.error_message = " | ".join(error_notes)
+                target_scan.engine_metadata = {
+                    **(target_scan.engine_metadata or {}),
+                    **nmap_meta,
+                    "execution_mode": "dual-engine-correlation",
+                    "correlation": correlation_summary,
+                    "nmap_available": nmap_meta.get("nmap_available", False),
+                    "scan_depth": "deep",
+                }
+                finish_db.commit()
+        finally:
+            finish_db.close()
 
-        scan.engine_metadata = {
-            **scan.engine_metadata,
-            **nmap_meta,
-            "execution_mode": "dual-engine-correlation",
-            "correlation": correlation_summary,
-            "nmap_available": nmap_meta.get("nmap_available", False),
-            "scan_depth": "deep",
-        }
-        db.commit()
-        db.refresh(scan)
         return scan
 
     except Exception as exc:
