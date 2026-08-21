@@ -406,27 +406,33 @@ class ZAPClient:
 
     def get_alerts(self, target: str) -> list[dict[str, Any]]:
         normalized_target = self.normalize_target(target)
-        alerts: list[dict[str, Any]] = []
-        start = 0
-        count = 500
+        target_no_slash = normalized_target.rstrip("/")
+        target_slash = f"{target_no_slash}/"
 
-        while True:
+        for b_url in [normalized_target, target_no_slash, target_slash, None]:
+            alerts: list[dict[str, Any]] = []
+            start = 0
+            count = 500
             try:
-                payload = self._request("core", "view", "alerts", baseurl=normalized_target, start=start, count=count)
+                while True:
+                    params: dict[str, Any] = {"start": start, "count": count}
+                    if b_url:
+                        params["baseurl"] = b_url
+                    payload = self._request("core", "view", "alerts", **params)
+                    batch = payload.get("alerts", [])
+                    if not isinstance(batch, list) or not batch:
+                        break
+                    alerts.extend(batch)
+                    if len(batch) < count:
+                        break
+                    start += count
             except Exception:
-                try:
-                    payload = self._request("core", "view", "alerts", start=start, count=count)
-                except Exception:
-                    break
-            batch = payload.get("alerts", [])
-            if not isinstance(batch, list) or not batch:
-                break
-            alerts.extend(batch)
-            if len(batch) < count:
-                break
-            start += count
+                pass
 
-        return alerts
+            if alerts:
+                return alerts
+
+        return []
 
     def normalize_results(self, raw_alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         normalized = []

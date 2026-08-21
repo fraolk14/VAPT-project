@@ -223,7 +223,7 @@ def _upsert_asset_from_finding(db: Session, scan: Scan, item: dict[str, Any], me
 
 
 def _store_findings(db: Session, scan: Scan, normalized_findings: list[dict[str, Any]]) -> None:
-    if (scan.result_summary or {}).get("ingested"):
+    if not normalized_findings:
         return
 
     rules = db.query(FalsePositiveRule).filter(FalsePositiveRule.enabled.is_(True)).all()
