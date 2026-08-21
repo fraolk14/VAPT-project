@@ -434,16 +434,38 @@ def run_nmap_scan(
             "compliance_map": [], "metadata": {"scanner": "nmap"},
         }], {"nmap_available": False}
 
+    targets_to_scan = [target]
+    if "/" in target:
+        try:
+            from app.services.network_assessment import discover_active_hosts
+            active_hosts = discover_active_hosts(target)
+            if active_hosts:
+                targets_to_scan = active_hosts
+            else:
+                return [{
+                    "title": "No active hosts detected in network block",
+                    "category": "network",
+                    "source": "nmap",
+                    "port": 0, "protocol": "tcp", "service": "network-block", "state": "closed",
+                    "cve_id": None, "cvss_score": 0.0, "severity": "info", "confidence": 0.95,
+                    "evidence": f"Discovery probes did not confirm active hosts in {target}.",
+                    "remediation": "Confirm routing, firewall policy, and scan placement.",
+                    "compliance_map": ["NIST RA-5"],
+                    "metadata": {"network_block": target, "active_hosts": []},
+                }], {"nmap_available": True, "active_hosts": []}
+        except Exception:
+            targets_to_scan = [target]
+
     cmd = [
         nmap_bin,
         "-sV",           # service version detection
-        "-Pn",           # skip host discovery ping (treat all hosts as up)
+        "-Pn",           # skip host discovery ping (treat targets as up)
         f"-{timing}",    # timing template (T4 = aggressive)
         "--script", NSE_SCRIPTS,
         "-p", ports,
         "-oX", "-",      # XML output to stdout
         "--open",        # only show open ports
-        target,
+        *targets_to_scan,
     ]
     if extra_args:
         cmd.extend(extra_args)
@@ -452,6 +474,7 @@ def run_nmap_scan(
         "nmap_available": True,
         "nmap_cmd": " ".join(cmd),
         "target": target,
+        "targets_scanned": targets_to_scan,
     }
 
     try:
