@@ -650,11 +650,24 @@ export default function Findings({ findings, users, groups }) {
                     <Link className="finding-title-link" to={`/findings/${finding.id}`} style={{ fontWeight: 600, color: "#38bdf8", textDecoration: "none" }}>
                       {finding.title}
                     </Link>
-                    {finding.port && (
-                      <p style={{ margin: "2px 0 0 0", fontSize: "0.75rem", color: "#64748b", fontFamily: "monospace" }}>
-                        {finding.port}/{finding.protocol || "tcp"}
-                      </p>
-                    )}
+                    <div style={{ display: "flex", gap: "6px", alignItems: "center", marginTop: "4px", flexWrap: "wrap" }}>
+                      {finding.port > 0 && (
+                        <span style={{ fontSize: "0.72rem", color: "#94a3b8", fontFamily: "monospace" }}>
+                          {finding.port}/{finding.protocol || "tcp"}
+                        </span>
+                      )}
+                      <span style={{
+                        fontSize: "0.7rem",
+                        fontWeight: 700,
+                        padding: "1px 7px",
+                        borderRadius: "4px",
+                        background: (finding.source || "").includes("nmap+socket") ? "#065f4622" : (finding.source || "").includes("nmap") ? "#0284c722" : "#3b82f622",
+                        color: (finding.source || "").includes("nmap+socket") ? "#34d399" : (finding.source || "").includes("nmap") ? "#38bdf8" : "#60a5fa",
+                        border: `1px solid ${(finding.source || "").includes("nmap+socket") ? "#05966944" : "#0284c744"}`,
+                      }}>
+                        {finding.source === "nmap+socket" ? "⚡ Dual-Engine (Nmap + Socket)" : finding.source === "nmap" ? "🔍 Nmap Engine" : finding.source === "socket" ? "🔌 Socket Scanner" : finding.source === "zap" ? "🌐 ZAP Web Engine" : finding.source === "mobsf" ? "📱 MobSF Mobile Engine" : (finding.source || "Scanner Engine").toUpperCase()}
+                      </span>
+                    </div>
                   </td>
 
                   {/* Details */}

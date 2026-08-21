@@ -45,10 +45,10 @@ const statusColor = (s) => {
 };
 
 const toolLabel = (tool) => {
-  if (tool === "zap")     return { label: "ZAP",    tab: "zap"    };
-  if (tool === "openvas") return { label: "Nmap",   tab: "openvas" };
-  if (tool === "mobsf")   return { label: "MobSF",  tab: "mobsf"  };
-  return                         { label: "Scan",   tab: "all"    };
+  if (tool === "zap" || tool === "web")     return { label: "ZAP Web Engine",    tab: "zap"    };
+  if (tool === "openvas" || tool === "nmap" || tool === "network") return { label: "Dual-Engine (Nmap + Socket)", tab: "openvas" };
+  if (tool === "mobsf" || tool === "mobile")   return { label: "MobSF Mobile",  tab: "mobsf"  };
+  return { label: "Scan", tab: "all" };
 };
 
 const progressLabel = (scan) => {
