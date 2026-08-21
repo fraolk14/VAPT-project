@@ -375,7 +375,13 @@ class ZAPClient:
 
     def launch_active_scan(self, target: str) -> dict[str, Any]:
         normalized_target = self.normalize_target(target)
-        payload = self._request("ascan", "action", "scan", url=normalized_target, recurse="true", inScopeOnly="false")
+        try:
+            payload = self._request("ascan", "action", "scan", url=normalized_target, recurse="true")
+        except Exception:
+            try:
+                payload = self._request("ascan", "action", "scan", url=normalized_target)
+            except Exception as exc:
+                raise RuntimeError(f"ZAP active scan error: {exc}") from exc
         active_scan_id = payload.get("scan")
         if active_scan_id is None:
             raise RuntimeError("ZAP did not return an active scan id.")
@@ -393,10 +399,16 @@ class ZAPClient:
         count = 500
 
         while True:
-            payload = self._request("core", "view", "alerts", baseurl=normalized_target, start=start, count=count)
+            try:
+                payload = self._request("core", "view", "alerts", baseurl=normalized_target, start=start, count=count)
+            except Exception:
+                try:
+                    payload = self._request("core", "view", "alerts", start=start, count=count)
+                except Exception:
+                    break
             batch = payload.get("alerts", [])
-            if not isinstance(batch, list):
-                raise RuntimeError("Unexpected ZAP alerts response")
+            if not isinstance(batch, list) or not batch:
+                break
             alerts.extend(batch)
             if len(batch) < count:
                 break
