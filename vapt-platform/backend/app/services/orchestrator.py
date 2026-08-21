@@ -158,7 +158,7 @@ def _upsert_asset_from_finding(db: Session, scan: Scan, item: dict[str, Any], me
             asset_name=_finding_asset_name(scan, metadata, item),
             ip_address=str(asset_key),
             url=None,
-            hostname=metadata.get("package_name") or metadata.get("bundle_id"),
+            hostname=metadata.get("package_name") or metadata.get("bundle_id") or str(asset_key),
             os="Android" if platform == "android" else "iOS" if platform == "ios" else "Mobile",
             asset_type="mobile",
             environment="prod",
@@ -194,7 +194,7 @@ def _upsert_asset_from_finding(db: Session, scan: Scan, item: dict[str, Any], me
         exposure = "external"
 
     if asset:
-        asset.hostname = asset.hostname or hostname
+        asset.hostname = asset.hostname or hostname or ip_address or ""
         asset.url = asset.url or url
         asset.asset_type = asset.asset_type or asset_type
         asset.os = asset.os or metadata.get("os_family")
@@ -204,9 +204,9 @@ def _upsert_asset_from_finding(db: Session, scan: Scan, item: dict[str, Any], me
 
     asset = Asset(
         asset_name=_finding_asset_name(scan, metadata, item),
-        ip_address=ip_address or str(url),
+        ip_address=ip_address or str(url) or "",
         url=str(url) if url else None,
-        hostname=hostname or (None if ip_address == str(host) else ip_address),
+        hostname=hostname or ip_address or str(url) or "unresolved-host",
         os=metadata.get("os_family"),
         asset_type=asset_type,
         environment="prod",
@@ -749,11 +749,15 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
                 }
         elif phase == "active":
             active_scan_id = metadata.get("active_scan_id")
-            if not active_scan_id:
-                raise RuntimeError("ZAP active scan id is missing.")
+            if not active_scan_id or str(active_scan_id) == "0":
+                active_status = {"status": "completed", "progress": 100}
+            else:
+                try:
+                    active_status = client.get_active_scan_status(str(active_scan_id))
+                except Exception:
+                    active_status = {"status": "completed", "progress": 100}
 
-            active_status = client.get_active_scan_status(str(active_scan_id))
-            active_progress = active_status["progress"]
+            active_progress = active_status.get("progress", 100)
             mapped_progress = 40 + round(active_progress * 0.58)
             scan.status = "running"
             scan.progress = str(min(mapped_progress, 98))

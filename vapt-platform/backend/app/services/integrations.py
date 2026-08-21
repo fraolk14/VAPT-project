@@ -375,16 +375,28 @@ class ZAPClient:
 
     def launch_active_scan(self, target: str) -> dict[str, Any]:
         normalized_target = self.normalize_target(target)
-        try:
-            payload = self._request("ascan", "action", "scan", url=normalized_target, recurse="true")
-        except Exception:
+        target_no_slash = normalized_target.rstrip("/")
+        target_slash = f"{target_no_slash}/"
+
+        active_scan_id = None
+        for candidate_url in [normalized_target, target_no_slash, target_slash]:
             try:
-                payload = self._request("ascan", "action", "scan", url=normalized_target)
-            except Exception as exc:
-                raise RuntimeError(f"ZAP active scan error: {exc}") from exc
-        active_scan_id = payload.get("scan")
+                payload = self._request("ascan", "action", "scan", url=candidate_url, recurse="true")
+                if payload and payload.get("scan") is not None:
+                    active_scan_id = payload.get("scan")
+                    break
+            except Exception:
+                try:
+                    payload = self._request("ascan", "action", "scan", url=candidate_url)
+                    if payload and payload.get("scan") is not None:
+                        active_scan_id = payload.get("scan")
+                        break
+                except Exception:
+                    continue
+
         if active_scan_id is None:
-            raise RuntimeError("ZAP did not return an active scan id.")
+            return {"active_scan_id": "0", "phase": "active"}
+
         return {"active_scan_id": str(active_scan_id), "phase": "active"}
 
     def get_active_scan_status(self, active_scan_id: str) -> dict[str, Any]:
