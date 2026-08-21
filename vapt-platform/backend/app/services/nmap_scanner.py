@@ -461,6 +461,8 @@ def run_nmap_scan(
         "-sV",           # service version detection
         "-Pn",           # skip host discovery ping (treat targets as up)
         f"-{timing}",    # timing template (T4 = aggressive)
+        "--host-timeout", "180s",     # cap per-host analysis to 3 minutes max
+        "--max-rtt-timeout", "300ms",  # fast probe timeouts
         "--script", NSE_SCRIPTS,
         "-p", ports,
         "-oX", "-",      # XML output to stdout
@@ -482,7 +484,7 @@ def run_nmap_scan(
             cmd,
             capture_output=True,
             text=True,
-            timeout=600,   # 10-minute hard ceiling
+            timeout=300,   # 5-minute hard ceiling for entire Nmap run
         )
         metadata["nmap_returncode"] = result.returncode
         metadata["nmap_stderr"] = result.stderr[:500] if result.stderr else ""
