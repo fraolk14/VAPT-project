@@ -87,19 +87,13 @@ function resolveHost(finding) {
   const details = finding.target_details || {};
   if (finding.asset_name && finding.asset_name !== "n/a") return finding.asset_name;
   if (details.hostname && details.hostname !== "n/a") return details.hostname;
-  if (details.url && details.url !== "n/a" && !details.url.includes("192.168.") && !details.url.includes("127.0.0.1")) {
-    try {
-      const p = new URL(details.url.startsWith("http") ? details.url : `https://${details.url}`);
-      if (p.hostname) return p.hostname;
-    } catch {}
-  }
-  if (finding.target && finding.target !== "n/a" && !finding.target.includes("192.168.") && !finding.target.includes("127.0.0.1")) return finding.target;
+  if (finding.target && finding.target !== "n/a") return finding.target;
   if (meta.host && meta.host !== "n/a") return meta.host;
   if (details.host && details.host !== "n/a") return details.host;
   if (details.ip_address && details.ip_address !== "n/a") return details.ip_address;
   if (meta.ip_address && meta.ip_address !== "n/a") return meta.ip_address;
   if (meta.hostname && meta.hostname !== "n/a") return meta.hostname;
-  return finding.target || "n/a";
+  return "n/a";
 }
 
 function targetLabel(finding) {
@@ -132,16 +126,8 @@ function targetSummary(finding) {
   }
 
   if (IS_WEB_SOURCE(src, cat)) {
-    let primaryHost = finding.asset_name || details.hostname;
-    if (!primaryHost || primaryHost === "n/a" || primaryHost.startsWith("192.168.") || primaryHost.startsWith("127.0.0.1")) {
-      if (details.url && !details.url.includes("192.168.") && !details.url.includes("127.0.0.1")) {
-        try { primaryHost = new URL(details.url.startsWith("http") ? details.url : `https://${details.url}`).hostname; } catch {}
-      }
-    }
-    if (!primaryHost || primaryHost === "n/a" || primaryHost.startsWith("192.168.")) {
-      primaryHost = host;
-    }
-    const secondaryUrl = meta.url || details.url || (primaryHost.startsWith("http") ? primaryHost : `https://${primaryHost}`);
+    const primaryHost = finding.asset_name || details.hostname || host;
+    const secondaryUrl = details.url || meta.url || (primaryHost.startsWith("http") ? primaryHost : `https://${primaryHost}`);
     try {
       const parsed = new URL(secondaryUrl.startsWith("http") ? secondaryUrl : `https://${secondaryUrl}`);
       return {

@@ -389,8 +389,19 @@ def ensure_runtime_schema() -> None:
         "CREATE INDEX IF NOT EXISTS ix_software_allowlist_name ON software_allowlist (name)",
         "CREATE INDEX IF NOT EXISTS ix_vulnerabilities_title ON vulnerabilities (title)",
         "CREATE INDEX IF NOT EXISTS ix_vulnerabilities_severity ON vulnerabilities (severity)",
-        "UPDATE assets SET asset_name = 'www.ipcomtechnologies.com', hostname = 'www.ipcomtechnologies.com', url = 'https://www.ipcomtechnologies.com/' WHERE (hostname LIKE '%juice-shop%' OR url LIKE '%juice-shop%' OR asset_name LIKE '%juice-shop%' OR hostname LIKE '%192.168.10.25%' OR url LIKE '%192.168.10.25%') AND id IN (SELECT f.asset_id FROM findings f JOIN scans s ON f.scan_id = s.id WHERE s.target LIKE '%ipcomtechnologies%' AND f.asset_id IS NOT NULL)",
-        "UPDATE findings SET asset_id = (SELECT id FROM assets WHERE (hostname LIKE '%ipcomtechnologies%' OR url LIKE '%ipcomtechnologies%' OR asset_name LIKE '%ipcomtechnologies%') ORDER BY created_at DESC LIMIT 1) WHERE scan_id IN (SELECT id FROM scans WHERE target LIKE '%ipcomtechnologies%')",
+        "UPDATE assets SET asset_name = hostname WHERE (asset_name IS NULL OR asset_name = '') AND hostname IS NOT NULL",
+        """
+        UPDATE findings f
+        SET asset_id = a.id
+        FROM scans s
+        JOIN assets a ON (
+            a.hostname = CASE WHEN position('://' in s.target) > 0 THEN split_part(split_part(s.target, '://', 2), '/', 1) ELSE split_part(s.target, '/', 1) END
+            OR a.url = s.target
+            OR a.asset_name = CASE WHEN position('://' in s.target) > 0 THEN split_part(split_part(s.target, '://', 2), '/', 1) ELSE split_part(s.target, '/', 1) END
+            OR a.ip_address = CASE WHEN position('://' in s.target) > 0 THEN split_part(split_part(s.target, '://', 2), '/', 1) ELSE split_part(s.target, '/', 1) END
+        )
+        WHERE f.scan_id = s.id AND f.asset_id IS NULL
+        """,
     ]
     with engine.begin() as connection:
         for statement in statements:
