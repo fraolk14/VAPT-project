@@ -65,3 +65,7 @@ class FalsePositiveRuleOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class BatchDeleteRequest(BaseModel):
+    finding_ids: list[str]

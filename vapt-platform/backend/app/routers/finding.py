@@ -10,7 +10,7 @@ from app.database import get_db
 from app.models.finding import AuditLog, FalsePositiveRule, Finding
 from app.models.scan import Scan
 from app.models.user import User
-from app.schemas.finding import FalsePositiveRuleOut, FindingOut, FindingUpdate
+from app.schemas.finding import BatchDeleteRequest, FalsePositiveRuleOut, FindingOut, FindingUpdate
 from app.schemas.scan import ScanResponse
 from app.services.alerts import queue_alert_events
 from app.services.mail import send_finding_assignment_email
@@ -325,6 +325,35 @@ def delete_finding(
     )
     db.commit()
     return {"message": "Finding deleted successfully", "id": finding_id}
+
+
+@router.post("/batch-delete", status_code=200)
+def batch_delete_findings(
+    payload: BatchDeleteRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    enforce_roles(current_user, "admin", "analyst")
+    if not payload.finding_ids:
+        return {"deleted_count": 0}
+
+    findings = db.query(Finding).filter(Finding.id.in_(payload.finding_ids)).all()
+    deleted_count = 0
+    for finding in findings:
+        db.delete(finding)
+        deleted_count += 1
+
+    db.add(
+        AuditLog(
+            actor=current_user.username,
+            action="finding.batch_delete",
+            resource_type="finding",
+            resource_id="batch",
+            details={"count": deleted_count, "ids": payload.finding_ids[:50]},
+        )
+    )
+    db.commit()
+    return {"deleted_count": deleted_count, "message": f"Successfully deleted {deleted_count} findings"}
 
 
 @router.get("/false-positive-rules", response_model=list[FalsePositiveRuleOut])

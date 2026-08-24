@@ -20,8 +20,9 @@ const TAB_SOURCE_MAP = {
 };
 
 const DEFAULT_COLUMN_WIDTHS = {
-  date: 130,
-  severity: 95,
+  select: 45,
+  date: 110,
+  severity: 110,
   title: 220,
   details: 280,
   target: 200,
@@ -35,6 +36,7 @@ const DEFAULT_COLUMN_WIDTHS = {
 };
 
 const COLUMN_DEFS = [
+  { key: "select", label: "", sortable: false },
   { key: "date", label: "Date", sortable: true },
   { key: "severity", label: "Severity", sortable: true },
   { key: "title", label: "Title", sortable: true },
@@ -257,6 +259,7 @@ export default function Findings({ findings, users, groups }) {
   const [expandedRecommendations, setExpandedRecommendations] = useState({});
   const [expandedDetails, setExpandedDetails] = useState({});
   const [columnWidths, setColumnWidths] = useState(DEFAULT_COLUMN_WIDTHS);
+  const [selectedIds, setSelectedIds] = useState(new Set());
   
   const [queryText, setQueryText] = useState(queryParam);
 
@@ -391,8 +394,55 @@ export default function Findings({ findings, users, groups }) {
     try {
       await api.delete(`/findings/${findingId}`);
       setLocalFindings((current) => current.filter((item) => item.id !== findingId));
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(findingId);
+        return next;
+      });
     } catch (error) {
       console.error("Failed to delete finding:", error);
+    }
+  };
+
+  const toggleSelectOne = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    const visibleIds = (visibleFindings || []).map((f) => f.id);
+    const allVisSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
+
+    if (allVisSelected) {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        visibleIds.forEach((id) => next.delete(id));
+        return next;
+      });
+    } else {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        visibleIds.forEach((id) => next.add(id));
+        return next;
+      });
+    }
+  };
+
+  const handleBatchDelete = async () => {
+    if (selectedIds.size === 0) return;
+    if (!window.confirm(`Are you sure you want to delete ${selectedIds.size} selected finding(s)?`)) return;
+
+    const idsToDelete = Array.from(selectedIds);
+    try {
+      await api.post("/findings/batch-delete", { finding_ids: idsToDelete });
+      setLocalFindings((current) => current.filter((item) => !selectedIds.has(item.id)));
+      setSelectedIds(new Set());
+    } catch (error) {
+      console.error("Failed to delete selected findings:", error);
     }
   };
 
@@ -455,22 +505,39 @@ export default function Findings({ findings, users, groups }) {
     window.addEventListener("mouseup", onUp);
   };
 
-  const renderHeaderCell = (column, index) => (
-    <th key={column.key} className="findings-table-layout__header-cell">
-      <div className="findings-table-layout__header-inner">
-        {column.sortable ? renderSortHeader(column.label, column.key) : <span className="findings-table-layout__header-label">{column.label}</span>}
-        {index < COLUMN_DEFS.length - 1 ? (
-          <span
-            className="findings-table-layout__resize-handle"
-            onMouseDown={(event) => startResize(column.key, event)}
-            role="separator"
-            aria-orientation="vertical"
-            aria-label={`Resize ${column.label} column`}
+  const renderHeaderCell = (column, index) => {
+    if (column.key === "select") {
+      const visIds = (visibleFindings || []).map((f) => f.id);
+      const allVisSelected = visIds.length > 0 && visIds.every((id) => selectedIds.has(id));
+      return (
+        <th key={column.key} className="findings-table-layout__header-cell" style={{ textAlign: "center", padding: "8px" }}>
+          <input
+            type="checkbox"
+            checked={allVisSelected}
+            onChange={toggleSelectAll}
+            title="Select all visible findings"
+            style={{ cursor: "pointer", width: "16px", height: "16px", accentColor: "#ef4444" }}
           />
-        ) : null}
-      </div>
-    </th>
-  );
+        </th>
+      );
+    }
+    return (
+      <th key={column.key} className="findings-table-layout__header-cell">
+        <div className="findings-table-layout__header-inner">
+          {column.sortable ? renderSortHeader(column.label, column.key) : <span className="findings-table-layout__header-label">{column.label}</span>}
+          {index < COLUMN_DEFS.length - 1 ? (
+            <span
+              className="findings-table-layout__resize-handle"
+              onMouseDown={(event) => startResize(column.key, event)}
+              role="separator"
+              aria-orientation="vertical"
+              aria-label={`Resize ${column.label} column`}
+            />
+          ) : null}
+        </div>
+      </th>
+    );
+  };
 
   // Empty state copy depending on selected tab
   const getEmptyStateMessage = () => {
@@ -579,6 +646,30 @@ export default function Findings({ findings, users, groups }) {
         </div>
       </div>
 
+      {/* Batch Actions Bar when items are checked */}
+      {selectedIds.size > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: "12px", background: "#451a1a44", border: "1px solid #7f1d1daa", padding: "10px 16px", borderRadius: "8px", marginBottom: "16px" }}>
+          <span style={{ color: "#fca5a5", fontWeight: 600, fontSize: "0.9rem" }}>
+            {selectedIds.size} finding(s) selected
+          </span>
+          <button
+            type="button"
+            className="scan-action scan-action--cancel"
+            onClick={handleBatchDelete}
+            style={{ background: "#dc2626", color: "#ffffff", border: "1px solid #b91c1c", padding: "6px 14px", borderRadius: "6px", cursor: "pointer", fontWeight: 700, fontSize: "0.85rem" }}
+          >
+            🗑️ Delete Selected ({selectedIds.size})
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedIds(new Set())}
+            style={{ background: "#1e293b", color: "#94a3b8", border: "1px solid #334155", padding: "6px 12px", borderRadius: "6px", cursor: "pointer", fontSize: "0.85rem" }}
+          >
+            Deselect All
+          </button>
+        </div>
+      )}
+
       {/* Target Type Filter Tabs (All / Network / Web / Mobile) */}
       <div className="subtabs" style={{ display: "flex", gap: "8px", borderBottom: "1px solid #1e293b", paddingBottom: "12px", marginBottom: "16px" }}>
         {TAB_OPTIONS.map((tab) => {
@@ -637,13 +728,24 @@ export default function Findings({ findings, users, groups }) {
                 status: finding.status || "OPEN",
               };
               const targetSum = targetSummary(finding);
+              const isChecked = selectedIds.has(finding.id);
 
               return (
                 <tr
                   key={finding.id}
-                  className={targetParam && targetLabel(finding).toLowerCase().includes(targetParam.toLowerCase()) ? "finding-row--selected" : ""}
-                  style={{ borderBottom: "1px solid #1e293b" }}
+                  className={isChecked ? "finding-row--selected" : (targetParam && targetLabel(finding).toLowerCase().includes(targetParam.toLowerCase()) ? "finding-row--selected" : "")}
+                  style={{ borderBottom: "1px solid #1e293b", background: isChecked ? "#451a1a22" : "transparent" }}
                 >
+                  {/* Select Checkbox */}
+                  <td style={{ padding: "12px", textAlign: "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={isChecked}
+                      onChange={() => toggleSelectOne(finding.id)}
+                      style={{ cursor: "pointer", width: "16px", height: "16px", accentColor: "#ef4444" }}
+                    />
+                  </td>
+
                   {/* Date */}
                   <td data-label="Date" style={{ padding: "12px", fontSize: "0.85rem", color: "#94a3b8" }}>
                     {detectedLabel(finding)}
