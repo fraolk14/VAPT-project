@@ -181,8 +181,19 @@ function cveValues(finding) {
 }
 
 function detailsSummary(finding) {
-  const correlation = finding.finding_metadata?.correlation || {};
-  return correlation.correlation_summary || finding.evidence || finding.details || finding.remediation || "No additional detail captured.";
+  const meta = finding.finding_metadata || {};
+  const correlation = meta.correlation || {};
+  return (
+    correlation.correlation_summary ||
+    finding.evidence ||
+    meta.description ||
+    meta.evidence ||
+    meta.other ||
+    meta.solution ||
+    finding.details ||
+    finding.remediation ||
+    "No additional detail captured."
+  );
 }
 
 function findingMatchesTab(finding, tabKey) {
