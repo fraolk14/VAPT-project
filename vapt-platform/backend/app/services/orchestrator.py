@@ -311,23 +311,24 @@ def _store_findings(db: Session, scan: Scan, normalized_findings: list[dict[str,
                 if _finding_deduplication_key(candidate, asset_key=asset_key) == _finding_deduplication_key(item, asset_key=asset_key):
                     existing = candidate
                     break
-        elif item.get("title"):
-            existing = (
+        else:
+            candidates = (
                 db.query(Finding)
                 .filter(
+                    Finding.scan_id == scan.id,
                     Finding.title == item["title"],
                     Finding.port == item["port"],
-                    Finding.protocol == item["protocol"],
                     Finding.status == "open",
                 )
                 .order_by(Finding.last_seen.desc())
-                .first()
+                .all()
             )
+            if candidates:
+                existing = candidates[0]
 
         if existing:
-            # Same open finding seen again on a rescan: update it in place
-            # instead of creating a duplicate row. last_seen updates itself
-            # (the column has onupdate=func.now()).
+            # Update matching finding in place
+            existing.asset_id = asset.id if asset else existing.asset_id
             existing.scan_id = scan.id
             existing.status = status
             existing.service = item.get("service")

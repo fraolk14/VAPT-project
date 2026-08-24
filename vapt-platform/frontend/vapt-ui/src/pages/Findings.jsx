@@ -386,6 +386,16 @@ export default function Findings({ findings, users, groups }) {
     }
   };
 
+  const deleteFinding = async (findingId) => {
+    if (!window.confirm("Are you sure you want to delete this finding?")) return;
+    try {
+      await api.delete(`/findings/${findingId}`);
+      setLocalFindings((current) => current.filter((item) => item.id !== findingId));
+    } catch (error) {
+      console.error("Failed to delete finding:", error);
+    }
+  };
+
   const toggleSort = (key) => {
     setSortState((current) => (
       current.key === key
@@ -766,6 +776,15 @@ export default function Findings({ findings, users, groups }) {
                           style={{ background: "#451a1a", color: "#fca5a5", border: "1px solid #7f1d1d", padding: "2px 8px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem" }}
                         >
                           False Positive
+                        </button>
+                        <button
+                          type="button"
+                          className="scan-action scan-action--delete"
+                          onClick={() => deleteFinding(finding.id)}
+                          style={{ background: "#7f1d1d22", color: "#f87171", border: "1px solid #7f1d1d66", padding: "2px 8px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem" }}
+                          title="Delete finding"
+                        >
+                          Delete
                         </button>
                       </div>
                     </div>

@@ -302,6 +302,31 @@ def update_finding(
     return FindingOut.model_validate(_serialize_finding(finding, scan_finished_at, asset))
 
 
+@router.delete("/{finding_id}", status_code=200)
+def delete_finding(
+    finding_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    enforce_roles(current_user, "admin", "analyst")
+    finding = db.get(Finding, finding_id)
+    if not finding:
+        raise HTTPException(status_code=404, detail="Finding not found")
+
+    db.delete(finding)
+    db.add(
+        AuditLog(
+            actor=current_user.username,
+            action="finding.delete",
+            resource_type="finding",
+            resource_id=finding_id,
+            details={"title": finding.title},
+        )
+    )
+    db.commit()
+    return {"message": "Finding deleted successfully", "id": finding_id}
+
+
 @router.get("/false-positive-rules", response_model=list[FalsePositiveRuleOut])
 def list_false_positive_rules(
     db: Session = Depends(get_db),
