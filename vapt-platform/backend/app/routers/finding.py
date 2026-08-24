@@ -22,15 +22,23 @@ router = APIRouter(prefix="/findings", tags=["Findings"])
 SEVERITY_SORT = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
 
 
-def _finding_target(finding: Finding) -> str:
+def _finding_target(finding: Finding, asset: Asset | None = None) -> str:
+    if asset:
+        if asset.hostname and asset.hostname != "unresolved-host" and not asset.hostname.startswith("192.168."):
+            return asset.hostname
+        if asset.asset_name and not asset.asset_name.startswith("192.168."):
+            return asset.asset_name
+        if asset.url and not asset.url.startswith("http://192.168."):
+            return asset.url
+
     metadata = finding.finding_metadata or {}
-    if finding.source in {"zap", "web", "web-scan", "web-db"} or finding.category == "web":
-        return metadata.get("url") or metadata.get("host") or ""
-    if finding.category == "network" or finding.source in {"openvas", "network-db", "nmap", "socket", "nmap+socket", "network", "host"}:
-        return metadata.get("host") or metadata.get("ip_address") or ""
     if finding.source in {"mobsf", "mobile"} or finding.category == "mobile":
         return metadata.get("file") or metadata.get("package_name") or metadata.get("stored_file_name") or ""
-    return metadata.get("host") or metadata.get("url") or metadata.get("ip_address") or ""
+
+    if metadata.get("host") and not str(metadata["host"]).startswith("192.168."):
+        return str(metadata["host"])
+
+    return metadata.get("url") or metadata.get("host") or metadata.get("ip_address") or (asset.asset_name if asset else "")
 
 
 def _display_identifier(payload: dict) -> str | None:
@@ -64,9 +72,9 @@ def _target_details(finding: Finding, asset: Asset | None = None) -> dict:
         "asset_name": asset.asset_name if asset else None,
         "asset_type": asset.asset_type if asset else None,
         "asset_os": asset.os if asset else None,
-        "hostname": metadata.get("hostname") or (asset.hostname if asset else None),
-        "host": metadata.get("host") or metadata.get("ip_address") or (asset.ip_address if asset else None),
-        "url": metadata.get("url") or metadata.get("affected_url") or (asset.url if asset else None),
+        "hostname": (asset.hostname if asset and asset.hostname != "unresolved-host" else None) or metadata.get("hostname"),
+        "host": (asset.ip_address if asset else None) or metadata.get("host") or metadata.get("ip_address"),
+        "url": (asset.url if asset else None) or metadata.get("url") or metadata.get("affected_url"),
         "service": finding.service,
         "port": finding.port,
         "protocol": finding.protocol,
@@ -88,7 +96,7 @@ def _serialize_finding(finding: Finding, scan_finished_at, asset: Asset | None =
     elif finding.verification_state == "scheduled" and normalized_status == "open":
         normalized_status = "in_progress"
 
-    target_val = _finding_target(finding) or (asset.ip_address if asset else None) or (asset.url if asset else None) or (asset.hostname if asset else None)
+    target_val = _finding_target(finding, asset) or (asset.asset_name if asset else None) or (asset.hostname if asset else None)
 
     payload = {
         **finding.__dict__,
@@ -97,7 +105,7 @@ def _serialize_finding(finding: Finding, scan_finished_at, asset: Asset | None =
         "scan_finished_at": scan_finished_at,
         "duplicate_count": 1,
         "group_key": str(finding.id),
-        "asset_name": asset.asset_name if asset else None,
+        "asset_name": asset.asset_name if asset else (asset.hostname if asset else None),
         "resolved_by": triage.get("resolved_by") or finding.assigned_to,
         "target_details": _target_details(finding, asset),
     }

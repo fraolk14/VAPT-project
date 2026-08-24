@@ -85,15 +85,21 @@ const IS_MOBILE_SOURCE = (src, cat) =>
 function resolveHost(finding) {
   const meta = finding.finding_metadata || {};
   const details = finding.target_details || {};
-  if (finding.target && finding.target !== "n/a") return finding.target;
+  if (finding.asset_name && finding.asset_name !== "n/a") return finding.asset_name;
+  if (details.hostname && details.hostname !== "n/a") return details.hostname;
+  if (details.url && details.url !== "n/a" && !details.url.includes("192.168.") && !details.url.includes("127.0.0.1")) {
+    try {
+      const p = new URL(details.url.startsWith("http") ? details.url : `https://${details.url}`);
+      if (p.hostname) return p.hostname;
+    } catch {}
+  }
+  if (finding.target && finding.target !== "n/a" && !finding.target.includes("192.168.") && !finding.target.includes("127.0.0.1")) return finding.target;
   if (meta.host && meta.host !== "n/a") return meta.host;
   if (details.host && details.host !== "n/a") return details.host;
-  if (meta.ip_address && meta.ip_address !== "n/a") return meta.ip_address;
   if (details.ip_address && details.ip_address !== "n/a") return details.ip_address;
+  if (meta.ip_address && meta.ip_address !== "n/a") return meta.ip_address;
   if (meta.hostname && meta.hostname !== "n/a") return meta.hostname;
-  if (details.hostname && details.hostname !== "n/a") return details.hostname;
-  if (finding.asset_name && finding.asset_name !== "n/a") return finding.asset_name;
-  return "n/a";
+  return finding.target || "n/a";
 }
 
 function targetLabel(finding) {
@@ -103,7 +109,7 @@ function targetLabel(finding) {
   const details = finding.target_details || {};
 
   if (IS_ENDPOINT_SOURCE(src, cat)) return meta.ip_address || resolveHost(finding);
-  if (IS_WEB_SOURCE(src, cat)) return meta.url || details.url || meta.host || resolveHost(finding);
+  if (IS_WEB_SOURCE(src, cat)) return finding.asset_name || details.hostname || resolveHost(finding);
   if (IS_NETWORK_SOURCE(src, cat)) return resolveHost(finding);
   if (IS_MOBILE_SOURCE(src, cat)) return meta.file || meta.package_name || meta.stored_file_name || resolveHost(finding);
   return resolveHost(finding);
@@ -117,24 +123,33 @@ function targetSummary(finding) {
   const host = resolveHost(finding);
 
   if (IS_ENDPOINT_SOURCE(src, cat)) {
-    const ip = meta.ip_address || details.ip_address || host;
-    const hostname = meta.hostname || details.hostname;
+    const ip = details.ip_address || meta.ip_address || host;
+    const hostname = details.hostname || meta.hostname;
     return {
-      primary: ip,
+      primary: hostname || ip,
       secondary: hostname ? `Host: ${hostname}` : "VAP Agent Device",
     };
   }
 
   if (IS_WEB_SOURCE(src, cat)) {
-    const rawUrl = meta.url || details.url || meta.host || host;
+    let primaryHost = finding.asset_name || details.hostname;
+    if (!primaryHost || primaryHost === "n/a" || primaryHost.startsWith("192.168.") || primaryHost.startsWith("127.0.0.1")) {
+      if (details.url && !details.url.includes("192.168.") && !details.url.includes("127.0.0.1")) {
+        try { primaryHost = new URL(details.url.startsWith("http") ? details.url : `https://${details.url}`).hostname; } catch {}
+      }
+    }
+    if (!primaryHost || primaryHost === "n/a" || primaryHost.startsWith("192.168.")) {
+      primaryHost = host;
+    }
+    const secondaryUrl = meta.url || details.url || (primaryHost.startsWith("http") ? primaryHost : `https://${primaryHost}`);
     try {
-      const parsed = new URL(rawUrl.startsWith("http") ? rawUrl : `http://${rawUrl}`);
+      const parsed = new URL(secondaryUrl.startsWith("http") ? secondaryUrl : `https://${secondaryUrl}`);
       return {
-        primary: parsed.hostname || rawUrl || "n/a",
+        primary: primaryHost || parsed.hostname || "n/a",
         secondary: `${parsed.protocol}//${parsed.host}${parsed.pathname || "/"}`,
       };
     } catch {
-      return { primary: rawUrl || "n/a", secondary: "Web target" };
+      return { primary: primaryHost || "n/a", secondary: "Web target" };
     }
   }
 
