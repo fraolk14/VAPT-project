@@ -311,20 +311,43 @@ def delete_finding(
     enforce_roles(current_user, "admin", "analyst")
     finding = db.get(Finding, finding_id)
     if not finding:
-        raise HTTPException(status_code=404, detail="Finding not found")
+        return {"message": "Finding already deleted", "id": finding_id}
 
-    db.delete(finding)
+    target_title = finding.title.strip() if finding.title else ""
+    cve_id = finding.cve_id
+    source = finding.source
+
+    # Register suppression rule to prevent background scanner pollers from restoring deleted finding
+    if target_title:
+        existing_rule = db.query(FalsePositiveRule).filter(FalsePositiveRule.title_pattern == target_title).first()
+        if not existing_rule:
+            db.add(
+                FalsePositiveRule(
+                    title_pattern=target_title,
+                    cve_id=cve_id,
+                    source=source,
+                    reason=f"Permanently deleted by user {current_user.username}",
+                    enabled=True,
+                )
+            )
+
+    # Permanently delete target finding and all duplicate rows for this title from PostgreSQL DB
+    matches = db.query(Finding).filter(Finding.title.ilike(target_title)).all() if target_title else [finding]
+    deleted_count = len(matches)
+    for m in matches:
+        db.delete(m)
+
     db.add(
         AuditLog(
             actor=current_user.username,
             action="finding.delete",
             resource_type="finding",
             resource_id=finding_id,
-            details={"title": finding.title},
+            details={"title": target_title, "deleted_count": deleted_count},
         )
     )
     db.commit()
-    return {"message": "Finding deleted successfully", "id": finding_id}
+    return {"message": f"Permanently deleted {deleted_count} finding record(s) from database", "id": finding_id}
 
 
 @router.post("/batch-delete", status_code=200)
@@ -337,11 +360,34 @@ def batch_delete_findings(
     if not payload.finding_ids:
         return {"deleted_count": 0}
 
-    findings = db.query(Finding).filter(Finding.id.in_(payload.finding_ids)).all()
-    deleted_count = 0
-    for finding in findings:
-        db.delete(finding)
-        deleted_count += 1
+    target_findings = db.query(Finding).filter(Finding.id.in_(payload.finding_ids)).all()
+    total_deleted = 0
+
+    for finding in target_findings:
+        target_title = finding.title.strip() if finding.title else ""
+        if not target_title:
+            db.delete(finding)
+            total_deleted += 1
+            continue
+
+        # Register suppression rule to prevent background scanner pollers from restoring deleted finding
+        existing_rule = db.query(FalsePositiveRule).filter(FalsePositiveRule.title_pattern == target_title).first()
+        if not existing_rule:
+            db.add(
+                FalsePositiveRule(
+                    title_pattern=target_title,
+                    cve_id=finding.cve_id,
+                    source=finding.source,
+                    reason=f"Permanently deleted by user {current_user.username}",
+                    enabled=True,
+                )
+            )
+
+        # Permanently delete all duplicate rows for this title from PostgreSQL DB
+        matches = db.query(Finding).filter(Finding.title.ilike(target_title)).all()
+        for m in matches:
+            db.delete(m)
+            total_deleted += 1
 
     db.add(
         AuditLog(
@@ -349,11 +395,11 @@ def batch_delete_findings(
             action="finding.batch_delete",
             resource_type="finding",
             resource_id="batch",
-            details={"count": deleted_count, "ids": payload.finding_ids[:50]},
+            details={"deleted_count": total_deleted, "ids": payload.finding_ids[:50]},
         )
     )
     db.commit()
-    return {"deleted_count": deleted_count, "message": f"Successfully deleted {deleted_count} findings"}
+    return {"deleted_count": total_deleted, "message": f"Permanently deleted {total_deleted} finding record(s) from database"}
 
 
 @router.get("/false-positive-rules", response_model=list[FalsePositiveRuleOut])
