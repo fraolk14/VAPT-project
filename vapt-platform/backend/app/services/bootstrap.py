@@ -389,8 +389,11 @@ def ensure_runtime_schema() -> None:
         "CREATE INDEX IF NOT EXISTS ix_software_allowlist_name ON software_allowlist (name)",
         "CREATE INDEX IF NOT EXISTS ix_vulnerabilities_title ON vulnerabilities (title)",
         "CREATE INDEX IF NOT EXISTS ix_vulnerabilities_severity ON vulnerabilities (severity)",
-        "UPDATE assets SET asset_name = 'www.ipcomtechnologies.com', hostname = 'www.ipcomtechnologies.com', url = 'https://www.ipcomtechnologies.com/' WHERE (hostname LIKE '%juice-shop%' OR url LIKE '%juice-shop%' OR asset_name LIKE '%juice-shop%') AND id IN (SELECT f.asset_id FROM findings f JOIN scan_job s ON f.scan_id = s.id WHERE s.target LIKE '%ipcomtechnologies%' AND f.asset_id IS NOT NULL)",
+        "UPDATE assets SET asset_name = 'www.ipcomtechnologies.com', hostname = 'www.ipcomtechnologies.com', url = 'https://www.ipcomtechnologies.com/' WHERE (hostname LIKE '%juice-shop%' OR url LIKE '%juice-shop%' OR asset_name LIKE '%juice-shop%') AND id IN (SELECT f.asset_id FROM findings f JOIN scans s ON f.scan_id = s.id WHERE s.target LIKE '%ipcomtechnologies%' AND f.asset_id IS NOT NULL)",
     ]
     with engine.begin() as connection:
         for statement in statements:
-            connection.execute(text(statement))
+            try:
+                connection.execute(text(statement))
+            except Exception as exc:
+                print(f"[Schema Bootstrap Warning] Skipping statement execution: {exc}")
