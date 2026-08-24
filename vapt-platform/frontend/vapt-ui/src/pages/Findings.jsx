@@ -183,7 +183,16 @@ function cveValues(finding) {
 function detailsSummary(finding) {
   const meta = finding.finding_metadata || {};
   const correlation = meta.correlation || {};
-  return (
+
+  const typeParts = [];
+  if (finding.category) typeParts.push(`[${finding.category.toUpperCase()}]`);
+  if (finding.source) typeParts.push(`${finding.source.toUpperCase()}`);
+  if (finding.cve_id) typeParts.push(`(${finding.cve_id})`);
+  else if (meta.cwe_id) typeParts.push(`(CWE-${meta.cwe_id})`);
+
+  const typeHeader = typeParts.join(" ");
+
+  const explanation = (
     correlation.correlation_summary ||
     finding.evidence ||
     meta.description ||
@@ -194,6 +203,11 @@ function detailsSummary(finding) {
     finding.remediation ||
     "No additional detail captured."
   );
+
+  if (typeHeader) {
+    return `${typeHeader}: ${explanation}`;
+  }
+  return explanation;
 }
 
 function findingMatchesTab(finding, tabKey) {
