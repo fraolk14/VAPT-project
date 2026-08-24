@@ -129,16 +129,25 @@ function targetSummary(finding) {
 
   if (IS_WEB_SOURCE(src, cat)) {
     const primaryHost = finding.asset_name || details.hostname || host;
-    const secondaryUrl = details.url || meta.url || (primaryHost.startsWith("http") ? primaryHost : `https://${primaryHost}`);
+    const rawUrl = details.url || meta.url || "";
+    let formattedSecondary = "Web target";
     try {
-      const parsed = new URL(secondaryUrl.startsWith("http") ? secondaryUrl : `https://${secondaryUrl}`);
-      return {
-        primary: primaryHost || parsed.hostname || "n/a",
-        secondary: `${parsed.protocol}//${parsed.host}${parsed.pathname || "/"}`,
-      };
+      if (rawUrl && rawUrl.startsWith("http")) {
+        const parsed = new URL(rawUrl);
+        const effectiveHost = (primaryHost && primaryHost !== "n/a" && !primaryHost.includes("://")) ? primaryHost : parsed.host;
+        formattedSecondary = `${parsed.protocol}//${effectiveHost}${parsed.pathname || "/"}`;
+      } else {
+        const proto = primaryHost.startsWith("http") ? "" : "https://";
+        formattedSecondary = `${proto}${primaryHost}/`;
+      }
     } catch {
-      return { primary: primaryHost || "n/a", secondary: "Web target" };
+      formattedSecondary = primaryHost.startsWith("http") ? primaryHost : `https://${primaryHost}/`;
     }
+
+    return {
+      primary: primaryHost || "n/a",
+      secondary: formattedSecondary,
+    };
   }
 
   if (IS_NETWORK_SOURCE(src, cat) || (!IS_MOBILE_SOURCE(src, cat) && (finding.port || meta.host || details.host))) {

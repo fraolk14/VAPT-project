@@ -67,13 +67,30 @@ def _finding_details_text(finding: Finding) -> str:
 
 def _target_details(finding: Finding, asset: Asset | None = None) -> dict:
     metadata = finding.finding_metadata or {}
+    asset_host = asset.hostname if (asset and asset.hostname != "unresolved-host") else (asset.asset_name if asset else None)
+    meta_url = metadata.get("url") or metadata.get("affected_url")
+
+    final_url = None
+    if asset and asset.url:
+        final_url = asset.url
+    elif asset_host and meta_url and "://" in meta_url:
+        try:
+            parsed = urlparse(meta_url)
+            final_url = f"{parsed.scheme}://{asset_host}{parsed.pathname}"
+        except Exception:
+            final_url = f"https://{asset_host}/"
+    elif asset_host:
+        final_url = f"https://{asset_host}/"
+    else:
+        final_url = meta_url
+
     return {
         "asset_name": asset.asset_name if asset else None,
         "asset_type": asset.asset_type if asset else None,
         "asset_os": asset.os if asset else None,
-        "hostname": (asset.hostname if asset and asset.hostname != "unresolved-host" else None) or metadata.get("hostname"),
+        "hostname": asset_host or metadata.get("hostname"),
         "host": (asset.ip_address if asset else None) or metadata.get("host") or metadata.get("ip_address"),
-        "url": (asset.url if asset else None) or metadata.get("url") or metadata.get("affected_url"),
+        "url": final_url,
         "service": finding.service,
         "port": finding.port,
         "protocol": finding.protocol,
@@ -123,14 +140,20 @@ def list_findings(db: Session = Depends(get_db)):
     grouped_findings: dict[tuple, dict] = {}
     for finding, finished_at, asset in rows:
         payload = _serialize_finding(finding, finished_at, asset)
+
+        host_target = (
+            (asset.asset_name if asset else None)
+            or (asset.hostname if asset else None)
+            or (payload.get("target_details", {}).get("hostname"))
+            or _finding_target(finding, asset)
+        ).strip().lower()
+
         group_key = (
             finding.source,
             finding.title.strip().lower(),
-            (payload["display_id"] or "").lower(),
-            _finding_target(finding).strip().lower(),
-            finding.port,
+            host_target,
+            finding.port or 0,
             (finding.protocol or "").lower(),
-            (finding.severity or "info").lower(),
             (finding.status or "open").lower(),
         )
         existing = grouped_findings.get(group_key)
