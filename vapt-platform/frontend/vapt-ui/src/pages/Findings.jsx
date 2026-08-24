@@ -181,9 +181,25 @@ function cveValues(finding) {
 }
 
 function detailsSummary(finding) {
-  const correlation = finding.finding_metadata?.correlation || {};
-  return correlation.correlation_summary || finding.evidence || finding.finding_metadata?.description || finding.details || finding.remediation || "No additional detail captured.";
+  const meta = finding.finding_metadata || {};
+  const correlation = meta.correlation || {};
+
+  // Priority: correlation summary → evidence (description) → metadata description → details → remediation → fallback
+  const explanationText =
+    correlation.correlation_summary ||
+    finding.evidence ||
+    meta.description ||
+    finding.details ||
+    finding.remediation ||
+    "";
+
+  if (!explanationText || explanationText.trim() === "") {
+    return `Vulnerability type: ${finding.title || "Unknown"}. No additional detail captured.`;
+  }
+
+  return explanationText.trim();
 }
+
 
 function findingMatchesTab(finding, tabKey) {
   if (tabKey === "all") return true;
@@ -793,23 +809,31 @@ export default function Findings({ findings, users, groups }) {
                   </td>
 
                   {/* Details */}
-                  <td data-label="Details" style={{ padding: "12px", fontSize: "0.85rem", color: "#cbd5e1" }}>
-                    <div className="recommendation-cell">
-                      <span className={expandedDetails[finding.id] ? "finding-detail-copy is-expanded" : "finding-detail-copy"}>
-                        {detailsPreview(finding)}
+                  <td data-label="Details" style={{ padding: "12px", fontSize: "0.85rem", color: "#cbd5e1", maxWidth: "320px" }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                      <span style={{
+                        display: "block",
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                        overflow: expandedDetails[finding.id] ? "visible" : "hidden",
+                        maxHeight: expandedDetails[finding.id] ? "none" : "5.2em",
+                        lineHeight: "1.5",
+                        color: "#cbd5e1",
+                      }}>
+                        {detailsSummary(finding)}
                       </span>
                       {detailsSummary(finding).length > 150 && (
                         <button
                           type="button"
-                          className="recommendation-cell__toggle"
                           onClick={() => setExpandedDetails((current) => ({ ...current, [finding.id]: !current[finding.id] }))}
-                          style={{ background: "none", border: "none", color: "#38bdf8", cursor: "pointer", fontSize: "0.75rem", padding: 0, marginTop: "4px" }}
+                          style={{ background: "none", border: "none", color: "#38bdf8", cursor: "pointer", fontSize: "0.75rem", padding: 0, marginTop: "2px", textAlign: "left" }}
                         >
-                          {expandedDetails[finding.id] ? "See less" : "See more"}
+                          {expandedDetails[finding.id] ? "See less ▲" : "See more ▼"}
                         </button>
                       )}
                     </div>
                   </td>
+
 
                   {/* Target Asset Link */}
                   <td data-label="Target Asset" style={{ padding: "12px" }}>

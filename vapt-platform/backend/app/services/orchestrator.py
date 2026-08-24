@@ -298,48 +298,28 @@ def _store_findings(db: Session, scan: Scan, normalized_findings: list[dict[str,
                 break
         asset = _upsert_asset_from_finding(db, scan, item, metadata)
 
+        # Only deduplicate within the SAME scan — never overwrite findings from previous scans.
+        # This ensures every new scan produces its own independent set of findings.
         existing = None
-        if asset:
-            asset_key = asset.ip_address or asset.hostname or asset.url or asset.asset_name or str(asset.id)
-            candidates = (
-                db.query(Finding)
-                .filter(Finding.asset_id == asset.id, Finding.status == "open")
-                .order_by(Finding.last_seen.desc())
-                .all()
+        same_scan_candidates = (
+            db.query(Finding)
+            .filter(
+                Finding.scan_id == scan.id,
+                Finding.title == item["title"],
+                Finding.port == item["port"],
+                Finding.protocol == item["protocol"],
             )
-            for candidate in candidates:
-                if _finding_deduplication_key(candidate, asset_key=asset_key) == _finding_deduplication_key(item, asset_key=asset_key):
-                    existing = candidate
-                    break
-        else:
-            candidates = (
-                db.query(Finding)
-                .filter(
-                    Finding.scan_id == scan.id,
-                    Finding.title == item["title"],
-                    Finding.port == item["port"],
-                    Finding.status == "open",
-                )
-                .order_by(Finding.last_seen.desc())
-                .all()
-            )
-            if candidates:
-                existing = candidates[0]
+            .order_by(Finding.last_seen.desc())
+            .all()
+        )
+        if same_scan_candidates:
+            existing = same_scan_candidates[0]
 
         if existing:
-            # Update matching finding in place
-            existing.asset_id = asset.id if asset else existing.asset_id
-            existing.scan_id = scan.id
+            # Only update timestamp/status for an already-ingested finding in this same scan run
+            existing.last_seen = datetime.now(timezone.utc)
             existing.status = status
-            existing.service = item.get("service")
-            existing.cve_id = item.get("cve_id")
-            existing.cvss_score = item.get("cvss_score")
-            existing.severity = item.get("severity")
-            existing.confidence = item.get("confidence", 0.86)
-            existing.evidence = item.get("evidence")
-            existing.remediation = item.get("remediation")
-            existing.compliance_map = item.get("compliance_map", [])
-            existing.finding_metadata = metadata
+
         else:
             db.add(
                 Finding(
