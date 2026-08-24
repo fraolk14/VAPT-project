@@ -96,6 +96,10 @@ def _finding_asset_name(scan: Scan, metadata: dict[str, Any], item: dict[str, An
             or metadata.get("original_file_name")
             or scan.target
         )
+    if scan.tool == "zap" or scan.scan_type == "web" or item.get("category") == "web":
+        target_str = str(scan.target or "").strip()
+        parsed = urlparse(target_str if "://" in target_str else f"https://{target_str}")
+        return parsed.hostname or target_str
     if metadata.get("page_title"):
         return str(metadata["page_title"])[:80]
     if metadata.get("host"):
@@ -167,6 +171,52 @@ def _upsert_asset_from_finding(db: Session, scan: Scan, item: dict[str, Any], me
             exposure="internal",
             tags=["scan-discovered", f"mobile:{platform}"],
             business_unit="Mobile",
+            risk_score=float(item.get("cvss_score") or 0),
+        )
+        db.add(asset)
+        db.flush()
+        return asset
+
+    # For Web Scans (ZAP / direct web assessment): anchor asset to target URL
+    if scan.tool == "zap" or scan.scan_type == "web" or item.get("category") == "web":
+        target_raw = str(scan.target or "").strip()
+        if not target_raw.startswith(("http://", "https://")):
+            target_raw = f"https://{target_raw}"
+        parsed_target = urlparse(target_raw)
+        scan_host = parsed_target.hostname or target_raw
+        scan_url = f"{parsed_target.scheme}://{parsed_target.netloc}/" if parsed_target.netloc else target_raw
+
+        asset = (
+            db.query(Asset)
+            .filter(
+                (Asset.url == scan_url)
+                | (Asset.url == target_raw)
+                | (Asset.hostname == scan_host)
+                | (Asset.ip_address == scan_host)
+            )
+            .first()
+        )
+
+        if asset:
+            asset.url = asset.url or scan_url
+            asset.hostname = scan_host
+            asset.asset_name = scan_host
+            asset.risk_score = max(asset.risk_score or 0, float(item.get("cvss_score") or 0))
+            return asset
+
+        asset = Asset(
+            asset_name=scan_host,
+            ip_address=scan_host,
+            url=scan_url,
+            hostname=scan_host,
+            os=metadata.get("os_family") or "Web Application",
+            asset_type="web",
+            environment="prod",
+            criticality="high" if (item.get("severity") or "").lower() in {"critical", "high"} else "medium",
+            owner=None,
+            exposure="external",
+            tags=["scan-discovered", "web"],
+            business_unit="Web Applications",
             risk_score=float(item.get("cvss_score") or 0),
         )
         db.add(asset)
