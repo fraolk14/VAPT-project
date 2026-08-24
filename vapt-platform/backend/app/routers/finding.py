@@ -132,6 +132,7 @@ def list_findings(db: Session = Depends(get_db)):
         ).strip().lower()
 
         group_key = (
+            str(finding.scan_id),          # ← isolate each scan — findings from different targets never merge
             finding.source,
             finding.title.strip().lower(),
             host_target,
