@@ -460,6 +460,13 @@ class ZAPClient:
                 alert.get("evidence"),
             )
             cve_id = ", ".join(cve_candidates) if cve_candidates else None
+            desc = alert.get("description") or alert.get("desc") or ""
+            evidence_str = alert.get("evidence") or alert.get("otherinfo") or alert.get("other") or ""
+            if desc and evidence_str and desc != evidence_str:
+                details_text = f"{desc} | Evidence: {evidence_str}"
+            else:
+                details_text = desc or evidence_str or alert.get("solution") or "ZAP detected security vulnerability."
+
             normalized.append(
                 {
                     "title": alert.get("alert", "ZAP alert"),
@@ -472,7 +479,7 @@ class ZAPClient:
                     "cve_id": cve_id,
                     "cvss_score": normalized_score,
                     "severity": severity,
-                    "evidence": alert.get("evidence"),
+                    "evidence": details_text,
                     "remediation": alert.get("solution"),
                     "compliance_map": [tag for tag in ["OWASP Top 10", cwe_tag] if tag],
                     "confidence": confidence,
@@ -484,6 +491,7 @@ class ZAPClient:
                         "risk": alert.get("risk"),
                         "attack": alert.get("attack"),
                         "reference": alert.get("reference"),
+                        "description": desc,
                         "cwe_id": cwe_id,
                         "cve_refs": cve_candidates,
                     },
