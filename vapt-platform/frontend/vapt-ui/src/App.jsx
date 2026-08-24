@@ -229,8 +229,23 @@ function App() {
     };
   }, [authState.status]);
 
+  const extractErrorMessage = (error) => {
+    if (!error) return "Unable to sign in.";
+    const detail = error?.response?.data?.detail;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+      return detail.map((d) => (typeof d === "string" ? d : (d.msg || JSON.stringify(d)))).join(", ");
+    }
+    if (typeof detail === "object" && detail !== null) {
+      return detail.message || detail.msg || JSON.stringify(detail);
+    }
+    if (error?.response?.data?.message) return error.response.data.message;
+    if (error?.message) return error.message;
+    return "Unable to sign in. Please check connectivity or server status.";
+  };
+
   const handleLogin = async ({ username, password, otpCode, captchaToken, deviceName }) => {
-    if (!username.trim() || !password) {
+    if (!username?.trim() || !password) {
       setAuthState((current) => ({
         ...current,
         status: "anonymous",
@@ -275,10 +290,12 @@ function App() {
       navigate("/", { replace: true });
     } catch (error) {
       window.localStorage.removeItem("vapt_token");
+      const errorMsg = extractErrorMessage(error);
+      console.error("Sign in failed:", error, errorMsg);
       setAuthState({
         status: "anonymous",
         user: null,
-        error: error?.response?.data?.detail || "Unable to sign in with those credentials.",
+        error: errorMsg,
         awaitingMfa: false,
       });
     }
