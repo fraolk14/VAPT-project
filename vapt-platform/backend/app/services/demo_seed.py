@@ -23,7 +23,8 @@ def seed_demo_data(db: Session) -> None:
         db.add(default_tenant)
         db.commit()
 
-    if db.query(User).count() == 0:
+    admin = db.query(User).filter((User.username == "admin") | (User.email == "admin@vapt.local")).first()
+    if not admin:
         db.add(
             User(
                 username="admin",
@@ -35,12 +36,14 @@ def seed_demo_data(db: Session) -> None:
                 mfa_enabled=False,
             )
         )
+        db.commit()
     else:
-        admin = db.query(User).filter(User.username == "admin").first()
-        if admin and admin.mfa_enabled and not admin.mfa_secret:
-            admin.mfa_enabled = False
-        if admin and not admin.tenant_id:
-            admin.tenant_id = "default"
+        admin.password_hash = hash_password("ChangeMe123!")
+        admin.locked_until = None
+        admin.failed_login_attempts = 0
+        admin.mfa_enabled = False
+        admin.tenant_id = "default"
+        db.commit()
 
     if db.query(Asset).count() == 0:
         db.add_all(
