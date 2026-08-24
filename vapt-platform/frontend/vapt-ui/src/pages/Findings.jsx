@@ -181,33 +181,8 @@ function cveValues(finding) {
 }
 
 function detailsSummary(finding) {
-  const meta = finding.finding_metadata || {};
-  const correlation = meta.correlation || {};
-
-  const typeParts = [];
-  if (finding.category) typeParts.push(`[${finding.category.toUpperCase()}]`);
-  if (finding.source) typeParts.push(`${finding.source.toUpperCase()}`);
-  if (finding.cve_id) typeParts.push(`(${finding.cve_id})`);
-  else if (meta.cwe_id) typeParts.push(`(CWE-${meta.cwe_id})`);
-
-  const typeHeader = typeParts.join(" ");
-
-  const explanation = (
-    correlation.correlation_summary ||
-    finding.evidence ||
-    meta.description ||
-    meta.evidence ||
-    meta.other ||
-    meta.solution ||
-    finding.details ||
-    finding.remediation ||
-    "No additional detail captured."
-  );
-
-  if (typeHeader) {
-    return `${typeHeader}: ${explanation}`;
-  }
-  return explanation;
+  const correlation = finding.finding_metadata?.correlation || {};
+  return correlation.correlation_summary || finding.evidence || finding.finding_metadata?.description || finding.details || finding.remediation || "No additional detail captured.";
 }
 
 function findingMatchesTab(finding, tabKey) {

@@ -161,6 +161,10 @@ def list_findings(db: Session = Depends(get_db)):
         existing["finding_metadata"]["cve_refs"] = merged_refs
         if not existing.get("display_id") and payload.get("display_id"):
             existing["display_id"] = payload["display_id"]
+        if not existing.get("evidence") and payload.get("evidence"):
+            existing["evidence"] = payload["evidence"]
+        if not existing.get("remediation") and payload.get("remediation"):
+            existing["remediation"] = payload["remediation"]
         if (payload.get("cvss_score") or 0) > (existing.get("cvss_score") or 0):
             for key in [
                 "severity",
