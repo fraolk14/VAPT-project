@@ -69,8 +69,25 @@ def run_web_assessment(
     host = parsed.hostname or raw_target
     port = parsed.port or (443 if base_url.startswith("https") else 80)
 
-    # Build target candidates list to resolve Docker container networking (e.g. localhost -> juice-shop / dvwa / host.docker.internal)
+    # Known external → local Docker service fallback mappings.
+    # When running in Docker locally, external URLs may be unreachable.
+    # These mappings allow the scanner to use the local container instead.
+    KNOWN_DOCKER_FALLBACKS: dict[str, str] = {
+        "juice-shop.herokuapp.com": "http://juice-shop:3000",
+        "www.juice-sh.op": "http://juice-shop:3000",
+        "juice-sh.op": "http://juice-shop:3000",
+        "dvwa": "http://dvwa:80",
+        "dvwa.local": "http://dvwa:80",
+    }
+
+    # Build target candidates list to resolve Docker container networking (e.g. localhost → juice-shop / dvwa / host.docker.internal)
     target_candidates = [base_url]
+
+    # Check known external → local Docker fallback first
+    local_fallback = KNOWN_DOCKER_FALLBACKS.get(host)
+    if local_fallback:
+        target_candidates.insert(0, local_fallback)  # Try local container first
+
     if host in ["localhost", "127.0.0.1", "0.0.0.0"]:
         if port == 3000:
             target_candidates.insert(0, "http://juice-shop:3000")
