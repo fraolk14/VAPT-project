@@ -184,12 +184,13 @@ function detailsSummary(finding) {
   const meta = finding.finding_metadata || {};
   const correlation = meta.correlation || {};
 
-  // Priority: correlation summary → evidence (description) → metadata description → details → remediation → fallback
+  // Priority: Specific finding explanation & evidence → metadata description → details → correlation summary → remediation
   const explanationText =
-    correlation.correlation_summary ||
-    finding.evidence ||
     meta.description ||
+    finding.evidence ||
+    meta.details ||
     finding.details ||
+    correlation.correlation_summary ||
     finding.remediation ||
     "";
 
@@ -199,6 +200,7 @@ function detailsSummary(finding) {
 
   return explanationText.trim();
 }
+
 
 
 function findingMatchesTab(finding, tabKey) {

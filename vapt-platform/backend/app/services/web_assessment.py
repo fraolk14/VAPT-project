@@ -245,13 +245,78 @@ def run_web_assessment(
 
     _report(60, "endpoint_discovery", "Fuzzing sensitive administrative endpoints and configuration disclosures (25+ paths).")
 
-    # 7. Sensitive Endpoint Probes (Multi-Threaded Execution)
+    # Detect SPA soft-404 / catch-all routing (e.g. Juice Shop / Angular / React returning index.html for all routes)
+    soft_404_body = None
+    soft_404_len = 0
+    try:
+        probe_res = session.get(f"{base_url}/__vapt_soft_404_probe_{int(time.time())}", timeout=4, allow_redirects=False, verify=False)
+        if probe_res.status_code == 200:
+            soft_404_body = probe_res.text.strip()
+            soft_404_len = len(soft_404_body)
+    except Exception:
+        pass
+
+    root_body = (main_response.text or "").strip() if main_response else ""
+    root_len = len(root_body)
+
+    # 7. Sensitive Endpoint Probes (Multi-Threaded Execution with Content Validation)
     def _check_path(path_item: tuple[str, str, float, str, str]) -> dict[str, Any] | None:
         path, title, cvss, severity, compliance = path_item
         test_url = f"{base_url}{path}"
         try:
             res = session.get(test_url, timeout=4, allow_redirects=False, verify=False)
-            if res.status_code == 200 and len(res.text) > 5:
+            if res.status_code == 200:
+                body = res.text.strip()
+                if len(body) < 5:
+                    return None
+
+                # Filter out SPA catch-all / soft-404 responses that return the root SPA index.html
+                if soft_404_body and (body == soft_404_body or (soft_404_len > 0 and abs(len(body) - soft_404_len) < 50 and body[:100] == soft_404_body[:100])):
+                    return None
+                if root_body and (body == root_body or (root_len > 0 and abs(len(body) - root_len) < 50 and body[:100] == root_body[:100])):
+                    return None
+
+                ct = (res.headers.get("content-type") or "").lower()
+
+                # Content validation for specific file types to avoid false positives:
+                is_html = "<!doctype html" in body.lower() or "<html" in body.lower()
+
+                if path in ["/.env", "/appsettings.json", "/config.json", "/.git/config", "/.git/HEAD", "/backup.sql", "/dump.sql"] and is_html:
+                    return None
+
+                if path == "/.git/config" and "[core]" not in body:
+                    return None
+                if path == "/.git/HEAD" and "ref:" not in body:
+                    return None
+
+                if path in ["/backup.sql", "/dump.sql"] and not any(kw in body.upper() for kw in ["CREATE TABLE", "INSERT INTO", "DATABASE", "DROP TABLE", "-- MYSQL", "-- POSTGRESQL"]):
+                    return None
+
+                if path in ["/actuator/health", "/actuator/env", "/actuator/heapdump", "/api/Challenges", "/api/Users", "/v2/api-docs", "/openapi.json"] and is_html:
+                    return None
+
+                if path == "/phpinfo.php" and ("php version" not in body.lower() and "<title>phpinfo()</title>" not in body.lower()):
+                    return None
+
+                if path == "/wp-admin" and "wp-login" not in body.lower() and "wordpress" not in body.lower():
+                    return None
+
+                if path == "/kibana" and "kibana" not in body.lower():
+                    return None
+
+                if path == "/server-status" and "apache server status" not in body.lower():
+                    return None
+
+                if path == "/swagger-ui.html" and "swagger" not in body.lower():
+                    return None
+
+                if path == "/graphql" and is_html:
+                    return None
+
+                # Construct clear, accurate description matching the finding title
+                sample_preview = body[:200].replace("\r", " ").replace("\n", " ").strip()
+                description_text = f"Exposed resource accessible at {test_url}. Server returned HTTP 200 OK with valid resource content. Evidence: {sample_preview}"
+
                 return {
                     "title": title,
                     "category": "web",
@@ -263,10 +328,15 @@ def run_web_assessment(
                     "cve_id": None,
                     "cvss_score": cvss,
                     "severity": severity,
-                    "evidence": f"Exposed resource accessible at {test_url} (HTTP 200 OK). Sample payload: {res.text[:120]}",
+                    "evidence": description_text,
                     "remediation": "Restrict access to configuration files, repository metadata, and administrative routes via web server access rules.",
                     "compliance_map": [compliance, "CWE-538"],
-                    "metadata": {"url": test_url, "host": host, "path": path},
+                    "metadata": {
+                        "url": test_url,
+                        "host": host,
+                        "path": path,
+                        "description": description_text,
+                    },
                 }
         except Exception:
             pass
