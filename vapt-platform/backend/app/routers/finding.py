@@ -139,16 +139,22 @@ def list_findings(db: Session = Depends(get_db)):
             or _finding_target(finding, asset)
         ).strip().lower()
 
-        meta = finding.finding_metadata or {}
-        url_or_path = (meta.get("url") or meta.get("path") or "").strip().lower()
+        clean_target = host_target
+        if "://" in clean_target:
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(clean_target)
+                clean_target = parsed.netloc or parsed.path
+            except Exception:
+                pass
+        clean_target = clean_target.rstrip("/")
+
+        # Group by target, title, port, protocol, and status so same findings on the same target use the Count column!
         group_key = (
-            str(finding.scan_id),          # ← isolate each scan — findings from different targets never merge
-            finding.source,
+            clean_target,
             finding.title.strip().lower(),
-            host_target,
             finding.port or 0,
             (finding.protocol or "").lower(),
-            url_or_path,
             (finding.status or "open").lower(),
         )
 
@@ -159,6 +165,7 @@ def list_findings(db: Session = Depends(get_db)):
             continue
 
         existing["duplicate_count"] += 1
+
         existing["compliance_map"] = sorted(
             dict.fromkeys(chain(existing.get("compliance_map", []), payload.get("compliance_map", [])))
         )
@@ -174,16 +181,18 @@ def list_findings(db: Session = Depends(get_db)):
         existing["finding_metadata"]["cve_refs"] = merged_refs
         if not existing.get("display_id") and payload.get("display_id"):
             existing["display_id"] = payload["display_id"]
-        if not existing.get("evidence") and payload.get("evidence"):
-            existing["evidence"] = payload["evidence"]
-        if not existing.get("remediation") and payload.get("remediation"):
-            existing["remediation"] = payload["remediation"]
+        if payload.get("evidence"):
+            if not existing.get("evidence") or len(str(payload.get("evidence"))) > len(str(existing.get("evidence") or "")):
+                existing["evidence"] = payload["evidence"]
+        if payload.get("remediation"):
+            if not existing.get("remediation") or len(str(payload.get("remediation"))) > len(str(existing.get("remediation") or "")):
+                existing["remediation"] = payload["remediation"]
+        if "nmap+socket" in (payload.get("source") or ""):
+            existing["source"] = "nmap+socket"
         if (payload.get("cvss_score") or 0) > (existing.get("cvss_score") or 0):
             for key in [
                 "severity",
                 "cvss_score",
-                "evidence",
-                "remediation",
                 "service",
                 "state",
                 "finding_metadata",
@@ -191,6 +200,7 @@ def list_findings(db: Session = Depends(get_db)):
                 "cve_id",
             ]:
                 existing[key] = payload.get(key)
+
         if payload["detected_at"] > existing["detected_at"]:
             existing["detected_at"] = payload["detected_at"]
         if payload.get("scan_finished_at") and (

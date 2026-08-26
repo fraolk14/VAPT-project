@@ -1028,9 +1028,27 @@ export default function Findings({ findings, users, groups }) {
                   </td>
 
                   {/* Count */}
-                  <td data-label="Count" style={{ padding: "12px", textAlign: "center", color: "#94a3b8" }}>
-                    {finding.duplicate_count || finding.count || 1}
+                  <td data-label="Count" style={{ padding: "12px", textAlign: "center" }}>
+                    {(() => {
+                      const count = finding.duplicate_count || finding.count || 1;
+                      return (
+                        <span style={{
+                          display: "inline-block",
+                          minWidth: "24px",
+                          padding: "2px 8px",
+                          borderRadius: "12px",
+                          background: count > 1 ? "rgba(56, 189, 248, 0.15)" : "rgba(148, 163, 184, 0.08)",
+                          color: count > 1 ? "#38bdf8" : "#94a3b8",
+                          fontWeight: count > 1 ? 700 : 500,
+                          fontSize: "0.82rem",
+                          border: count > 1 ? "1px solid rgba(56, 189, 248, 0.35)" : "1px solid rgba(148, 163, 184, 0.15)",
+                        }}>
+                          {count}
+                        </span>
+                      );
+                    })()}
                   </td>
+
 
                   {/* CVSS */}
                   <td data-label="CVSS" style={{ padding: "12px", fontWeight: 700, color: (finding.cvss_score || 0) >= 7.0 ? "#ef4444" : "#eab308" }}>
