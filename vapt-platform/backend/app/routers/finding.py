@@ -131,6 +131,8 @@ def list_findings(db: Session = Depends(get_db)):
             or _finding_target(finding, asset)
         ).strip().lower()
 
+        meta = finding.finding_metadata or {}
+        url_or_path = (meta.get("url") or meta.get("path") or "").strip().lower()
         group_key = (
             str(finding.scan_id),          # ← isolate each scan — findings from different targets never merge
             finding.source,
@@ -138,8 +140,10 @@ def list_findings(db: Session = Depends(get_db)):
             host_target,
             finding.port or 0,
             (finding.protocol or "").lower(),
+            url_or_path,
             (finding.status or "open").lower(),
         )
+
         existing = grouped_findings.get(group_key)
         if existing is None:
             payload["group_key"] = "|".join(str(part) for part in group_key if part not in {None, ""})

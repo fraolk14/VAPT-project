@@ -298,9 +298,9 @@ def _store_findings(db: Session, scan: Scan, normalized_findings: list[dict[str,
                 break
         asset = _upsert_asset_from_finding(db, scan, item, metadata)
 
-        # Only deduplicate within the SAME scan — never overwrite findings from previous scans.
-        # This ensures every new scan produces its own independent set of findings.
-        existing = None
+        # Deduplicate within the SAME scan by (title, port, protocol, and URL/path).
+        # This ensures distinct endpoints with the same vulnerability type are ALL preserved.
+        url_path = (metadata.get("url") or metadata.get("path") or "").strip().lower()
         same_scan_candidates = (
             db.query(Finding)
             .filter(
@@ -312,11 +312,16 @@ def _store_findings(db: Session, scan: Scan, normalized_findings: list[dict[str,
             .order_by(Finding.last_seen.desc())
             .all()
         )
-        if same_scan_candidates:
-            existing = same_scan_candidates[0]
+        existing = None
+        for cand in same_scan_candidates:
+            cand_meta = cand.finding_metadata or {}
+            cand_url = (cand_meta.get("url") or cand_meta.get("path") or "").strip().lower()
+            if cand_url == url_path:
+                existing = cand
+                break
 
         if existing:
-            # Only update timestamp/status for an already-ingested finding in this same scan run
+            # Only update timestamp/status for an exact same-endpoint duplicate in this scan
             existing.last_seen = datetime.now(timezone.utc)
             existing.status = status
 
@@ -343,6 +348,7 @@ def _store_findings(db: Session, scan: Scan, normalized_findings: list[dict[str,
                     finding_metadata=metadata,
                 )
             )
+
 
     scan.result_summary = {
         **scan.result_summary,
@@ -807,18 +813,30 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
                     normalized_findings = []
 
                 # ALWAYS run web_assessment in addition to ZAP — not just as fallback.
-                # web_assessment does deep header/cookie/path scanning that ZAP misses on SPAs.
+                # web_assessment does deep API/header/cookie/path scanning that ZAP misses on SPAs.
                 from app.services.web_assessment import run_web_assessment
                 try:
                     web_findings = run_web_assessment(target)
-                    # Merge: only add web_assessment findings whose title isn't already in ZAP results
-                    existing_titles = {f.get("title", "").lower() for f in normalized_findings}
+                    # Merge: keep findings with distinct title and URL/path
+                    existing_keys = {
+                        (
+                            f.get("title", "").strip().lower(),
+                            ((f.get("metadata") or {}).get("url") or (f.get("metadata") or {}).get("path") or "").strip().lower(),
+                        )
+                        for f in normalized_findings
+                    }
                     for wf in web_findings:
-                        if wf.get("title", "").lower() not in existing_titles:
+                        wf_meta = wf.get("metadata") or {}
+                        wf_key = (
+                            wf.get("title", "").strip().lower(),
+                            (wf_meta.get("url") or wf_meta.get("path") or "").strip().lower(),
+                        )
+                        if wf_key not in existing_keys:
                             normalized_findings.append(wf)
-                            existing_titles.add(wf.get("title", "").lower())
+                            existing_keys.add(wf_key)
                 except Exception as web_exc:
                     print(f"[WebAssessment] Failed: {web_exc}")
+
 
                 _store_findings(db, scan, normalized_findings)
                 scan.status = "completed"

