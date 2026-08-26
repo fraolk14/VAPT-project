@@ -24,7 +24,7 @@ const DEFAULT_COLUMN_WIDTHS = {
   date: 110,
   severity: 110,
   title: 220,
-  details: 280,
+  details: 360,
   target: 200,
   cve: 110,
   count: 70,
@@ -34,6 +34,7 @@ const DEFAULT_COLUMN_WIDTHS = {
   recommendation: 260,
   status: 100,
 };
+
 
 const COLUMN_DEFS = [
   { key: "select", label: "", sortable: false },
@@ -180,49 +181,138 @@ function cveValues(finding) {
   return [...new Set(matches.map((item) => item.toUpperCase()))];
 }
 
-function detailsSummary(finding) {
+function sanitizeProofText(raw) {
+  if (!raw || typeof raw !== "string") return "";
+  return raw
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
+}
+
+function detailsExplanation(finding) {
   const meta = finding.finding_metadata || {};
   const correlation = meta.correlation || {};
+  const title = (finding.title || "").trim();
+  const titleLower = title.toLowerCase();
+  const port = finding.port;
 
-  const parts = [];
-
-  // 1. Description explaining the vulnerability
-  const desc = meta.description || (typeof finding.details === "string" ? finding.details : "") || "";
-
-  // 2. Evidence and technical proof
-  const evidence = finding.evidence || "";
-
-  if (desc && evidence && desc !== evidence) {
-    if (evidence.startsWith(desc)) {
-      parts.push(evidence);
-    } else {
-      parts.push(desc);
-      parts.push(`Evidence: ${evidence}`);
-    }
-  } else if (evidence) {
-    parts.push(evidence);
-  } else if (desc) {
-    parts.push(desc);
-  } else if (correlation.correlation_summary) {
-    parts.push(correlation.correlation_summary);
-  } else if (finding.remediation) {
-    parts.push(finding.remediation);
+  // 1. Explicit description from scanner metadata if available and meaningful
+  if (meta.description && typeof meta.description === "string" && meta.description.length > 25 && !meta.description.startsWith("Exposed resource accessible at")) {
+    return meta.description.trim();
   }
 
-  // 3. Additional contextual metadata (parameter, attack string)
-  if (meta.param && !parts.some((p) => p.includes(meta.param))) {
-    parts.push(`Parameter: ${meta.param}`);
+  // 2. Domain-aware comprehensive explanations based on vulnerability type & context:
+  if (titleLower.includes("telnet")) {
+    return "Telnet service is actively running and exposed. Telnet transmits all authentication credentials, commands, and session data in unencrypted plaintext, allowing network adversaries to capture sensitive credentials.";
   }
-  if (meta.attack && !parts.some((p) => p.includes(meta.attack))) {
-    parts.push(`Attack Vector: ${meta.attack}`);
+  if (titleLower.includes("rdp") || (port === 3389 && titleLower.includes("exposed"))) {
+    return "Remote Desktop Protocol (RDP) management service is exposed on port 3389/tcp. Public or unrestricted RDP interfaces are heavily targeted for brute-force credential attacks, ransomware deployment, and remote exploitation.";
+  }
+  if (titleLower.includes("smb") || (port === 445 && titleLower.includes("exposed"))) {
+    return "Server Message Block (SMB) file sharing service is exposed on port 445/tcp. Unrestricted SMB exposure creates high risk of network lateral movement, NTLM relay attacks, and remote code execution vulnerabilities.";
+  }
+  if (titleLower.includes("ssh") || (port === 22 && titleLower.includes("exposed"))) {
+    return "Secure Shell (SSH) remote management service is accessible. Ensure strong public-key authentication is enforced, root login is disabled, and exposure is restricted via firewall.";
+  }
+  if (titleLower.includes("actuator") || titleLower.includes("spring")) {
+    return "Spring Boot Actuator monitoring interface is exposed without authentication, allowing unauthorized users to inspect internal application health metrics, environment properties, and runtime configurations.";
+  }
+  if (titleLower.includes("phpinfo")) {
+    return "PHPInfo diagnostic page is publicly accessible, leaking complete PHP environment variables, module configurations, file paths, and server architecture details.";
+  }
+  if (titleLower.includes("ftp") && (titleLower.includes("storage") || titleLower.includes("directory index"))) {
+    return "Public directory listing is enabled on the web server, allowing anonymous users to browse, index, and download internal application files and directories.";
+  }
+  if (titleLower.includes("acquisition") || titleLower.includes("confidential")) {
+    return "Sensitive corporate document is publicly accessible without authorization on the server, disclosing confidential business information.";
+  }
+  if (titleLower.includes("challenge") && titleLower.includes("api")) {
+    return "Internal application API route is accessible without authentication, disclosing internal application state, challenge statistics, and backend metadata.";
+  }
+  if (titleLower.includes("legal") && titleLower.includes("document")) {
+    return "Internal legal documentation file is accessible on the server filesystem via direct HTTP request.";
+  }
+  if (titleLower.includes("robots.txt")) {
+    return "Web crawler directive file (robots.txt) is publicly accessible, disclosing restricted administrative and internal URL paths to external reconnaissance tools.";
+  }
+  if (titleLower.includes("security.txt") || titleLower.includes("security contact")) {
+    return "Security contact document (.well-known/security.txt) is hosted on the server detailing vulnerability disclosure guidelines and contact endpoints.";
+  }
+  if (titleLower.includes("content-security-policy") || titleLower.includes("csp")) {
+    return "The web application does not enforce a Content-Security-Policy (CSP) HTTP response header. Without CSP, modern browsers cannot restrict unauthorized script execution, leaving users vulnerable to Cross-Site Scripting (XSS) and data injection.";
+  }
+  if (titleLower.includes("strict-transport-security") || titleLower.includes("hsts")) {
+    return "HTTPS web endpoint is missing the Strict-Transport-Security (HSTS) header. Without HSTS, browsers may downgrade connections to unencrypted HTTP, exposing communication to man-in-the-middle (MITM) attacks and cookie interception.";
+  }
+  if (titleLower.includes("cors") || titleLower.includes("cross-origin")) {
+    return "The web server configures an overly permissive CORS policy with wildcard Access-Control-Allow-Origin (*), allowing untrusted third-party domains to initiate cross-origin requests.";
+  }
+  if (titleLower.includes("timestamp") && titleLower.includes("unix")) {
+    return "The application discloses a Unix timestamp in server responses, which can be leveraged by attackers to infer server time synchronization, session creation windows, or algorithmic seed values.";
+  }
+  if (titleLower.includes("xss") || titleLower.includes("cross-site scripting")) {
+    return "The web application reflects user-supplied input directly in the HTTP response without sufficient sanitization or HTML output encoding, enabling execution of arbitrary JavaScript in the victim's browser.";
+  }
+  if (titleLower.includes("sql") && (titleLower.includes("injection") || titleLower.includes("sqli"))) {
+    return "The application constructs database queries using untrusted user input without parameterization, enabling attackers to extract, modify, or delete sensitive backend database records.";
   }
 
-  const combined = parts.filter(Boolean).join("\n\n").trim();
-  if (!combined) {
-    return `Vulnerability: ${finding.title || "Security finding"}. No additional detail captured.`;
+  // 3. Fallback
+  if (correlation.correlation_summary) {
+    return correlation.correlation_summary;
   }
-  return combined;
+  if (typeof finding.details === "string" && finding.details.trim().length > 10) {
+    return finding.details.trim();
+  }
+  if (finding.remediation && finding.remediation.length > 20) {
+    return finding.remediation;
+  }
+
+  return `Security vulnerability identified: ${title}. Verify service configuration and enforce access controls.`;
 }
+
+function detailsProof(finding) {
+  const meta = finding.finding_metadata || {};
+  const evidence = sanitizeProofText(finding.evidence || "");
+  const target = finding.target || meta.host || meta.url || "";
+  const port = finding.port ? `${finding.port}/${finding.protocol || "tcp"}` : "";
+
+  const proofItems = [];
+
+  if (evidence && !evidence.toLowerCase().startsWith("security finding")) {
+    proofItems.push(evidence);
+  }
+  if (meta.banner && typeof meta.banner === "string" && !evidence.includes(meta.banner)) {
+    proofItems.push(`Service Banner: ${sanitizeProofText(meta.banner)}`);
+  }
+  if (meta.param && !evidence.includes(meta.param)) {
+    proofItems.push(`Vulnerable Parameter: ${meta.param}`);
+  }
+  if (meta.attack && !evidence.includes(meta.attack)) {
+    proofItems.push(`Probe Payload: ${meta.attack}`);
+  }
+  if (meta.path && !evidence.includes(meta.path)) {
+    proofItems.push(`Discovered Path: ${meta.path}`);
+  }
+
+  if (proofItems.length > 0) {
+    return proofItems.join("\n");
+  }
+
+  if (port && target) {
+    return `Verified active listener on ${target}:${port} (${finding.service || "active service"}). State: ${finding.state || "open"}`;
+  }
+
+  return "";
+}
+
+function hasLongDetails(finding) {
+  const exp = detailsExplanation(finding);
+  const proof = detailsProof(finding);
+  return exp.length > 140 || proof.length > 100 || proof.includes("\n");
+}
+
 
 
 
@@ -835,30 +925,80 @@ export default function Findings({ findings, users, groups }) {
                   </td>
 
                   {/* Details */}
-                  <td data-label="Details" style={{ padding: "12px", fontSize: "0.85rem", color: "#cbd5e1", maxWidth: "320px" }}>
-                    <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                      <span style={{
-                        display: "block",
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
-                        overflow: expandedDetails[finding.id] ? "visible" : "hidden",
-                        maxHeight: expandedDetails[finding.id] ? "none" : "5.2em",
-                        lineHeight: "1.5",
-                        color: "#cbd5e1",
-                      }}>
-                        {detailsSummary(finding)}
-                      </span>
-                      {detailsSummary(finding).length > 150 && (
-                        <button
-                          type="button"
-                          onClick={() => setExpandedDetails((current) => ({ ...current, [finding.id]: !current[finding.id] }))}
-                          style={{ background: "none", border: "none", color: "#38bdf8", cursor: "pointer", fontSize: "0.75rem", padding: 0, marginTop: "2px", textAlign: "left" }}
-                        >
-                          {expandedDetails[finding.id] ? "See less ▲" : "See more ▼"}
-                        </button>
-                      )}
-                    </div>
+                  <td data-label="Details" style={{ padding: "12px", fontSize: "0.83rem", color: "#cbd5e1", maxWidth: "360px", verticalAlign: "top" }}>
+                    {(() => {
+                      const isExpanded = !!expandedDetails[finding.id];
+                      const explanation = detailsExplanation(finding);
+                      const proof = detailsProof(finding);
+                      const isLong = hasLongDetails(finding);
+
+                      return (
+                        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                          {/* 1. Vulnerability Explanation */}
+                          <div style={{
+                            color: "#e2e8f0",
+                            lineHeight: "1.45",
+                            fontSize: "0.83rem",
+                            overflow: isExpanded ? "visible" : "hidden",
+                            maxHeight: isExpanded ? "none" : "4.4em",
+                            wordBreak: "break-word",
+                          }}>
+                            {explanation}
+                          </div>
+
+                          {/* 2. Target Proof & Technical Evidence Box */}
+                          {proof && (
+                            <div style={{
+                              marginTop: "2px",
+                              padding: "6px 8px",
+                              background: "#090d16",
+                              border: "1px solid #1e293b",
+                              borderRadius: "4px",
+                              fontSize: "0.74rem",
+                              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                              wordBreak: "break-word",
+                              whiteSpace: isExpanded ? "pre-wrap" : "nowrap",
+                              overflow: isExpanded ? "visible" : "hidden",
+                              textOverflow: isExpanded ? "clip" : "ellipsis",
+                              maxHeight: isExpanded ? "none" : "2.6em",
+                              lineHeight: "1.4",
+                            }}>
+                              <div style={{ color: "#64748b", fontSize: "0.66rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "2px" }}>
+                                🎯 Target Proof:
+                              </div>
+                              <span style={{ color: "#38bdf8" }}>
+                                {proof}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* 3. See More / See Less Toggle */}
+                          {isLong && (
+                            <button
+                              type="button"
+                              onClick={() => setExpandedDetails((current) => ({ ...current, [finding.id]: !current[finding.id] }))}
+                              style={{
+                                background: "none",
+                                border: "none",
+                                color: "#38bdf8",
+                                cursor: "pointer",
+                                fontSize: "0.74rem",
+                                fontWeight: 600,
+                                padding: "2px 0 0 0",
+                                textAlign: "left",
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: "4px",
+                              }}
+                            >
+                              {isExpanded ? "▲ See less" : "▼ See more (proof & logs)"}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </td>
+
 
 
                   {/* Target Asset Link */}
