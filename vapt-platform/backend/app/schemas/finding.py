@@ -37,8 +37,10 @@ class FindingOut(BaseModel):
     asset_name: Optional[str] = None
     resolved_by: Optional[str] = None
     target_details: dict = Field(default_factory=dict)
+    target: Optional[str] = None
     detected_at: datetime
     scan_finished_at: Optional[datetime] = None
+
 
     class Config:
         from_attributes = True

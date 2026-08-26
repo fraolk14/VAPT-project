@@ -23,17 +23,17 @@ SEVERITY_SORT = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
 
 
 def _finding_target(finding: Finding, asset: Asset | None = None) -> str:
+    metadata = finding.finding_metadata or {}
     if asset:
         if asset.hostname and asset.hostname != "unresolved-host":
             return asset.hostname
-        if asset.asset_name:
+        if asset.asset_name and asset.asset_name != "unresolved-host":
             return asset.asset_name
         if asset.url:
             return asset.url
         if asset.ip_address:
             return asset.ip_address
 
-    metadata = finding.finding_metadata or {}
     if finding.source in {"mobsf", "mobile"} or finding.category == "mobile":
         return metadata.get("file") or metadata.get("package_name") or metadata.get("stored_file_name") or "n/a"
 
@@ -41,9 +41,11 @@ def _finding_target(finding: Finding, asset: Asset | None = None) -> str:
         metadata.get("host")
         or metadata.get("url")
         or metadata.get("ip_address")
+        or metadata.get("hostname")
         or (finding.target if hasattr(finding, "target") and finding.target else None)
         or "n/a"
     )
+
 
 
 
