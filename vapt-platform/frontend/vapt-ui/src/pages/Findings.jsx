@@ -184,22 +184,46 @@ function detailsSummary(finding) {
   const meta = finding.finding_metadata || {};
   const correlation = meta.correlation || {};
 
-  // Priority: Specific finding explanation & evidence → metadata description → details → correlation summary → remediation
-  const explanationText =
-    meta.description ||
-    finding.evidence ||
-    meta.details ||
-    finding.details ||
-    correlation.correlation_summary ||
-    finding.remediation ||
-    "";
+  const parts = [];
 
-  if (!explanationText || explanationText.trim() === "") {
-    return `Vulnerability type: ${finding.title || "Unknown"}. No additional detail captured.`;
+  // 1. Description explaining the vulnerability
+  const desc = meta.description || (typeof finding.details === "string" ? finding.details : "") || "";
+
+  // 2. Evidence and technical proof
+  const evidence = finding.evidence || "";
+
+  if (desc && evidence && desc !== evidence) {
+    if (evidence.startsWith(desc)) {
+      parts.push(evidence);
+    } else {
+      parts.push(desc);
+      parts.push(`Evidence: ${evidence}`);
+    }
+  } else if (evidence) {
+    parts.push(evidence);
+  } else if (desc) {
+    parts.push(desc);
+  } else if (correlation.correlation_summary) {
+    parts.push(correlation.correlation_summary);
+  } else if (finding.remediation) {
+    parts.push(finding.remediation);
   }
 
-  return explanationText.trim();
+  // 3. Additional contextual metadata (parameter, attack string)
+  if (meta.param && !parts.some((p) => p.includes(meta.param))) {
+    parts.push(`Parameter: ${meta.param}`);
+  }
+  if (meta.attack && !parts.some((p) => p.includes(meta.attack))) {
+    parts.push(`Attack Vector: ${meta.attack}`);
+  }
+
+  const combined = parts.filter(Boolean).join("\n\n").trim();
+  if (!combined) {
+    return `Vulnerability: ${finding.title || "Security finding"}. No additional detail captured.`;
+  }
+  return combined;
 }
+
 
 
 
