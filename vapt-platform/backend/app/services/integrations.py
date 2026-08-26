@@ -354,10 +354,20 @@ class ZAPClient:
 
     def launch_scan(self, target: str, mode: str = "spider-active") -> dict[str, Any]:
         normalized_target = self.normalize_target(target)
+
+        # Launch traditional spider
         payload = self._request("spider", "action", "scan", url=normalized_target, maxChildren=0, recurse="true")
         spider_scan_id = payload.get("scan")
         if not spider_scan_id:
             raise RuntimeError("ZAP did not return a spider scan id.")
+
+        # Also launch AJAX spider for SPA support (juice-shop, Angular, React apps)
+        # AJAX spider uses a real browser to crawl JavaScript-heavy apps
+        try:
+            self._request("ajaxSpider", "action", "scan", url=normalized_target, inScope="false")
+        except Exception:
+            pass  # AJAX spider is optional — traditional spider still runs
+
         return {
             "engine": "zap",
             "target": normalized_target,
@@ -367,6 +377,7 @@ class ZAPClient:
             "spider_scan_id": str(spider_scan_id),
             "remote_task_id": str(spider_scan_id),
         }
+
 
     def get_spider_status(self, spider_scan_id: str) -> dict[str, Any]:
         payload = self._request("spider", "view", "status", scanId=spider_scan_id)
@@ -405,34 +416,37 @@ class ZAPClient:
         return {"status": "completed" if progress >= 100 else "running", "progress": progress}
 
     def get_alerts(self, target: str) -> list[dict[str, Any]]:
-        normalized_target = self.normalize_target(target)
-        target_no_slash = normalized_target.rstrip("/")
-        target_slash = f"{target_no_slash}/"
-
-        for b_url in [normalized_target, target_no_slash, target_slash, None]:
-            alerts: list[dict[str, Any]] = []
-            start = 0
-            count = 500
+        # Collect ALL alerts from ZAP — paginate through all of them
+        all_alerts: list[dict[str, Any]] = []
+        start = 0
+        page_size = 500
+        while True:
             try:
-                while True:
-                    params: dict[str, Any] = {"start": start, "count": count}
-                    if b_url:
-                        params["baseurl"] = b_url
-                    payload = self._request("core", "view", "alerts", **params)
-                    batch = payload.get("alerts", [])
-                    if not isinstance(batch, list) or not batch:
-                        break
-                    alerts.extend(batch)
-                    if len(batch) < count:
-                        break
-                    start += count
+                payload = self._request("alert", "view", "alerts", start=start, count=page_size)
+                batch = payload.get("alerts", [])
+                if not isinstance(batch, list) or not batch:
+                    break
+                all_alerts.extend(batch)
+                if len(batch) < page_size:
+                    break
+                start += page_size
             except Exception:
-                pass
+                break
 
-            if alerts:
-                return alerts
+        if not all_alerts:
+            return []
 
-        return []
+        # Filter to alerts for this target (or return all if target filtering yields nothing)
+        try:
+            normalized_target = self.normalize_target(target)
+            host = normalized_target.rstrip("/")
+        except Exception:
+            return all_alerts
+
+        filtered = [a for a in all_alerts if a.get("url", "").startswith(host)]
+        return filtered if filtered else all_alerts
+
+
 
     def normalize_results(self, raw_alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         normalized = []

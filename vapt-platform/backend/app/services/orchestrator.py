@@ -806,14 +806,19 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
                     print(f"[ZAP] Failed to fetch raw alerts: {exc}")
                     normalized_findings = []
 
-                if not normalized_findings:
-                    # Intelligent fall-through to direct web assessment so findings are always populated
-                    from app.services.web_assessment import run_web_assessment
-                    try:
-                        fallback_findings = run_web_assessment(target)
-                        normalized_findings.extend(fallback_findings)
-                    except Exception:
-                        pass
+                # ALWAYS run web_assessment in addition to ZAP — not just as fallback.
+                # web_assessment does deep header/cookie/path scanning that ZAP misses on SPAs.
+                from app.services.web_assessment import run_web_assessment
+                try:
+                    web_findings = run_web_assessment(target)
+                    # Merge: only add web_assessment findings whose title isn't already in ZAP results
+                    existing_titles = {f.get("title", "").lower() for f in normalized_findings}
+                    for wf in web_findings:
+                        if wf.get("title", "").lower() not in existing_titles:
+                            normalized_findings.append(wf)
+                            existing_titles.add(wf.get("title", "").lower())
+                except Exception as web_exc:
+                    print(f"[WebAssessment] Failed: {web_exc}")
 
                 _store_findings(db, scan, normalized_findings)
                 scan.status = "completed"
@@ -825,6 +830,7 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
                     "phase": "completed",
                     "alert_count": len(normalized_findings),
                 }
+
         elif phase == "completed":
             scan.status = "completed"
             scan.progress = "100"
