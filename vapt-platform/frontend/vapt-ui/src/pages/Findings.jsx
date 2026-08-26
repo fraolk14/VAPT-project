@@ -93,11 +93,18 @@ function resolveHost(finding) {
   if (finding.target && finding.target !== "n/a") return finding.target;
   if (meta.host && meta.host !== "n/a") return meta.host;
   if (details.host && details.host !== "n/a") return details.host;
+  if (details.url && details.url !== "n/a") {
+    try { return new URL(details.url).host || details.url; } catch { return details.url; }
+  }
+  if (meta.url && meta.url !== "n/a") {
+    try { return new URL(meta.url).host || meta.url; } catch { return meta.url; }
+  }
   if (details.ip_address && details.ip_address !== "n/a") return details.ip_address;
   if (meta.ip_address && meta.ip_address !== "n/a") return meta.ip_address;
   if (meta.hostname && meta.hostname !== "n/a") return meta.hostname;
   return "n/a";
 }
+
 
 function targetLabel(finding) {
   const src = finding.source || "";
