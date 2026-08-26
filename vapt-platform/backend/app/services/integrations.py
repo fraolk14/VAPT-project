@@ -436,17 +436,29 @@ class ZAPClient:
         if not all_alerts:
             return []
 
-        # Filter to alerts for this target (or return all if target filtering yields nothing)
+        # Strictly filter alerts to ONLY this specific target domain / host.
+        # NEVER return alerts from another target if this target has 0 alerts.
         try:
-            normalized_target = self.normalize_target(target)
-            host = normalized_target.rstrip("/")
+            parsed_target = urlparse(target if "://" in target else f"http://{target}")
+            target_host = (parsed_target.hostname or target).lower()
+            # Also handle Docker internal name mappings (e.g. juice-shop vs juice-shop.herokuapp.com)
+            allowed_hosts = {target_host}
+            if "juice-shop" in target_host:
+                allowed_hosts.update(["juice-shop", "juice-shop.herokuapp.com", "localhost"])
+            elif "dvwa" in target_host:
+                allowed_hosts.update(["dvwa", "localhost"])
+
+            filtered = []
+            for alert in all_alerts:
+                alert_url = alert.get("url", "")
+                alert_parsed = urlparse(alert_url)
+                alert_host = (alert_parsed.hostname or "").lower()
+                if alert_host in allowed_hosts or alert_url.startswith(target):
+                    filtered.append(alert)
+
+            return filtered
         except Exception:
-            return all_alerts
-
-        filtered = [a for a in all_alerts if a.get("url", "").startswith(host)]
-        return filtered if filtered else all_alerts
-
-
+            return []
 
     def normalize_results(self, raw_alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         normalized = []
