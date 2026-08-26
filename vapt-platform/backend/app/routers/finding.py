@@ -35,9 +35,17 @@ def _finding_target(finding: Finding, asset: Asset | None = None) -> str:
 
     metadata = finding.finding_metadata or {}
     if finding.source in {"mobsf", "mobile"} or finding.category == "mobile":
-        return metadata.get("file") or metadata.get("package_name") or metadata.get("stored_file_name") or ""
+        return metadata.get("file") or metadata.get("package_name") or metadata.get("stored_file_name") or "n/a"
 
-    return metadata.get("host") or metadata.get("url") or metadata.get("ip_address") or (asset.asset_name if asset else "")
+    return (
+        metadata.get("host")
+        or metadata.get("url")
+        or metadata.get("ip_address")
+        or (finding.target if hasattr(finding, "target") and finding.target else None)
+        or "n/a"
+    )
+
+
 
 
 def _display_identifier(payload: dict) -> str | None:
