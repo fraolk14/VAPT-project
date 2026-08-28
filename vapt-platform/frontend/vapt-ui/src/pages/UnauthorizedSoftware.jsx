@@ -21,11 +21,11 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
   // Discovery trigger state
   const [discoverTarget, setDiscoverTarget] = useState("");
   const [subnetInput, setSubnetInput] = useState("192.168.10.0/24");
+  const [managedDevices, setManagedDevices] = useState([]);
   const [selectedManagedDeviceId, setSelectedManagedDeviceId] = useState("");
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [isBulkWhitelisting, setIsBulkWhitelisting] = useState(false);
   const [feedback, setFeedback] = useState("");
-
 
   const fetchSoftwareData = () => {
     api.get("/software")
@@ -35,11 +35,16 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
     api.get("/software/whitelist")
       .then((res) => setWhitelist(res.data))
       .catch(() => setWhitelist([]));
+
+    api.get("/software/managed-devices")
+      .then((res) => setManagedDevices(res.data))
+      .catch(() => setManagedDevices([]));
   };
 
   useEffect(() => {
     fetchSoftwareData();
   }, []);
+
 
   // Filter rows
   const rows = useMemo(() => {
@@ -180,23 +185,27 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
     }
   };
 
-  const handleRediscoverManaged = async (assetId = null) => {
-    const targetId = assetId || selectedManagedDeviceId;
+  const handleRediscoverManaged = async (deviceId = null) => {
+    const targetId = deviceId || selectedManagedDeviceId;
     setIsDiscovering(true);
-    const targetAsset = assets.find((a) => String(a.id) === String(targetId));
-    const label = targetAsset ? (targetAsset.asset_name || targetAsset.hostname || targetAsset.ip_address) : "all managed devices";
-    setFeedback(`🔄 Discovering installed applications & services from ${label}...`);
+    const targetDevice = managedDevices.find((d) => String(d.id) === String(targetId) || d.device_id === targetId);
+    const label = targetDevice ? (targetDevice.hostname || targetDevice.device_id || targetDevice.ip_address) : "all active managed devices";
+    setFeedback(`🔄 Discovering complete installed software inventory from ${label}...`);
     try {
-      const url = targetId ? `/software/rediscover-managed?target_asset_id=${encodeURIComponent(targetId)}` : "/software/rediscover-managed";
+      const url = targetId ? `/software/rediscover-managed?target_device_id=${encodeURIComponent(targetId)}` : "/software/rediscover-managed";
       const res = await api.post(url);
-      setFeedback(`✅ ${res.data.message || "Re-discovery complete."}`);
+      setFeedback(`✅ ${res.data.message || "Software re-discovery initiated."}`);
       setIsDiscovering(false);
       fetchSoftwareData();
+      // Fast follow-up refresh to capture newly ingested records
+      setTimeout(() => fetchSoftwareData(), 1500);
+      setTimeout(() => fetchSoftwareData(), 3500);
     } catch (err) {
       setIsDiscovering(false);
       setFeedback(err?.response?.data?.detail || "Failed to re-discover software from managed devices.");
     }
   };
+
 
   const handleRediscoverHost = async (targetIp) => {
     const ip = (targetIp || "").trim();
@@ -331,22 +340,49 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
-            {assets && assets.length > 0 && (
+            {managedDevices && managedDevices.length > 0 ? (
+
               <select
                 className="scan-select"
                 value={selectedManagedDeviceId}
-                onChange={(e) => setSelectedManagedDeviceId(e.target.value)}
-                style={{ fontSize: "0.82rem", padding: "7px 10px", minWidth: "210px", background: "rgba(15, 23, 42, 0.9)" }}
-                title="Select a specific managed device or scan all devices"
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setSelectedManagedDeviceId(val);
+                  if (val) {
+                    const dev = managedDevices.find((d) => String(d.id) === String(val) || d.device_id === val);
+                    setIpFilter(dev?.hostname || dev?.ip_address || dev?.device_id || "");
+                  } else {
+                    setIpFilter("");
+                  }
+                }}
+                style={{ fontSize: "0.82rem", padding: "7px 10px", minWidth: "240px", background: "rgba(15, 23, 42, 0.9)" }}
+                title="Select a specific active managed agent endpoint device"
               >
-                <option value="">🌐 All Managed Devices ({assets.length})</option>
-                {assets.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    💻 {a.asset_name || a.hostname || a.ip_address} ({a.ip_address || "No IP"})
+                <option value="">🌐 All Active Managed Agent Devices ({managedDevices.length})</option>
+                {managedDevices.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    🖥️ {d.hostname || d.device_id} ({d.ip_address} - {d.software_count} apps)
                   </option>
                 ))}
               </select>
+            ) : (
+              assets && assets.length > 0 && (
+                <select
+                  className="scan-select"
+                  value={selectedManagedDeviceId}
+                  onChange={(e) => setSelectedManagedDeviceId(e.target.value)}
+                  style={{ fontSize: "0.82rem", padding: "7px 10px", minWidth: "210px", background: "rgba(15, 23, 42, 0.9)" }}
+                >
+                  <option value="">🌐 All Managed Devices ({assets.length})</option>
+                  {assets.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      💻 {a.asset_name || a.hostname || a.ip_address} ({a.ip_address || "No IP"})
+                    </option>
+                  ))}
+                </select>
+              )
             )}
+
             <button
               type="button"
               className="scan-action scan-action--resume"

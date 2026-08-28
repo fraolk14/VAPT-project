@@ -278,7 +278,7 @@ def agent_checkin(
             if not sw_name:
                 continue
 
-            # Ingest into Software & SoftwareAsset governance tables
+            # Ingest into Software & SoftwareAsset governance tables (batch processing)
             process_software_governance(
                 db,
                 software_name=sw_name,
@@ -291,7 +291,10 @@ def agent_checkin(
                 hostname=payload.asset.hostname,
                 endpoint_name=payload.asset.hostname,
                 source="VAP Endpoint Agent",
+                commit=False,
+                query_nvd=False,
             )
+
 
             # Generate security finding for unapproved software drift
             if allowlist_names and sw_name.lower() not in allowlist_names:

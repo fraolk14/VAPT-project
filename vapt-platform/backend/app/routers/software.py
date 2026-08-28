@@ -7,11 +7,13 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal, get_db
+from app.models.agent import AgentDevice
 from app.models.asset import Asset
 from app.models.software import Software, SoftwareAsset, WhitelistSoftware
 from app.services.software_discovery import process_software_governance, run_nmap_service_discovery, run_wmi_discovery
 
 router = APIRouter(prefix="/software", tags=["Software Governance"])
+
 
 
 
@@ -260,131 +262,143 @@ def discover_subnet_software(payload: dict[str, Any], db: Session = Depends(get_
     return {"message": f"Discovered software across subnet {subnet}.", "total_items_found": len(results)}
 
 
-def _run_managed_discovery_background(target_asset_id: str | None = None) -> None:
+@router.get("/managed-devices")
+def list_active_managed_devices(db: Session = Depends(get_db)):
+    """List all enrolled active managed endpoint agent devices and their software counts."""
+    active_agents = db.query(AgentDevice).filter(AgentDevice.status == "active").all()
+    results = []
+    for ag in active_agents:
+        count = db.query(SoftwareAsset).filter(
+            (SoftwareAsset.hostname == ag.hostname) | 
+            (SoftwareAsset.endpoint_name == ag.hostname) |
+            (SoftwareAsset.ip_address == ag.ip_address)
+        ).count()
+        results.append({
+            "id": str(ag.id),
+            "device_id": ag.device_id,
+            "hostname": ag.hostname,
+            "ip_address": ag.ip_address or "Unknown IP",
+            "os_info": ag.os_info or "Windows Endpoint",
+            "status": ag.status,
+            "software_count": count,
+            "last_seen": ag.last_seen,
+        })
+    return results
+
+
+def _run_managed_discovery_background(target_device_id: str | None = None, target_asset_id: str | None = None) -> None:
     db = SessionLocal()
     try:
-        query = db.query(Asset)
-        if target_asset_id:
-            query = query.filter(Asset.id == target_asset_id)
-            managed_assets = query.all()
-        else:
-            active_assets = query.filter(Asset.is_active.is_(True)).all()
-            managed_assets = active_assets if active_assets else query.all()
-
-        print(f"[ManagedDiscovery] Background discovery running for {len(managed_assets)} managed devices...", flush=True)
-
-        asset_data_list = []
-        for a in managed_assets:
-            target_ip = (a.ip_address or "").strip()
-            target_host = (a.hostname or "").strip()
-            target = target_ip or target_host
-            if target and target not in {"127.0.0.1", "localhost", "0.0.0.0"}:
-                asset_data_list.append({
-                    "id": str(a.id),
-                    "asset_name": a.asset_name,
-                    "ip_address": target_ip,
-                    "hostname": target_host,
-                    "os": a.os,
-                    "os_type": a.os_type,
-                    "target": target,
-                })
-
-        def _discover_single(adata: dict[str, Any]) -> tuple[str, list[dict]]:
-            t = adata["target"]
-            label = adata["asset_name"] or adata["hostname"] or t
-            items = []
-            try:
-                wmi_res = []
-                if not adata.get("os") or "win" in str(adata.get("os")).lower() or "windows" in str(adata.get("os_type")).lower():
-                    wmi_res = run_wmi_discovery(t)
-                nmap_res = run_nmap_service_discovery(t)
-                for raw in wmi_res + nmap_res:
-                    items.append({
-                        "name": raw["name"],
-                        "vendor": raw.get("vendor"),
-                        "version": raw.get("version"),
-                        "category": raw.get("category", "Application"),
-                        "asset_id": adata["id"],
-                        "installed_path": raw.get("installed_path"),
-                        "ip_address": adata["ip_address"] or "127.0.0.1",
-                        "hostname": adata["hostname"] or t,
-                        "endpoint_name": label,
-                        "source": raw.get("source", "Managed Device Discovery"),
-                    })
-                print(f"[ManagedDiscovery] Device '{label}' ({t}): discovered {len(items)} software items.", flush=True)
-            except Exception as exc:
-                print(f"[ManagedDiscovery] Device '{label}' note: {exc}", flush=True)
-            return label, items
-
-        all_raw = []
-        max_workers = min(10, max(1, len(asset_data_list)))
-        if asset_data_list:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(_discover_single, adata): adata for adata in asset_data_list}
-                for fut in as_completed(futures):
-                    _, dev_items = fut.result()
-                    all_raw.extend(dev_items)
-
-        print(f"[ManagedDiscovery] Ingesting {len(all_raw)} software items into database...", flush=True)
-        for item in all_raw:
-            try:
-                process_software_governance(
-                    db,
-                    software_name=item["name"],
-                    vendor=item.get("vendor"),
-                    version=item.get("version"),
-                    category=item.get("category", "Application"),
-                    asset_id=item["asset_id"],
-                    installed_path=item.get("installed_path"),
-                    ip_address=item.get("ip_address"),
-                    hostname=item.get("hostname"),
-                    endpoint_name=item.get("endpoint_name"),
-                    source=item.get("source", "Managed Device Discovery"),
+        query = db.query(AgentDevice).filter(AgentDevice.status == "active")
+        if target_device_id:
+            query = query.filter(
+                (AgentDevice.id == target_device_id) | 
+                (AgentDevice.device_id == target_device_id) | 
+                (AgentDevice.hostname == target_device_id)
+            )
+        elif target_asset_id:
+            asset = db.query(Asset).filter(Asset.id == target_asset_id).first()
+            if asset:
+                query = query.filter(
+                    (AgentDevice.hostname == asset.hostname) |
+                    (AgentDevice.hostname == asset.asset_name) |
+                    (AgentDevice.ip_address == asset.ip_address)
                 )
-            except Exception as exc:
-                print(f"[ManagedDiscovery] Governance ingest note: {exc}", flush=True)
-        print(f"[ManagedDiscovery] Completed! Ingested {len(all_raw)} software items.", flush=True)
+
+        active_agents = query.all()
+        print(f"[ManagedDiscovery] Running software discovery across {len(active_agents)} active managed agent devices...", flush=True)
+
+        total_discovered = 0
+        for ag in active_agents:
+            dev_label = ag.hostname or ag.device_id
+            target_ip = (ag.ip_address or "127.0.0.1").strip()
+            print(f"[ManagedDiscovery] Probing active managed agent '{dev_label}' ({target_ip})...", flush=True)
+
+            asset_obj = db.query(Asset).filter(
+                (Asset.hostname == ag.hostname) | (Asset.asset_name == ag.hostname) | (Asset.ip_address == target_ip)
+            ).first()
+            asset_id_str = str(asset_obj.id) if asset_obj else None
+
+            # 1. WMI discovery
+            wmi_res = []
+            if target_ip not in {"127.0.0.1", "localhost", "0.0.0.0"}:
+                wmi_res = run_wmi_discovery(target_ip)
+            
+            # 2. Network services discovery
+            nmap_res = run_nmap_service_discovery(target_ip)
+
+            combined = wmi_res + nmap_res
+            for item in combined:
+                try:
+                    process_software_governance(
+                        db,
+                        software_name=item["name"],
+                        vendor=item.get("vendor"),
+                        version=item.get("version"),
+                        category=item.get("category", "Application"),
+                        asset_id=asset_id_str,
+                        installed_path=item.get("installed_path"),
+                        ip_address=target_ip,
+                        hostname=ag.hostname,
+                        endpoint_name=dev_label,
+                        source=item.get("source", "Managed Agent Discovery"),
+                        commit=False,
+                        query_nvd=False,
+                    )
+                    total_discovered += 1
+                except Exception as exc:
+                    print(f"[ManagedDiscovery] Ingest note for {item.get('name')}: {exc}", flush=True)
+
+        db.commit()
+        print(f"[ManagedDiscovery] Discovery complete for active managed devices. Ingested {total_discovered} items.", flush=True)
+    except Exception as exc:
+        print(f"[ManagedDiscovery] Background discovery error: {exc}", flush=True)
     finally:
         db.close()
 
 
 @router.post("/rediscover-managed")
 def rediscover_managed_devices_software(
+    target_device_id: str | None = Query(default=None),
     target_asset_id: str | None = Query(default=None),
     background_tasks: BackgroundTasks = None,
     sync: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
     """
-    Run active software and service re-discovery in parallel across managed devices.
+    Run active software and service re-discovery specifically across active managed agent devices.
     Returns immediately with 200 OK and executes in background by default.
     """
-    query = db.query(Asset)
-    if target_asset_id:
-        query = query.filter(Asset.id == target_asset_id)
-        count = query.count()
-    else:
-        active_count = query.filter(Asset.is_active.is_(True)).count()
-        count = active_count if active_count else query.count()
+    query = db.query(AgentDevice).filter(AgentDevice.status == "active")
+    if target_device_id:
+        query = query.filter(
+            (AgentDevice.id == target_device_id) | 
+            (AgentDevice.device_id == target_device_id) | 
+            (AgentDevice.hostname == target_device_id)
+        )
+    count = query.count()
+
+    target_id = target_device_id or target_asset_id
 
     if sync:
-        _run_managed_discovery_background(target_asset_id)
+        _run_managed_discovery_background(target_id)
         return {
             "status": "completed",
-            "message": f"Successfully re-discovered software across {count} managed devices.",
+            "message": f"Successfully re-discovered software across {count} active managed devices.",
             "managed_devices_count": count,
         }
 
     if background_tasks is not None:
-        background_tasks.add_task(_run_managed_discovery_background, target_asset_id)
+        background_tasks.add_task(_run_managed_discovery_background, target_id)
     else:
-        _run_managed_discovery_background(target_asset_id)
+        _run_managed_discovery_background(target_id)
 
     return {
         "status": "queued",
-        "message": f"Software re-discovery initiated across {count} managed devices in the background.",
+        "message": f"Software re-discovery initiated across {count} active managed devices in the background.",
         "managed_devices_count": count,
     }
+
 
 
 

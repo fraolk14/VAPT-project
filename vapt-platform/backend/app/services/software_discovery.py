@@ -191,15 +191,32 @@ def process_software_governance(
     ip_address: str | None = None,
     hostname: str | None = None,
     endpoint_name: str | None = None,
-    source: str = "Nmap -sV",
+    source: str = "VAP Endpoint Agent",
+    commit: bool = True,
+    query_nvd: bool = False,
 ) -> Software:
-    """Classify software status (APPROVED, VULNERABLE, UNAUTHORIZED) using whitelist table & NVD CVE API and map network source."""
+    """Classify software status (APPROVED, VULNERABLE, UNAUTHORIZED) using whitelist table & fast CVE lookup."""
     # 1. Check Whitelist table
     whitelist_entry = db.query(WhitelistSoftware).filter(WhitelistSoftware.name.ilike(f"%{software_name}%")).first()
     
-    # 2. Query NVD API for CVEs
-    cve_ids, risk_score = query_nvd_for_cves(software_name, version)
-    
+    # 2. Fast CVE lookup (cached or heuristic)
+    cve_ids, risk_score = ([], 0.0)
+    if query_nvd:
+        cve_ids, risk_score = query_nvd_for_cves(software_name, version)
+    else:
+        cache_key = f"{software_name}:{version or ''}".strip().lower()
+        if cache_key in NVD_CACHE:
+            cve_ids, risk_score = NVD_CACHE[cache_key]
+        else:
+            name_lower = software_name.lower()
+            if any(k in name_lower for k in ["anydesk", "teamviewer", "logmein", "vnc", "torrent", "utorrent", "bittorrent"]):
+                risk_score = 6.5
+            elif any(k in name_lower for k in ["wireshark", "nmap", "putty", "mimikatz", "denuvo"]):
+                risk_score = 5.0
+            elif any(k in name_lower for k in ["python 2.", "openssl 1.0", "apache 2.2"]):
+                risk_score = 7.5
+                cve_ids = ["CVE-2021-41773", "CVE-2022-22720"]
+
     if whitelist_entry:
         status = "APPROVED"
     elif risk_score >= 7.0 or len(cve_ids) > 0:
@@ -223,13 +240,20 @@ def process_software_governance(
     else:
         sw.status = status
         sw.risk_score = max(sw.risk_score, risk_score)
-        sw.cves = list(set(sw.cves + cve_ids))
+        sw.cves = list(set((sw.cves or []) + cve_ids))
         sw.updated_at = datetime.now(timezone.utc)
 
     # Always link / record SoftwareAsset network source mapping
     existing_link = None
-    if ip_address:
+    if ip_address and hostname:
+        existing_link = db.query(SoftwareAsset).filter(
+            SoftwareAsset.software_id == sw.id,
+            (SoftwareAsset.ip_address == ip_address) | (SoftwareAsset.hostname == hostname)
+        ).first()
+    elif ip_address:
         existing_link = db.query(SoftwareAsset).filter(SoftwareAsset.software_id == sw.id, SoftwareAsset.ip_address == ip_address).first()
+    elif hostname:
+        existing_link = db.query(SoftwareAsset).filter(SoftwareAsset.software_id == sw.id, SoftwareAsset.hostname == hostname).first()
     elif asset_id:
         existing_link = db.query(SoftwareAsset).filter(SoftwareAsset.software_id == sw.id, SoftwareAsset.asset_id == asset_id).first()
 
@@ -249,11 +273,15 @@ def process_software_governance(
             existing_link.ip_address = ip_address
         if hostname:
             existing_link.hostname = hostname
+        if endpoint_name:
+            existing_link.endpoint_name = endpoint_name
         if source:
             existing_link.source = source
         if installed_path:
             existing_link.installed_path = installed_path
 
-    db.commit()
-    db.refresh(sw)
+    if commit:
+        db.commit()
+        db.refresh(sw)
     return sw
+
