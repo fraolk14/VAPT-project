@@ -112,14 +112,25 @@ func getNetworkInterfaces() ([]string, []string) {
 			}
 			if ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && ip.To4() != nil {
 				ipStr := ip.String()
-				if !strings.HasPrefix(ipStr, "169.254.") {
-					ips = append(ips, ipStr)
+				// Filter out link-local APIPA and Docker/WSL virtual bridge networks
+				if !strings.HasPrefix(ipStr, "169.254.") &&
+					!strings.HasPrefix(ipStr, "172.17.") &&
+					!strings.HasPrefix(ipStr, "172.18.") &&
+					!strings.HasPrefix(ipStr, "172.19.") &&
+					!strings.HasPrefix(ipStr, "172.20.") {
+					// Prioritize real LAN subnets (192.168.x.x, 10.x.x.x) at the top of the list
+					if strings.HasPrefix(ipStr, "192.168.") || strings.HasPrefix(ipStr, "10.") {
+						ips = append([]string{ipStr}, ips...)
+					} else {
+						ips = append(ips, ipStr)
+					}
 				}
 			}
 		}
 	}
 	return ips, macs
 }
+
 
 // getLoggedOnUserSID extracts logged-on Username, Domain, and User SID
 func getLoggedOnUserSID() (string, string, string) {

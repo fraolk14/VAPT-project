@@ -77,6 +77,46 @@ class CheckinRequest(BaseModel):
     shadow_it_flags: list[dict[str, Any]] = []
 
 
+def get_preferred_physical_ip(ip_list: list[str] | None = None, fallback_ip: str | None = None) -> str:
+    """
+    Extract the real physical LAN/WAN IP address from endpoint reported facts.
+    Prioritizes real physical LAN subnets (192.168.x.x, 10.x.x.x)
+    while discarding Docker bridge (172.17.x, 172.18.x, 172.19.x, 172.20.x), loopback, and APIPA.
+    """
+    candidates = []
+    for ip in (ip_list or []):
+        ip_str = str(ip).strip()
+        if not ip_str or ip_str in {"0.0.0.0", "Unknown IP", "127.0.0.1", "localhost"}:
+            continue
+        if ip_str.startswith("127.") or ip_str.startswith("169.254."):
+            continue
+        # Discard Docker and virtual bridge subnets
+        if ip_str.startswith(("172.17.", "172.18.", "172.19.", "172.20.")):
+            continue
+        candidates.append(ip_str)
+
+    def ip_rank(ip_str: str) -> int:
+        if ip_str.startswith("192.168."):
+            return 100
+        if ip_str.startswith("10."):
+            return 90
+        if ip_str.startswith("172."):
+            return 50
+        return 10
+
+    if candidates:
+        candidates.sort(key=ip_rank, reverse=True)
+        return candidates[0]
+
+    # Check fallback_ip
+    if fallback_ip:
+        fb = str(fallback_ip).strip()
+        if fb and not fb.startswith(("172.17.", "172.18.", "172.19.", "172.20.", "127.", "169.254.", "0.0.0.0", "Unknown IP")):
+            return fb
+
+    return ip_list[0] if (ip_list and len(ip_list) > 0) else (fallback_ip or "127.0.0.1")
+
+
 @router.post("/enroll", response_model=EnrollResponse)
 def enroll_agent_device(request: Request, payload: EnrollRequest, db: Session = Depends(get_db)):
     """Single-use enrollment token bootstrap trust endpoint."""
@@ -102,9 +142,11 @@ def enroll_agent_device(request: Request, payload: EnrollRequest, db: Session = 
     # Determine remote client IP from headers or direct socket
     forwarded_for = request.headers.get("x-forwarded-for")
     if forwarded_for:
-        client_ip = forwarded_for.split(",")[0].strip()
+        raw_ip = forwarded_for.split(",")[0].strip()
     else:
-        client_ip = request.client.host if request.client else "Unknown IP"
+        raw_ip = request.client.host if request.client else "Unknown IP"
+
+    client_ip = get_preferred_physical_ip(None, raw_ip)
 
     device_id = payload.hardware_id.strip() if payload.hardware_id else f"WIN-{secrets.token_hex(4).upper()}"
     raw_agent_key = f"vap_agent_sec_{secrets.token_urlsafe(32)}"
@@ -169,6 +211,7 @@ import traceback
 def agent_checkin(
     payload: CheckinRequest,
     x_agent_key: str = Header(..., alias="X-Agent-Key"),
+    request: Request = None,
     db: Session = Depends(get_db),
 ):
     """Periodic agent checkin ingestion with per-device key auth and revocation check."""
@@ -184,14 +227,12 @@ def agent_checkin(
         if device.status == "revoked":
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Agent device credential has been revoked.")
 
-        valid_ips = [ip for ip in (payload.asset.ip_addresses or []) if not ip.startswith("169.254.")]
-        primary_ip = valid_ips[0] if valid_ips else (payload.asset.ip_addresses[0] if payload.asset.ip_addresses else "127.0.0.1")
+        # Resolve real physical adapter IP (excluding Docker/virtual bridge subnets)
+        raw_client_ip = request.client.host if (request and request.client) else None
+        primary_ip = get_preferred_physical_ip(payload.asset.ip_addresses, raw_client_ip)
 
         device.last_seen = datetime.now(timezone.utc)
-        if valid_ips:
-            device.ip_address = valid_ips[0]
-        elif payload.asset.ip_addresses:
-            device.ip_address = payload.asset.ip_addresses[0]
+        device.ip_address = primary_ip
 
         if payload.asset.os_name:
             device.os_info = f"{payload.asset.os_name} {payload.asset.os_version or ''}".strip()
@@ -200,6 +241,7 @@ def agent_checkin(
         asset_obj = db.query(Asset).filter(
             (Asset.hostname == payload.asset.hostname) | (Asset.ip_address == primary_ip)
         ).first()
+
 
         owner_str = f"{payload.asset.user_domain}\\{payload.asset.username}" if payload.asset.user_domain and payload.asset.username else payload.asset.username
 
