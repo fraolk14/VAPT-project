@@ -2,16 +2,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models.asset import Asset
 from app.models.software import Software, SoftwareAsset, WhitelistSoftware
 from app.services.software_discovery import process_software_governance, run_nmap_service_discovery, run_wmi_discovery
 
 router = APIRouter(prefix="/software", tags=["Software Governance"])
+
 
 
 
@@ -259,111 +260,131 @@ def discover_subnet_software(payload: dict[str, Any], db: Session = Depends(get_
     return {"message": f"Discovered software across subnet {subnet}.", "total_items_found": len(results)}
 
 
+def _run_managed_discovery_background(target_asset_id: str | None = None) -> None:
+    db = SessionLocal()
+    try:
+        query = db.query(Asset)
+        if target_asset_id:
+            query = query.filter(Asset.id == target_asset_id)
+            managed_assets = query.all()
+        else:
+            active_assets = query.filter(Asset.is_active.is_(True)).all()
+            managed_assets = active_assets if active_assets else query.all()
+
+        print(f"[ManagedDiscovery] Background discovery running for {len(managed_assets)} managed devices...", flush=True)
+
+        asset_data_list = []
+        for a in managed_assets:
+            target_ip = (a.ip_address or "").strip()
+            target_host = (a.hostname or "").strip()
+            target = target_ip or target_host
+            if target and target not in {"127.0.0.1", "localhost", "0.0.0.0"}:
+                asset_data_list.append({
+                    "id": str(a.id),
+                    "asset_name": a.asset_name,
+                    "ip_address": target_ip,
+                    "hostname": target_host,
+                    "os": a.os,
+                    "os_type": a.os_type,
+                    "target": target,
+                })
+
+        def _discover_single(adata: dict[str, Any]) -> tuple[str, list[dict]]:
+            t = adata["target"]
+            label = adata["asset_name"] or adata["hostname"] or t
+            items = []
+            try:
+                wmi_res = []
+                if not adata.get("os") or "win" in str(adata.get("os")).lower() or "windows" in str(adata.get("os_type")).lower():
+                    wmi_res = run_wmi_discovery(t)
+                nmap_res = run_nmap_service_discovery(t)
+                for raw in wmi_res + nmap_res:
+                    items.append({
+                        "name": raw["name"],
+                        "vendor": raw.get("vendor"),
+                        "version": raw.get("version"),
+                        "category": raw.get("category", "Application"),
+                        "asset_id": adata["id"],
+                        "installed_path": raw.get("installed_path"),
+                        "ip_address": adata["ip_address"] or "127.0.0.1",
+                        "hostname": adata["hostname"] or t,
+                        "endpoint_name": label,
+                        "source": raw.get("source", "Managed Device Discovery"),
+                    })
+                print(f"[ManagedDiscovery] Device '{label}' ({t}): discovered {len(items)} software items.", flush=True)
+            except Exception as exc:
+                print(f"[ManagedDiscovery] Device '{label}' note: {exc}", flush=True)
+            return label, items
+
+        all_raw = []
+        max_workers = min(10, max(1, len(asset_data_list)))
+        if asset_data_list:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(_discover_single, adata): adata for adata in asset_data_list}
+                for fut in as_completed(futures):
+                    _, dev_items = fut.result()
+                    all_raw.extend(dev_items)
+
+        print(f"[ManagedDiscovery] Ingesting {len(all_raw)} software items into database...", flush=True)
+        for item in all_raw:
+            try:
+                process_software_governance(
+                    db,
+                    software_name=item["name"],
+                    vendor=item.get("vendor"),
+                    version=item.get("version"),
+                    category=item.get("category", "Application"),
+                    asset_id=item["asset_id"],
+                    installed_path=item.get("installed_path"),
+                    ip_address=item.get("ip_address"),
+                    hostname=item.get("hostname"),
+                    endpoint_name=item.get("endpoint_name"),
+                    source=item.get("source", "Managed Device Discovery"),
+                )
+            except Exception as exc:
+                print(f"[ManagedDiscovery] Governance ingest note: {exc}", flush=True)
+        print(f"[ManagedDiscovery] Completed! Ingested {len(all_raw)} software items.", flush=True)
+    finally:
+        db.close()
+
+
 @router.post("/rediscover-managed")
 def rediscover_managed_devices_software(
     target_asset_id: str | None = Query(default=None),
+    background_tasks: BackgroundTasks = None,
+    sync: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
     """
-    Run active software and service re-discovery in parallel across managed devices in asset inventory.
-    Optionally targets a specific managed device by asset_id.
+    Run active software and service re-discovery in parallel across managed devices.
+    Returns immediately with 200 OK and executes in background by default.
     """
     query = db.query(Asset)
     if target_asset_id:
         query = query.filter(Asset.id == target_asset_id)
-        managed_assets = query.all()
+        count = query.count()
     else:
-        active_assets = query.filter(Asset.is_active.is_(True)).all()
-        managed_assets = active_assets if active_assets else query.all()
+        active_count = query.filter(Asset.is_active.is_(True)).count()
+        count = active_count if active_count else query.count()
 
-    print(f"[ManagedDiscovery] Starting discovery across {len(managed_assets)} managed devices...", flush=True)
+    if sync:
+        _run_managed_discovery_background(target_asset_id)
+        return {
+            "status": "completed",
+            "message": f"Successfully re-discovered software across {count} managed devices.",
+            "managed_devices_count": count,
+        }
 
-    asset_data_list = []
-    for a in managed_assets:
-        target_ip = (a.ip_address or "").strip()
-        target_host = (a.hostname or "").strip()
-        target = target_ip or target_host
-        if target and target not in {"127.0.0.1", "localhost", "0.0.0.0"}:
-            asset_data_list.append({
-                "id": str(a.id),
-                "asset_name": a.asset_name,
-                "ip_address": target_ip,
-                "hostname": target_host,
-                "os": a.os,
-                "os_type": a.os_type,
-                "target": target,
-            })
-
-    def _discover_single_asset(adata: dict[str, Any]) -> tuple[str, list[dict]]:
-        t = adata["target"]
-        label = adata["asset_name"] or adata["hostname"] or t
-        print(f"[ManagedDiscovery] Probing device '{label}' ({t})...", flush=True)
-        items = []
-        try:
-            wmi_res = []
-            if not adata.get("os") or "win" in str(adata.get("os")).lower() or "windows" in str(adata.get("os_type")).lower():
-                wmi_res = run_wmi_discovery(t)
-            nmap_res = run_nmap_service_discovery(t)
-            for raw_item in wmi_res + nmap_res:
-                items.append({
-                    "name": raw_item["name"],
-                    "vendor": raw_item.get("vendor"),
-                    "version": raw_item.get("version"),
-                    "category": raw_item.get("category", "Application"),
-                    "asset_id": adata["id"],
-                    "installed_path": raw_item.get("installed_path"),
-                    "ip_address": adata["ip_address"] or "127.0.0.1",
-                    "hostname": adata["hostname"] or t,
-                    "endpoint_name": label,
-                    "source": raw_item.get("source", "Managed Device Discovery"),
-                })
-            print(f"[ManagedDiscovery] Device '{label}' finished: {len(items)} software items found.", flush=True)
-        except Exception as exc:
-            print(f"[ManagedDiscovery] Device '{label}' note: {exc}", flush=True)
-        return label, items
-
-    # Parallel execution with thread pool
-    all_discovered_raw = []
-    scanned_devices = []
-    max_workers = min(10, max(1, len(asset_data_list)))
-
-    if asset_data_list:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_discover_single_asset, adata): adata for adata in asset_data_list}
-            for fut in as_completed(futures):
-                dev_label, dev_items = fut.result()
-                scanned_devices.append(dev_label)
-                all_discovered_raw.extend(dev_items)
-
-    print(f"[ManagedDiscovery] Ingesting {len(all_discovered_raw)} discovered items into database...", flush=True)
-
-    saved_items = []
-    for item in all_discovered_raw:
-        try:
-            sw = process_software_governance(
-                db,
-                software_name=item["name"],
-                vendor=item.get("vendor"),
-                version=item.get("version"),
-                category=item.get("category", "Application"),
-                asset_id=item["asset_id"],
-                installed_path=item.get("installed_path"),
-                ip_address=item.get("ip_address"),
-                hostname=item.get("hostname"),
-                endpoint_name=item.get("endpoint_name"),
-                source=item.get("source", "Managed Device Discovery"),
-            )
-            saved_items.append(sw)
-        except Exception as exc:
-            print(f"[ManagedDiscovery] Governance ingest note: {exc}", flush=True)
-
-    print(f"[ManagedDiscovery] Re-discovery complete! Found {len(saved_items)} software items across {len(scanned_devices)} managed devices.", flush=True)
+    if background_tasks is not None:
+        background_tasks.add_task(_run_managed_discovery_background, target_asset_id)
+    else:
+        _run_managed_discovery_background(target_asset_id)
 
     return {
-        "message": f"Successfully re-discovered {len(saved_items)} software items across {len(scanned_devices)} managed devices.",
-        "scanned_devices_count": len(scanned_devices),
-        "total_items_found": len(saved_items),
-        "devices": scanned_devices[:10],
+        "status": "queued",
+        "message": f"Software re-discovery initiated across {count} managed devices in the background.",
+        "managed_devices_count": count,
     }
+
 
 
