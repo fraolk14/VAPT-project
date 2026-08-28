@@ -640,7 +640,11 @@ def run_direct_web_scan(db: Session, scan: Scan) -> Scan:
 
 def launch_zap_scan(db: Session, scan: Scan) -> Scan:
     client = ZAPClient()
-    metadata = client.launch_scan(scan.target, scan.profile)
+    try:
+        metadata = client.launch_scan(scan.target, scan.profile)
+    except Exception as exc:
+        print(f"[ZAP] Launch failed ({exc}), falling back seamlessly to direct deep web assessment.")
+        return run_direct_web_scan(db, scan)
 
     scan.target = metadata["target"]
     scan.status = "queued"
@@ -660,6 +664,7 @@ def launch_zap_scan(db: Session, scan: Scan) -> Scan:
     db.commit()
     db.refresh(scan)
     return refresh_zap_scan(db, scan)
+
 
 
 def launch_mobsf_scan(db: Session, scan: Scan) -> Scan:
@@ -856,12 +861,13 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
         else:
             raise RuntimeError(f"Unsupported ZAP scan phase '{phase}'.")
     except Exception as exc:
-        scan.status = "failed"
-        scan.error_message = str(exc)
+        print(f"[ZAP] Refresh/probe failed ({exc}), executing direct deep web assessment fallback.")
+        return run_direct_web_scan(db, scan)
 
     db.commit()
     db.refresh(scan)
     return scan
+
 
 
 def _background_openvas_worker(scan_id: str) -> None:

@@ -328,22 +328,38 @@ class ZAPClient:
         self.api_key = os.getenv("ZAP_API_KEY", "zap")
 
     def _request(self, component: str, category: str, name: str, **params: Any) -> dict[str, Any]:
+        headers = {"X-ZAP-API-Key": self.api_key} if self.api_key else {}
+        req_params = dict(params)
+        if self.api_key:
+            req_params["apikey"] = self.api_key
         try:
             response = requests.get(
                 f"{self.base_url}/JSON/{component}/{category}/{name}/",
-                params={"apikey": self.api_key, **params},
+                headers=headers,
+                params=req_params,
                 timeout=15,
                 verify=False,
             )
             response.raise_for_status()
             payload = response.json()
         except requests.RequestException as exc:
-            raise RuntimeError(f"Unable to reach ZAP at {self.base_url}: {exc}") from exc
+            try:
+                response = requests.get(
+                    f"{self.base_url}/JSON/{component}/{category}/{name}/",
+                    params=params,
+                    timeout=10,
+                    verify=False,
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except Exception:
+                raise RuntimeError(f"Unable to reach ZAP at {self.base_url}: {exc}") from exc
         except ValueError as exc:
             raise RuntimeError("ZAP returned a non-JSON response.") from exc
         if not isinstance(payload, dict):
             raise RuntimeError("Unexpected ZAP API response")
         return payload
+
 
     def normalize_target(self, target: str) -> str:
         normalized = target.strip()

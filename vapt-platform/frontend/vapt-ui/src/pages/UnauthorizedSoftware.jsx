@@ -21,9 +21,11 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
   // Discovery trigger state
   const [discoverTarget, setDiscoverTarget] = useState("");
   const [subnetInput, setSubnetInput] = useState("192.168.10.0/24");
+  const [selectedManagedDeviceId, setSelectedManagedDeviceId] = useState("");
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [isBulkWhitelisting, setIsBulkWhitelisting] = useState(false);
   const [feedback, setFeedback] = useState("");
+
 
   const fetchSoftwareData = () => {
     api.get("/software")
@@ -178,6 +180,49 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
     }
   };
 
+  const handleRediscoverManaged = async (assetId = null) => {
+    const targetId = assetId || selectedManagedDeviceId;
+    setIsDiscovering(true);
+    const targetAsset = assets.find((a) => String(a.id) === String(targetId));
+    const label = targetAsset ? (targetAsset.asset_name || targetAsset.hostname || targetAsset.ip_address) : "all managed devices";
+    setFeedback(`🔄 Discovering installed applications & services from ${label}...`);
+    try {
+      const url = targetId ? `/software/rediscover-managed?target_asset_id=${encodeURIComponent(targetId)}` : "/software/rediscover-managed";
+      const res = await api.post(url);
+      setFeedback(`✅ ${res.data.message || "Re-discovery complete."}`);
+      setIsDiscovering(false);
+      fetchSoftwareData();
+    } catch (err) {
+      setIsDiscovering(false);
+      setFeedback(err?.response?.data?.detail || "Failed to re-discover software from managed devices.");
+    }
+  };
+
+  const handleRediscoverHost = async (targetIp) => {
+    const ip = (targetIp || "").trim();
+    if (!ip || ip === "127.0.0.1") {
+      handleRediscoverManaged();
+      return;
+    }
+    setIsDiscovering(true);
+    setFeedback(`🔄 Running live WMI & Nmap -sV discovery on ${ip}...`);
+    try {
+      const res = await api.post("/software/discover", { target: ip });
+      setFeedback(`✅ Re-discovery complete for ${ip}. Found/updated ${res.data.length} software applications.`);
+      setIsDiscovering(false);
+      fetchSoftwareData();
+    } catch (err) {
+      setIsDiscovering(false);
+      setFeedback(err?.response?.data?.detail || `Failed to re-discover software on ${ip}.`);
+    }
+  };
+
+  const handleRediscoverAll = async () => {
+    handleRediscoverManaged();
+  };
+
+
+
   const approvedCount = softwareList.filter((s) => s.status === "APPROVED").length;
   const vulnerableCount = softwareList.filter((s) => s.status === "VULNERABLE" || (Array.isArray(s.cves) && s.cves.length > 0)).length;
   const unauthorizedCount = softwareList.filter((s) => s.status === "UNAUTHORIZED").length;
@@ -276,7 +321,7 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
         <div className="panel__header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "16px", marginBottom: "16px" }}>
           <div>
             <p className="eyebrow">Discovered software inventory</p>
-            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
               <h2 style={{ fontSize: "1.25rem", margin: 0 }}>Discovered Software ({rows.length})</h2>
               {statusFilter === "VULNERABLE" && (
                 <span style={{ background: "rgba(239, 68, 68, 0.2)", color: "#f87171", padding: "4px 10px", borderRadius: "6px", fontSize: "0.8rem", border: "1px solid rgba(239, 68, 68, 0.4)", fontWeight: "600" }}>
@@ -285,10 +330,60 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
               )}
             </div>
           </div>
-          <span style={{ fontSize: "0.85rem", color: "#94a3b8", background: "rgba(30, 41, 59, 0.6)", padding: "6px 12px", borderRadius: "6px", border: "1px solid rgba(148, 163, 184, 0.12)" }}>
-            Showing <strong>{(currentPage - 1) * pageSize + (pagedRows.length ? 1 : 0)}</strong> - <strong>{(currentPage - 1) * pageSize + pagedRows.length}</strong> of <strong>{rows.length}</strong>
-          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+            {assets && assets.length > 0 && (
+              <select
+                className="scan-select"
+                value={selectedManagedDeviceId}
+                onChange={(e) => setSelectedManagedDeviceId(e.target.value)}
+                style={{ fontSize: "0.82rem", padding: "7px 10px", minWidth: "210px", background: "rgba(15, 23, 42, 0.9)" }}
+                title="Select a specific managed device or scan all devices"
+              >
+                <option value="">🌐 All Managed Devices ({assets.length})</option>
+                {assets.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    💻 {a.asset_name || a.hostname || a.ip_address} ({a.ip_address || "No IP"})
+                  </option>
+                ))}
+              </select>
+            )}
+            <button
+              type="button"
+              className="scan-action scan-action--resume"
+              disabled={isDiscovering}
+              onClick={() => handleRediscoverManaged()}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "8px 16px",
+                fontSize: "0.85rem",
+                background: "linear-gradient(135deg, rgba(56, 189, 248, 0.2) 0%, rgba(14, 165, 233, 0.2) 100%)",
+                border: "1px solid rgba(56, 189, 248, 0.4)",
+                color: "#38bdf8",
+                borderRadius: "8px",
+                fontWeight: "600",
+                cursor: isDiscovering ? "not-allowed" : "pointer",
+                transition: "all 0.2s ease"
+              }}
+              title="Run automated WMI and network service discovery to rediscover software from managed devices"
+            >
+              {isDiscovering ? (
+                <>
+                  <span className="spinner-inline" style={{ display: "inline-block", width: "12px", height: "12px", border: "2px solid #38bdf8", borderTopColor: "transparent", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+                  Discovering Software...
+                </>
+              ) : (
+                <>🔄 Re-discover Managed Devices</>
+              )}
+            </button>
+            <span style={{ fontSize: "0.85rem", color: "#94a3b8", background: "rgba(30, 41, 59, 0.6)", padding: "6px 12px", borderRadius: "6px", border: "1px solid rgba(148, 163, 184, 0.12)" }}>
+              Showing <strong>{(currentPage - 1) * pageSize + (pagedRows.length ? 1 : 0)}</strong> - <strong>{(currentPage - 1) * pageSize + pagedRows.length}</strong> of <strong>{rows.length}</strong>
+            </span>
+          </div>
         </div>
+
+
 
         {/* Full-width Responsive Search and Filter Bar */}
         <div className="table-controls" style={{ width: "100%", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "12px", marginBottom: "16px" }}>
@@ -358,26 +453,48 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
                       </strong>
                     </td>
                     <td data-label="Governance Action" style={{ padding: "12px 14px", textAlign: "right" }} onClick={(e) => e.stopPropagation()}>
-                      {isApproved ? (
+                      <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: "6px" }}>
+                        {isApproved ? (
+                          <button
+                            type="button"
+                            className="scan-action scan-action--pause"
+                            style={{ padding: "6px 12px", fontSize: "0.78rem", background: "rgba(239, 68, 68, 0.15)", border: "1px solid rgba(239, 68, 68, 0.4)", color: "#f87171", borderRadius: "6px", fontWeight: "600" }}
+                            onClick={() => handleToggleWhitelist(item.name, item.vendor, "APPROVED")}
+                          >
+                            🚫 Blacklist App
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="scan-action scan-action--resume"
+                            style={{ padding: "6px 12px", fontSize: "0.78rem", background: "rgba(16, 185, 129, 0.15)", border: "1px solid rgba(16, 185, 129, 0.4)", color: "#34d399", borderRadius: "6px", fontWeight: "600" }}
+                            onClick={() => handleToggleWhitelist(item.name, item.vendor, "UNAUTHORIZED")}
+                          >
+                            🛡️ Whitelist App
+                          </button>
+                        )}
                         <button
                           type="button"
-                          className="scan-action scan-action--pause"
-                          style={{ padding: "6px 12px", fontSize: "0.78rem", background: "rgba(239, 68, 68, 0.15)", border: "1px solid rgba(239, 68, 68, 0.4)", color: "#f87171", borderRadius: "6px", fontWeight: "600" }}
-                          onClick={() => handleToggleWhitelist(item.name, item.vendor, "APPROVED")}
+                          className="scan-action"
+                          disabled={isDiscovering}
+                          title={`Re-discover software and services on ${targetIp}`}
+                          style={{
+                            padding: "6px 10px",
+                            fontSize: "0.78rem",
+                            background: "rgba(56, 189, 248, 0.12)",
+                            border: "1px solid rgba(56, 189, 248, 0.3)",
+                            color: "#38bdf8",
+                            borderRadius: "6px",
+                            fontWeight: "600",
+                            cursor: isDiscovering ? "not-allowed" : "pointer"
+                          }}
+                          onClick={() => handleRediscoverHost(targetIp)}
                         >
-                          🚫 Blacklist App
+                          🔄
                         </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="scan-action scan-action--resume"
-                          style={{ padding: "6px 12px", fontSize: "0.78rem", background: "rgba(16, 185, 129, 0.15)", border: "1px solid rgba(16, 185, 129, 0.4)", color: "#34d399", borderRadius: "6px", fontWeight: "600" }}
-                          onClick={() => handleToggleWhitelist(item.name, item.vendor, "UNAUTHORIZED")}
-                        >
-                          🛡️ Whitelist App
-                        </button>
-                      )}
+                      </div>
                     </td>
+
                   </tr>
                 );
               })}
@@ -447,11 +564,37 @@ export default function UnauthorizedSoftware({ summary, assets = [] }) {
                   <div className="coverage-row" style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid rgba(148, 163, 184, 0.1)" }}><span>Calculated Risk Score</span><strong>{selected.risk_score}</strong></div>
                   <div className="coverage-row" style={{ display: "flex", justifyContent: "space-between", padding: "8px 0" }}><span>Associated CVEs</span><strong>{selected.cves?.length ? selected.cves.join(", ") : "None"}</strong></div>
                 </div>
+                <div style={{ marginTop: "14px", paddingTop: "12px", borderTop: "1px solid rgba(148, 163, 184, 0.15)" }}>
+                  <button
+                    type="button"
+                    className="scan-action scan-action--resume"
+                    disabled={isDiscovering}
+                    onClick={() => handleRediscoverHost(selected.ip_address || selected.metadata?.ip_address || "127.0.0.1")}
+                    style={{
+                      width: "100%",
+                      display: "flex",
+                      justifyContent: "center",
+                      alignItems: "center",
+                      gap: "8px",
+                      padding: "9px 16px",
+                      fontSize: "0.85rem",
+                      background: "rgba(56, 189, 248, 0.15)",
+                      border: "1px solid rgba(56, 189, 248, 0.4)",
+                      color: "#38bdf8",
+                      borderRadius: "6px",
+                      fontWeight: "600",
+                      cursor: isDiscovering ? "not-allowed" : "pointer"
+                    }}
+                  >
+                    {isDiscovering ? "⏳ Discovering..." : `🔄 Re-discover Software on ${selected.ip_address || selected.metadata?.ip_address || "Target Host"}`}
+                  </button>
+                </div>
               </article>
             </div>
           ) : (
             <p className="empty-copy">Select a software entry from the inventory table above to view details.</p>
           )}
+
         </div>
 
         {/* RIGHT SUB-PANEL: Discovery & Approved Baseline Policy Tools */}

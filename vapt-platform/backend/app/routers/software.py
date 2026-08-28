@@ -255,3 +255,72 @@ def discover_subnet_software(payload: dict[str, Any], db: Session = Depends(get_
             print(f"[SubnetDiscovery] Error discovering {target}: {e}")
 
     return {"message": f"Discovered software across subnet {subnet}.", "total_items_found": len(results)}
+
+
+@router.post("/rediscover-managed")
+def rediscover_managed_devices_software(
+    target_asset_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """
+    Run active software and service re-discovery across all managed devices in asset inventory.
+    Optionally targets a specific managed device by asset_id.
+    """
+    query = db.query(Asset)
+    if target_asset_id:
+        query = query.filter(Asset.id == target_asset_id)
+    else:
+        # Prefer active assets
+        active_assets = query.filter(Asset.is_active.is_(True)).all()
+        managed_assets = active_assets if active_assets else query.all()
+
+    if target_asset_id:
+        managed_assets = query.all()
+
+    discovered_software_items = []
+    scanned_devices = []
+
+    for asset in managed_assets:
+        target_ip = (asset.ip_address or "").strip()
+        target_host = (asset.hostname or "").strip()
+        target = target_ip or target_host
+        if not target or target in {"127.0.0.1", "localhost", "0.0.0.0"}:
+            continue
+
+        device_label = asset.asset_name or target_host or target_ip
+        scanned_devices.append(device_label)
+        try:
+            # 1. Windows WMI discovery if OS is Windows or unspecified
+            wmi_results = []
+            if not asset.os or "win" in str(asset.os).lower() or "windows" in str(asset.os_type).lower():
+                wmi_results = run_wmi_discovery(target)
+            
+            # 2. Network service & version discovery (Nmap -sV & socket banner probing)
+            nmap_results = run_nmap_service_discovery(target)
+
+            combined = wmi_results + nmap_results
+            for item in combined:
+                sw = process_software_governance(
+                    db,
+                    software_name=item["name"],
+                    vendor=item.get("vendor"),
+                    version=item.get("version"),
+                    category=item.get("category", "Application"),
+                    asset_id=str(asset.id),
+                    installed_path=item.get("installed_path"),
+                    ip_address=target_ip or "127.0.0.1",
+                    hostname=target_host or target_ip,
+                    endpoint_name=asset.asset_name or target_host or target_ip,
+                    source=item.get("source", "Managed Device Discovery"),
+                )
+                discovered_software_items.append(sw)
+        except Exception as exc:
+            print(f"[ManagedDeviceDiscovery] Note for device {device_label} ({target}): {exc}")
+
+    return {
+        "message": f"Successfully re-discovered {len(discovered_software_items)} software items across {len(scanned_devices)} managed devices.",
+        "scanned_devices_count": len(scanned_devices),
+        "total_items_found": len(discovered_software_items),
+        "devices": scanned_devices[:10],
+    }
+

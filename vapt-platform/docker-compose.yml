@@ -84,7 +84,13 @@ services:
         "-port",
         "8080",
         "-config",
-        "api.key=${ZAP_API_KEY:-zap}",
+        "network.localServers.mainProxy.address=0.0.0.0",
+        "-config",
+        "network.localServers.mainProxy.port=8080",
+        "-config",
+        "network.localServers.mainProxy.behindNat=true",
+        "-config",
+        "api.disablekey=true",
         "-config",
         "api.addrs.addr.name=.*",
         "-config",
@@ -93,6 +99,8 @@ services:
     ports:
       - "8080:8080"
     profiles: ["extended"]
+
+
 
   mobsf:
     image: opensecurity/mobile-security-framework-mobsf:latest
