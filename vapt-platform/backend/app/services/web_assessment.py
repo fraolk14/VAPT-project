@@ -37,6 +37,7 @@ SENSITIVE_PATHS: list[tuple[str, str, float, str, str]] = [
     ("/assets/public/images/uploads/", "Exposed Public Uploads Directory Index", 6.5, "medium", "CWE-548"),
     ("/uploads/", "Exposed Uploads Directory Index", 6.5, "medium", "CWE-548"),
     ("/storage/", "Exposed Public Storage Directory Index", 6.5, "medium", "CWE-548"),
+    ("/downloads/", "Exposed Downloads Directory Index", 6.5, "medium", "CWE-548"),
     # Administrative & Management Portals
     ("/admin", "Unprotected Administrative Dashboard Route", 6.5, "medium", "OWASP ASVS V4.1"),
     ("/admin/", "Administrative Control Portal Interface", 6.5, "medium", "OWASP ASVS V4.1"),
@@ -120,7 +121,7 @@ def _crawl_target(
     # 3. Recursive In-Depth Crawler
     skip_extensions = (
         ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".css",
-        ".woff", ".woff2", ".ttf", ".eot", ".mp4", ".mp3", ".pdf", ".zip"
+        ".woff", ".woff2", ".ttf", ".eot", ".mp4", ".mp3", ".zip"
     )
 
     while queue and len(visited) < max_urls:
@@ -134,7 +135,6 @@ def _crawl_target(
             if res.status_code != 200:
                 continue
 
-            content_type = res.headers.get("content-type", "").lower()
             text_body = res.text
 
             # Extract standard HTML links (href, src, action)
@@ -146,7 +146,7 @@ def _crawl_target(
 
             # Extract Single Page Application (SPA) / REST API endpoints from inline & bundle JavaScript
             js_endpoints = re.findall(
-                r'''["'](/(?:api|rest|v[0-9]|auth|admin|user|users|account|profile|dashboard|login|logout|signin|signup|portal|feed|feedbacks|cart|checkout|products|item|order|download|view|search|setting|manage|doc|docs|swagger|ftp|challenges|secret)[a-zA-Z0-9_\-/\.\?=&]*)["']''',
+                r'''["'](/(?:api|rest|v[0-9]|auth|admin|user|users|account|profile|dashboard|login|logout|signin|signup|portal|feed|feedbacks|cart|checkout|products|item|order|download|downloads|view|search|setting|manage|doc|docs|swagger|ftp|challenges|secret)[a-zA-Z0-9_\-/\.\?=&]*)["']''',
                 text_body,
             )
 
@@ -175,7 +175,7 @@ def _crawl_target(
                                 k, _ = qp.split("=", 1)
                                 discovered_params.setdefault(clean_path_url, set()).add(k)
 
-                    # Enqueue for further recursive crawling if not a static asset
+                    # Enqueue for further recursive crawling if not a static image
                     if (
                         clean_path_url not in visited
                         and len(queue) < (max_urls * 2)
@@ -443,10 +443,72 @@ def run_web_assessment(
         max_urls=60 if deep_mode else 25,
     )
 
-    _report(50, "subdirectory_fuzzing", f"Fuzzing sensitive administrative directories & configuration files (Wordlist: {len(SENSITIVE_PATHS)} paths).")
+    # =========================================================================
+    # MODULE 5: Discovered Subdirectory & Document Analysis (SRI, Advisories, Dirs)
+    # =========================================================================
+    _report(45, "page_analysis", f"Auditing discovered pages and subdirectories ({len(discovered_urls)} endpoints)...")
+
+    for disc_url in list(discovered_urls):
+        try:
+            p_res = session.get(disc_url, timeout=4, verify=False)
+            if p_res.status_code != 200:
+                continue
+
+            p_path = urlparse(disc_url).path
+            p_body = p_res.text
+
+            # 1. Subresource Integrity (SRI) Check
+            external_scripts = re.findall(
+                r'''<(?:script|link)[^>]*(?:src|href)=["'](https?://[^"']+)["'][^>]*>''',
+                p_body,
+                re.IGNORECASE,
+            )
+            for ext_asset in external_scripts:
+                if "integrity=" not in ext_asset.lower() and domain not in ext_asset.lower():
+                    findings.append({
+                        "title": "Subresource Integrity (SRI) Attribute Missing",
+                        "category": "web",
+                        "source": "zap",
+                        "port": port,
+                        "protocol": "https" if base_url.startswith("https") else "http",
+                        "service": "http",
+                        "state": "open",
+                        "cve_id": None,
+                        "cvss_score": 4.3,
+                        "severity": "low",
+                        "evidence": f"External asset loaded without Subresource Integrity hash on {disc_url}: {ext_asset[:80]}",
+                        "remediation": "Add integrity and crossorigin=\"anonymous\" attributes to external script/stylesheet tags.",
+                        "compliance_map": ["OWASP ASVS V14.4.6", "CWE-353"],
+                        "metadata": {"url": disc_url, "host": host, "path": p_path, "cwe_id": "353"},
+                    })
+                    break  # One SRI alert per page
+
+            # 2. Exposed Sensitive Document or Advisory in Subdirectory
+            if any(disc_url.lower().endswith(ext) for ext in [".txt", ".pdf", ".bak", ".doc", ".docx", ".log", ".sql", ".csv"]):
+                if len(p_body) > 30 and "<!doctype html" not in p_body.lower() and not p_path.endswith("robots.txt"):
+                    findings.append({
+                        "title": f"Exposed Sensitive Document / Advisory File ({p_path})",
+                        "category": "web",
+                        "source": "zap",
+                        "port": port,
+                        "protocol": "https" if base_url.startswith("https") else "http",
+                        "service": "http",
+                        "state": "open",
+                        "cve_id": None,
+                        "cvss_score": 5.3,
+                        "severity": "medium",
+                        "evidence": f"Publicly accessible file in subdirectory {disc_url} (HTTP 200 OK, {len(p_body)} bytes). Sample content: {p_body[:100].strip()}",
+                        "remediation": "Restrict direct public indexing of document archives, advisories, and backup files.",
+                        "compliance_map": ["OWASP ASVS V12.5", "CWE-200"],
+                        "metadata": {"url": disc_url, "host": host, "path": p_path, "cwe_id": "200"},
+                    })
+        except Exception:
+            pass
+
+    _report(55, "subdirectory_fuzzing", f"Fuzzing sensitive administrative directories & configuration files (Wordlist: {len(SENSITIVE_PATHS)} paths).")
 
     # =========================================================================
-    # MODULE 5: Sensitive Path & Subdirectory Probing
+    # MODULE 6: Sensitive Path & Subdirectory Probing
     # =========================================================================
     def _check_path(path_item: tuple[str, str, float, str, str]) -> dict[str, Any] | None:
         path, title, cvss, severity, compliance = path_item
@@ -535,7 +597,7 @@ def run_web_assessment(
                 findings.append(res_finding)
 
     # =========================================================================
-    # MODULE 6: Discovered API & Route Access Control & Exposure Probing
+    # MODULE 7: Discovered API & Route Access Control & Exposure Probing
     # =========================================================================
     _report(65, "api_exposure", f"Auditing access control and unauthenticated data exposure across {len(discovered_urls)} discovered routes...")
 
@@ -584,7 +646,7 @@ def run_web_assessment(
                 pass
 
     # =========================================================================
-    # MODULE 7: Active Reflected & Form Cross-Site Scripting (XSS)
+    # MODULE 8: Active Reflected & Form Cross-Site Scripting (XSS)
     # =========================================================================
     _report(75, "xss_probes", "Testing active parameter and form input handling for Cross-Site Scripting (XSS)...")
 
@@ -623,16 +685,15 @@ def run_web_assessment(
                     "compliance_map": ["OWASP ASVS V5.3.1", "CWE-79"],
                     "metadata": {"url": xss_url, "host": host, "cwe_id": "79"},
                 })
-                break  # Single confirmed XSS finding is sufficient
+                break
         except Exception:
             pass
 
     # =========================================================================
-    # MODULE 8: Active SQL Injection & Authentication Bypass
+    # MODULE 9: Active SQL Injection & Authentication Bypass
     # =========================================================================
     _report(82, "sqli_probes", "Testing parameter inputs and login authentication handlers for SQL Injection...")
 
-    # 1. SQLi Search & Query Parameter Probes
     sqli_endpoints = [
         (f"{base_url}/rest/products/search?q=%27%29%29%20OR%201=1--", "SQL Injection in Product Search API", 8.8, "high"),
         (f"{base_url}/api/v1/products?id=1%27%20OR%201=1--", "Error-Based SQL Injection in Query Parameter", 8.9, "high"),
@@ -701,7 +762,7 @@ def run_web_assessment(
             pass
 
     # =========================================================================
-    # MODULE 9: Path Traversal & Local File Inclusion (LFI)
+    # MODULE 10: Path Traversal & Local File Inclusion (LFI)
     # =========================================================================
     _report(88, "lfi_probes", "Testing file retrieval handlers for Directory Traversal and Local File Inclusion...")
 
@@ -737,7 +798,7 @@ def run_web_assessment(
             pass
 
     # =========================================================================
-    # MODULE 10: Open URL Redirection
+    # MODULE 11: Open URL Redirection
     # =========================================================================
     _report(92, "open_redirect", "Testing redirect handlers for Open URL Redirection...")
 
@@ -774,7 +835,7 @@ def run_web_assessment(
             pass
 
     # =========================================================================
-    # MODULE 11: Insecure HTTP Methods (TRACE / PUT)
+    # MODULE 12: Insecure HTTP Methods (TRACE / PUT)
     # =========================================================================
     _report(95, "http_methods", "Auditing HTTP method permissions (TRACE, PUT, DELETE, OPTIONS)...")
     try:
@@ -800,7 +861,7 @@ def run_web_assessment(
         pass
 
     # =========================================================================
-    # MODULE 12: GraphQL Introspection Audit
+    # MODULE 13: GraphQL Introspection Audit
     # =========================================================================
     _report(98, "graphql_audit", "Probing GraphQL interfaces for unrestricted schema introspection...")
     for gql_path in ["/graphql", "/api/graphql", "/v1/graphql"]:

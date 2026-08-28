@@ -168,6 +168,16 @@ def list_findings(db: Session = Depends(get_db)):
 
         existing["duplicate_count"] += 1
 
+        # Track distinct subdirectories & endpoints
+        first_url = (existing.get("finding_metadata") or {}).get("url") or (existing.get("target_details") or {}).get("url")
+        new_url = (payload.get("finding_metadata") or {}).get("url") or (payload.get("target_details") or {}).get("url")
+        existing.setdefault("finding_metadata", {})
+        affected = existing["finding_metadata"].setdefault("affected_urls", [])
+        if first_url and first_url not in affected:
+            affected.append(first_url)
+        if new_url and new_url not in affected:
+            affected.append(new_url)
+
         existing["compliance_map"] = sorted(
             dict.fromkeys(chain(existing.get("compliance_map", []), payload.get("compliance_map", [])))
         )
@@ -179,8 +189,8 @@ def list_findings(db: Session = Depends(get_db)):
                 )
             )
         )
-        existing.setdefault("finding_metadata", {})
         existing["finding_metadata"]["cve_refs"] = merged_refs
+
         if not existing.get("display_id") and payload.get("display_id"):
             existing["display_id"] = payload["display_id"]
         if payload.get("evidence"):
