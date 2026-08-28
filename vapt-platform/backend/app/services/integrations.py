@@ -355,18 +355,28 @@ class ZAPClient:
     def launch_scan(self, target: str, mode: str = "spider-active") -> dict[str, Any]:
         normalized_target = self.normalize_target(target)
 
-        # Launch traditional spider
-        payload = self._request("spider", "action", "scan", url=normalized_target, maxChildren=0, recurse="true")
+        # Configure ZAP Spider for deep recursive subdirectory crawling
+        try:
+            self._request("spider", "action", "setOptionMaxDepth", Integer=5)
+            self._request("spider", "action", "setOptionParseComments", Boolean=True)
+            self._request("spider", "action", "setOptionParseRobotsTxt", Boolean=True)
+            self._request("spider", "action", "setOptionParseSitemapXml", Boolean=True)
+            self._request("spider", "action", "setOptionPostForm", Boolean=True)
+            self._request("spider", "action", "setOptionProcessForm", Boolean=True)
+        except Exception:
+            pass
+
+        # Launch traditional spider with recursive subdirectory traversal
+        payload = self._request("spider", "action", "scan", url=normalized_target, maxChildren=0, recurse="true", subtreeOnly="false")
         spider_scan_id = payload.get("scan")
         if not spider_scan_id:
             raise RuntimeError("ZAP did not return a spider scan id.")
 
         # Also launch AJAX spider for SPA support (juice-shop, Angular, React apps)
-        # AJAX spider uses a real browser to crawl JavaScript-heavy apps
         try:
             self._request("ajaxSpider", "action", "scan", url=normalized_target, inScope="false")
         except Exception:
-            pass  # AJAX spider is optional — traditional spider still runs
+            pass
 
         return {
             "engine": "zap",
@@ -377,6 +387,7 @@ class ZAPClient:
             "spider_scan_id": str(spider_scan_id),
             "remote_task_id": str(spider_scan_id),
         }
+
 
 
     def get_spider_status(self, spider_scan_id: str) -> dict[str, Any]:
