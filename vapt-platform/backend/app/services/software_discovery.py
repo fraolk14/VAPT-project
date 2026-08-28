@@ -17,12 +17,33 @@ logger = logging.getLogger(__name__)
 NVD_API_URL = os.getenv("NVD_API_URL", "https://services.nvd.nist.gov/rest/json/cves/2.0")
 NVD_API_KEY = os.getenv("NVD_API_KEY", "")
 
+# In-memory CVE cache to eliminate redundant NVD API latency
+NVD_CACHE: dict[str, tuple[list[str], float]] = {}
+
+
+def is_host_responsive(host: str, timeout: float = 0.4) -> bool:
+    """Quick 0.4s pre-flight check to see if host has any listening ports before running full scanner."""
+    probe_ports = [80, 443, 22, 135, 445, 8080, 8000, 3306, 5432, 21, 25]
+    for port in probe_ports:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(timeout)
+                if s.connect_ex((host, port)) == 0:
+                    return True
+        except Exception:
+            pass
+    return False
+
 
 def query_nvd_for_cves(software_name: str, version: str | None = None) -> tuple[list[str], float]:
     """
-    Query real NVD API for CVEs matching software name and optional version.
+    Query real NVD API for CVEs matching software name and optional version with fast in-memory caching.
     Returns (list of cve_ids, highest_risk_score).
     """
+    cache_key = f"{software_name}:{version or ''}".strip().lower()
+    if cache_key in NVD_CACHE:
+        return NVD_CACHE[cache_key]
+
     cve_ids: list[str] = []
     max_cvss: float = 0.0
     try:
@@ -33,9 +54,9 @@ def query_nvd_for_cves(software_name: str, version: str | None = None) -> tuple[
         
         response = requests.get(
             NVD_API_URL,
-            params={"keywordSearch": query, "resultsPerPage": 10},
+            params={"keywordSearch": query, "resultsPerPage": 5},
             headers=headers,
-            timeout=6,
+            timeout=2.0,
         )
         if response.status_code == 200:
             data = response.json()
@@ -52,9 +73,11 @@ def query_nvd_for_cves(software_name: str, version: str | None = None) -> tuple[
                     if score > max_cvss:
                         max_cvss = float(score)
     except Exception as exc:
-        logger.warning("NVD API lookup note for %s: %s", software_name, exc)
+        logger.debug("NVD API lookup note for %s: %s", software_name, exc)
     
-    return cve_ids, max_cvss
+    result = (cve_ids, max_cvss)
+    NVD_CACHE[cache_key] = result
+    return result
 
 
 def run_wmi_discovery(host: str) -> list[dict]:
@@ -69,7 +92,7 @@ def run_wmi_discovery(host: str) -> list[dict]:
             "Name,Vendor,Version,InstallLocation",
             "/format:csv",
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
         if res.returncode == 0:
             lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
             for line in lines[1:]:
@@ -88,12 +111,16 @@ def run_wmi_discovery(host: str) -> list[dict]:
 
 
 def run_nmap_service_discovery(host: str) -> list[dict]:
-    """Execute real Nmap -sV service version discovery subprocess against target host IP / hostname."""
+    """Execute fast Nmap / socket service version discovery against target host."""
     discovered = []
+
+    # Quick pre-flight check to skip offline hosts instantly
+    if not is_host_responsive(host, timeout=0.3):
+        return []
+
     try:
-        # Standard plaintext output scan on top ports
-        cmd = ["nmap", "-sV", "-F", "--open", host]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+        cmd = ["nmap", "-sV", "--version-light", "-T4", "-F", "--open", "--host-timeout", "4s", host]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if res.returncode == 0:
             for line in res.stdout.splitlines():
                 if "/tcp" in line or "/udp" in line:
@@ -129,7 +156,7 @@ def run_nmap_service_discovery(host: str) -> list[dict]:
         for port, service_label, category in common_ports:
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(1.5)
+                s.settimeout(0.3)
                 result = s.connect_ex((host, port))
                 if result == 0:
                     banner = ""
@@ -150,6 +177,7 @@ def run_nmap_service_discovery(host: str) -> list[dict]:
             except Exception:
                 pass
     return discovered
+
 
 
 def process_software_governance(
