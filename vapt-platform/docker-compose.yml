@@ -95,9 +95,8 @@ services:
         "-config",
         "api.addrs.addr.regex=true"
       ]
-    ports:
-      - "8080:8080"
     profiles: ["extended"]
+
 
 
 
