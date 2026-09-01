@@ -110,7 +110,7 @@ services:
 
 volumes:
   greenbone_gvmd_socket:
-    external: true
     name: greenbone-community-edition_gvmd_socket_vol
   pgdata:
   esdata:
+

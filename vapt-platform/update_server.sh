@@ -15,14 +15,18 @@ if ! docker compose version &> /dev/null; then
     if which docker-compose &> /dev/null; then
         DOCKER_COMPOSE_CMD="docker-compose"
     else
-        echo "? Error: Docker Compose is not installed."
+        echo "❌ Error: Docker Compose is not installed."
         exit 1
     fi
 fi
 
+# Ensure prerequisite volumes exist
+docker volume create greenbone-community-edition_gvmd_socket_vol >/dev/null 2>&1 || true
+
 # 3. Build and recreate API and Frontend containers
 echo "[2/4] Rebuilding and updating API & Frontend containers..."
 $DOCKER_COMPOSE_CMD up -d --build --force-recreate api frontend
+
 
 # 4. Ensure extended profile scanning engines (ZAP, MobSF, etc.) are running
 echo "[3/4] Ensuring extended scanning services are running..."
