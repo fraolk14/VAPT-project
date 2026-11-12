@@ -56,8 +56,11 @@ export default function Users() {
 
   // Mutations
   const createUserMutation = useMutation({
-    mutationFn: async (data) => (await api.post("/iam/users", data)).data,
-    onSuccess: () => {
+    mutationFn: async (data) => (await api.post("/iam/users", { ...data, password: data.password || null })).data,
+    onSuccess: (result) => {
+      if (result?.temporary_password) {
+        window.alert(`User created. Temporary password (shown once): ${result.temporary_password}`);
+      }
       queryClient.invalidateQueries(["iam-users"]);
       setModalState(null);
       userForm.reset();
@@ -640,7 +643,7 @@ export default function Users() {
                     type="password"
                     {...userForm.register("password")}
                     className="scan-input"
-                    placeholder="Enter password (e.g. ChangeMe123!)"
+                    placeholder="At least 10 characters (leave blank to generate one)"
                     style={{ width: "100%" }}
                   />
                 </div>

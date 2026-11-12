@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from "react";
 import { Link } from "react-router-dom";
-import axios from "axios";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import ForceGraph2D from "react-force-graph-2d";

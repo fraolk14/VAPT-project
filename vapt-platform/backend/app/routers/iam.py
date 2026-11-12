@@ -1,3 +1,5 @@
+import secrets
+
 import pyotp
 from datetime import datetime, timezone
 from typing import Any
@@ -9,7 +11,7 @@ from app.database import get_db
 from app.models.auth import AuthSession
 from app.models.iam import Group, Policy, Role, SSOConfig
 from app.models.user import User
-from app.services.security import hash_password
+from app.services.security import hash_password, normalize_role
 
 router = APIRouter(prefix="/iam", tags=["Identity & Access Management Engine"])
 
@@ -49,7 +51,7 @@ class UserCreateSchema(BaseModel):
     email: str
     full_name: str
     username: str | None = None
-    password: str | None = "ChangeMe123!"
+    password: str | None = None
     role_id: int | None = None
     group_ids: list[int] | None = []
     mfa_enabled: bool = False
@@ -126,7 +128,14 @@ def create_user(payload: UserCreateSchema, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="User with this email already exists")
 
     uname = payload.username or payload.email.split("@")[0]
-    pwd_hash = hash_password(payload.password or "Pass@123456")
+    temporary_password = None
+    if payload.password:
+        if len(payload.password) < 10:
+            raise HTTPException(status_code=400, detail="Password must be at least 10 characters.")
+        pwd_hash = hash_password(payload.password)
+    else:
+        temporary_password = secrets.token_urlsafe(12)
+        pwd_hash = hash_password(temporary_password)
     mfa_secret = pyotp.random_base32() if payload.mfa_enabled else None
 
     user = User(
@@ -135,7 +144,7 @@ def create_user(payload: UserCreateSchema, db: Session = Depends(get_db)):
         username=uname,
         password_hash=pwd_hash,
         role_id=payload.role_id,
-        role=db.get(Role, payload.role_id).name if payload.role_id and db.get(Role, payload.role_id) else "viewer",
+        role=normalize_role(db.get(Role, payload.role_id).name) if payload.role_id and db.get(Role, payload.role_id) else "viewer",
         mfa_enabled=payload.mfa_enabled,
         mfa_secret=mfa_secret,
         is_active=True,
@@ -147,7 +156,10 @@ def create_user(payload: UserCreateSchema, db: Session = Depends(get_db)):
     db.add(user)
     db.commit()
     db.refresh(user)
-    return {"message": "User created successfully", "user_id": user.id}
+    response = {"message": "User created successfully", "user_id": user.id}
+    if temporary_password:
+        response["temporary_password"] = temporary_password
+    return response
 
 
 @router.put("/users/{user_id}")
@@ -167,7 +179,7 @@ def update_user(user_id: str, payload: UserUpdateSchema, db: Session = Depends(g
         user.role_id = payload.role_id
         r_obj = db.get(Role, payload.role_id)
         if r_obj:
-            user.role = r_obj.name
+            user.role = normalize_role(r_obj.name)
     if payload.group_ids is not None:
         group_objs = db.query(Group).filter(Group.id.in_(payload.group_ids)).all()
         user.groups_rel = group_objs

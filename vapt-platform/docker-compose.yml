@@ -87,7 +87,7 @@ services:
         "-config",
         "network.localServers.mainProxy.behindNat=true",
         "-config",
-        "api.disablekey=true",
+        "api.key=${ZAP_API_KEY:?Set ZAP_API_KEY in .env}",
         "-config",
         "api.addrs.addr.name=.*",
         "-config",
@@ -100,8 +100,11 @@ services:
 
   mobsf:
     image: opensecurity/mobile-security-framework-mobsf:latest
-    ports:
-      - "8001:8000"
+    environment:
+      # Pin MobSF's REST API key so the platform (MOBSF_API_KEY in .env) can authenticate.
+      MOBSF_API_KEY: ${MOBSF_API_KEY:?Set MOBSF_API_KEY in .env}
+    # No host port: the API reaches MobSF on the Docker network, and MobSF's web UI ships
+    # with default credentials, so it must not be exposed on the server.
     profiles: ["extended"]
 
 volumes:

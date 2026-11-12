@@ -12,6 +12,8 @@ from app.models.asset import Asset
 from app.models.software import Software, SoftwareAsset, WhitelistSoftware
 from app.services.software_discovery import process_software_governance, run_nmap_service_discovery, run_wmi_discovery
 
+from app.services.security import require_analyst
+
 router = APIRouter(prefix="/software", tags=["Software Governance"])
 
 
@@ -100,7 +102,7 @@ def list_whitelist(db: Session = Depends(get_db)):
     return db.query(WhitelistSoftware).order_by(WhitelistSoftware.created_at.desc()).all()
 
 
-@router.post("/whitelist", response_model=WhitelistResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/whitelist", response_model=WhitelistResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_analyst)])
 def add_to_whitelist(payload: WhitelistCreate, db: Session = Depends(get_db)):
     """Add a software to the approved whitelist in PostgreSQL and update existing software status."""
     existing = db.query(WhitelistSoftware).filter(WhitelistSoftware.name.ilike(payload.name.strip())).first()
@@ -125,7 +127,7 @@ def add_to_whitelist(payload: WhitelistCreate, db: Session = Depends(get_db)):
     return entry
 
 
-@router.delete("/whitelist/{whitelist_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/whitelist/{whitelist_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_analyst)])
 def remove_from_whitelist(whitelist_id: int, db: Session = Depends(get_db)):
     """Remove a software from the approved whitelist."""
     entry = db.get(WhitelistSoftware, whitelist_id)
@@ -148,7 +150,7 @@ def remove_from_whitelist(whitelist_id: int, db: Session = Depends(get_db)):
     return None
 
 
-@router.post("/discover", response_model=list[SoftwareResponse])
+@router.post("/discover", response_model=list[SoftwareResponse], dependencies=[Depends(require_analyst)])
 def discover_software_on_target(payload: DiscoverRequest, db: Session = Depends(get_db)):
     """Run real discovery on target host via WMI/Nmap/Lynis and classify results in PostgreSQL database."""
     target_str = payload.target.strip()
@@ -201,7 +203,7 @@ def discover_software_on_target(payload: DiscoverRequest, db: Session = Depends(
     return processed
 
 
-@router.post("/bulk-whitelist")
+@router.post("/bulk-whitelist", dependencies=[Depends(require_analyst)])
 def bulk_whitelist_software(db: Session = Depends(get_db)):
     """Bulk approve all discovered software items across all managed endpoints and update whitelist baseline policy."""
     from app.models.finding import Finding
@@ -226,7 +228,7 @@ def bulk_whitelist_software(db: Session = Depends(get_db)):
     return {"message": f"Successfully whitelisted {count} software applications across all managed endpoints.", "whitelisted_count": count}
 
 
-@router.post("/discover-subnet")
+@router.post("/discover-subnet", dependencies=[Depends(require_analyst)])
 def discover_subnet_software(payload: dict[str, Any], db: Session = Depends(get_db)):
     """Run real software discovery across a specified subnet range across all endpoints."""
     subnet = payload.get("subnet", "").strip() or "192.168.10.0/24"
@@ -357,7 +359,7 @@ def _run_managed_discovery_background(target_device_id: str | None = None, targe
         db.close()
 
 
-@router.post("/rediscover-managed")
+@router.post("/rediscover-managed", dependencies=[Depends(require_analyst)])
 def rediscover_managed_devices_software(
     target_device_id: str | None = Query(default=None),
     target_asset_id: str | None = Query(default=None),

@@ -1,4 +1,5 @@
 import os
+import time
 import re
 from contextlib import contextmanager
 from pathlib import Path
@@ -327,7 +328,7 @@ class ZAPClient:
         self.base_url = os.getenv("ZAP_API_URL", "http://zap:8080")
         self.api_key = os.getenv("ZAP_API_KEY", "zap")
 
-    def _request(self, component: str, category: str, name: str, **params: Any) -> dict[str, Any]:
+    def _request(self, component: str, category: str, name: str, _timeout: int = 15, **params: Any) -> dict[str, Any]:
         headers = {"X-ZAP-API-Key": self.api_key} if self.api_key else {}
         req_params = dict(params)
         if self.api_key:
@@ -337,7 +338,7 @@ class ZAPClient:
                 f"{self.base_url}/JSON/{component}/{category}/{name}/",
                 headers=headers,
                 params=req_params,
-                timeout=15,
+                timeout=_timeout,
                 verify=False,
             )
             response.raise_for_status()
@@ -433,9 +434,16 @@ class ZAPClient:
                     continue
 
         if active_scan_id is None:
-            return {"active_scan_id": "0", "phase": "active"}
+            # Could not start the active scan; record it so the scan does not pretend it ran.
+            return {"active_scan_id": None, "active_scan_error": "ZAP refused to start an active scan for this URL.", "phase": "active"}
 
         return {"active_scan_id": str(active_scan_id), "phase": "active"}
+
+    def stop_active_scan(self, active_scan_id: str) -> None:
+        try:
+            self._request("ascan", "action", "stop", scanId=active_scan_id)
+        except Exception:
+            pass
 
     def get_active_scan_status(self, active_scan_id: str) -> dict[str, Any]:
         payload = self._request("ascan", "view", "status", scanId=active_scan_id)
@@ -443,22 +451,37 @@ class ZAPClient:
         return {"status": "completed" if progress >= 100 else "running", "progress": progress}
 
     def get_alerts(self, target: str) -> list[dict[str, Any]]:
-        # Collect ALL alerts from ZAP — paginate through all of them
+        """Fetch every ZAP alert for `target`.
+
+        Raises RuntimeError when ZAP cannot be read, so callers can retry instead of
+        mistaking a busy ZAP for "no vulnerabilities". ZAP filters by `baseurl` server-side,
+        which keeps responses small while other scans are running.
+        """
         all_alerts: list[dict[str, Any]] = []
         start = 0
-        page_size = 500
+        page_size = 200
+        parsed = urlparse(target if "://" in target else f"http://{target}")
+        base_filter = f"{parsed.scheme}://{parsed.netloc}"
         while True:
-            try:
-                payload = self._request("alert", "view", "alerts", start=start, count=page_size)
-                batch = payload.get("alerts", [])
-                if not isinstance(batch, list) or not batch:
+            last_exc: Exception | None = None
+            for attempt in range(3):
+                try:
+                    payload = self._request(
+                        "alert", "view", "alerts", _timeout=60, baseurl=base_filter, start=start, count=page_size
+                    )
                     break
-                all_alerts.extend(batch)
-                if len(batch) < page_size:
-                    break
-                start += page_size
-            except Exception:
+                except Exception as exc:  # ZAP is often slow while an active scan is running
+                    last_exc = exc
+                    time.sleep(5 * (attempt + 1))
+            else:
+                raise RuntimeError(f"Could not read ZAP alerts for {base_filter}: {last_exc}")
+            batch = payload.get("alerts", [])
+            if not isinstance(batch, list) or not batch:
                 break
+            all_alerts.extend(batch)
+            if len(batch) < page_size:
+                break
+            start += page_size
 
         if not all_alerts:
             return []
@@ -468,12 +491,7 @@ class ZAPClient:
         try:
             parsed_target = urlparse(target if "://" in target else f"http://{target}")
             target_host = (parsed_target.hostname or target).lower()
-            # Also handle Docker internal name mappings (e.g. juice-shop vs juice-shop.herokuapp.com)
             allowed_hosts = {target_host}
-            if "juice-shop" in target_host:
-                allowed_hosts.update(["juice-shop", "juice-shop.herokuapp.com", "localhost"])
-            elif "dvwa" in target_host:
-                allowed_hosts.update(["dvwa", "localhost"])
 
             filtered = []
             for alert in all_alerts:
@@ -550,7 +568,44 @@ class ZAPClient:
                     },
                 }
             )
-        return normalized
+        return _group_zap_findings(normalized)
+
+
+
+def _group_zap_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse ZAP's per-URL alerts into one finding per (issue, host:port), listing affected URLs.
+
+    ZAP reports the same issue once per URL (e.g. 200+ "Timestamp Disclosure" rows), which buries
+    real issues in the findings list and reports.
+    """
+    grouped: dict[tuple, dict[str, Any]] = {}
+    for finding in findings:
+        meta = finding.get("metadata") or {}
+        host = urlparse(meta.get("url") or "").netloc
+        key = (finding.get("title"), finding.get("severity"), meta.get("plugin_id"), host)
+        if key not in grouped:
+            first = dict(finding)
+            first["metadata"] = {**meta, "affected_urls": [], "affected_params": []}
+            grouped[key] = first
+        entry = grouped[key]
+        url = meta.get("url")
+        if url and url not in entry["metadata"]["affected_urls"]:
+            entry["metadata"]["affected_urls"].append(url)
+        param = meta.get("param")
+        if param and param not in entry["metadata"]["affected_params"]:
+            entry["metadata"]["affected_params"].append(param)
+        entry["confidence"] = max(entry.get("confidence") or 0, finding.get("confidence") or 0)
+
+    results = []
+    for entry in grouped.values():
+        urls = entry["metadata"]["affected_urls"]
+        entry["metadata"]["occurrences"] = len(urls) or 1
+        entry["metadata"]["affected_urls"] = urls[:50]
+        if len(urls) > 1:
+            sample = ", ".join(urls[:5]) + (f" and {len(urls) - 5} more" if len(urls) > 5 else "")
+            entry["evidence"] = f"{entry.get('evidence') or ''} | Found on {len(urls)} URLs: {sample}"
+        results.append(entry)
+    return results
 
 
 class MobSFClient:
@@ -757,18 +812,19 @@ class MobSFClient:
                 }
             )
 
-        code_analysis = report.get("code_analysis")
-        if isinstance(code_analysis, dict):
-            mobsf_findings = code_analysis.get("findings") or code_analysis.get("issues") or []
-            if isinstance(mobsf_findings, list):
-                for item in mobsf_findings[:15]:
-                    if not isinstance(item, dict):
+        # MobSF v4: `appsec` is MobSF's consolidated verdict list (manifest, network, certificate,
+        # binary, code, ...). Code issues are taken from `code_analysis` instead because that
+        # section carries CVSS, CWE and file locations.
+        appsec = report.get("appsec")
+        if isinstance(appsec, dict):
+            level_map = {"high": ("high", 7.5), "warning": ("medium", 5.5), "hotspot": ("low", 3.5)}
+            for level, (severity, cvss) in level_map.items():
+                for item in appsec.get(level) or []:
+                    if not isinstance(item, dict) or (item.get("section") or "").lower() == "code":
                         continue
-                    severity = str(item.get("severity") or "medium").lower()
-                    cvss = 8.5 if severity == "high" else 5.8 if severity == "medium" else 3.2
                     findings.append(
                         {
-                            "title": item.get("title") or item.get("issue") or "Mobile code issue",
+                            "title": item.get("title") or "Mobile security issue",
                             "category": "mobile",
                             "source": "mobsf",
                             "port": 0,
@@ -777,13 +833,60 @@ class MobSFClient:
                             "state": "open",
                             "cve_id": None,
                             "cvss_score": cvss,
-                            "severity": "high" if severity == "high" else "medium" if severity == "medium" else "low",
-                            "evidence": item.get("description") or item.get("detail") or item.get("evidence") or "MobSF code analysis reported a mobile issue.",
-                            "remediation": item.get("recommendation") or item.get("fix") or "Review the affected code path and align the implementation to MASVS and platform security best practices.",
+                            "severity": severity,
+                            "evidence": f"MobSF ({item.get('section') or 'analysis'}): {item.get('description') or item.get('title')}",
+                            "remediation": "Review this MobSF finding against OWASP MASVS guidance and fix it in the application build or manifest.",
                             "compliance_map": ["MASVS", "OWASP MSTG"],
-                            "metadata": {**common_metadata, "file": item.get("file") or item.get("filename"), "rule": item.get("rule") or item.get("issue")},
+                            "metadata": {**common_metadata, "mobsf_section": item.get("section"), "mobsf_level": level},
                         }
                     )
+
+        code_analysis = report.get("code_analysis")
+        if isinstance(code_analysis, dict):
+            mobsf_findings = code_analysis.get("findings") or code_analysis.get("issues") or []
+            items: list[tuple[str | None, dict[str, Any]]] = []
+            if isinstance(mobsf_findings, dict):
+                # v4 format: {rule_id: {"files": {path: lines}, "metadata": {...}}}
+                for rule_id, entry in mobsf_findings.items():
+                    if isinstance(entry, dict):
+                        meta = entry.get("metadata") or {}
+                        items.append((rule_id, {**meta, "files": entry.get("files") or {}}))
+            elif isinstance(mobsf_findings, list):
+                items = [(None, item) for item in mobsf_findings if isinstance(item, dict)]
+
+            for rule_id, item in items[:40]:
+                severity = str(item.get("severity") or "medium").lower()
+                if severity in {"info", "secure", "good"}:
+                    continue
+                normalized_severity = "high" if severity == "high" else "medium" if severity in {"medium", "warning"} else "low"
+                try:
+                    cvss = float(item.get("cvss"))
+                except (TypeError, ValueError):
+                    cvss = 8.5 if normalized_severity == "high" else 5.8 if normalized_severity == "medium" else 3.2
+                files = item.get("files") or {}
+                file_list = list(files.keys()) if isinstance(files, dict) else [str(item.get("file") or item.get("filename") or "")]
+                description = item.get("description") or item.get("detail") or item.get("evidence") or "MobSF code analysis reported a mobile issue."
+                evidence = description
+                if file_list and file_list[0]:
+                    evidence += " Affected files: " + ", ".join(file_list[:5]) + (" ..." if len(file_list) > 5 else "")
+                findings.append(
+                    {
+                        "title": item.get("title") or item.get("issue") or description.split(".")[0][:120] or "Mobile code issue",
+                        "category": "mobile",
+                        "source": "mobsf",
+                        "port": 0,
+                        "protocol": "file",
+                        "service": "mobile-binary",
+                        "state": "open",
+                        "cve_id": None,
+                        "cvss_score": cvss,
+                        "severity": normalized_severity,
+                        "evidence": evidence,
+                        "remediation": item.get("recommendation") or item.get("fix") or "Review the affected code path and align the implementation to MASVS and platform security best practices.",
+                        "compliance_map": [c for c in ["MASVS", item.get("masvs"), item.get("cwe"), item.get("owasp-mobile")] if c],
+                        "metadata": {**common_metadata, "files": file_list[:20], "rule": rule_id or item.get("rule") or item.get("issue"), "cwe": item.get("cwe")},
+                    }
+                )
 
         return findings or self.normalize_results(
             [
@@ -816,8 +919,22 @@ def _probe_service(name: str, base_url: str) -> dict[str, Any]:
                 "detail": payload.get("version", "reachable"),
             }
 
+        if name == "mobsf":
+            # Reachability alone is not enough: a wrong API key makes every mobile scan fall back.
+            response = requests.get(
+                f"{base_url}/api/v1/scans",
+                headers={"Authorization": os.getenv("MOBSF_API_KEY", "")},
+                timeout=3,
+            )
+            if response.status_code in (401, 403):
+                return {"healthy": False, "url": base_url, "detail": "MobSF rejected MOBSF_API_KEY; mobile scans use built-in checks only."}
+            return {"healthy": response.status_code < 400, "url": base_url}
+
         response = requests.get(base_url, timeout=2, verify=False)
-        return {"healthy": response.status_code < 500, "url": base_url}
+        result = {"healthy": response.status_code < 500, "url": base_url}
+        if name == "openvas":
+            result["detail"] = "Reachable. Note: network scans currently run on the built-in Nmap engine, not OpenVAS."
+        return result
     except (requests.RequestException, ValueError):
         return {"healthy": False, "url": base_url}
 

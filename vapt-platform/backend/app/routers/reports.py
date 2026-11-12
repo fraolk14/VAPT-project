@@ -24,6 +24,8 @@ from app.services.reporting import (
     summarize_findings,
 )
 
+from app.services.security import require_analyst
+
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
 
@@ -102,7 +104,7 @@ def get_branding():
     }
 
 
-@router.post("/branding/logo")
+@router.post("/branding/logo", dependencies=[Depends(require_analyst)])
 async def upload_brand_logo(
     company_name: str | None = Form(default=None),
     file: UploadFile = File(...),
@@ -342,8 +344,8 @@ def get_report_data(scan_job_id: str, db: Session = Depends(get_db)):
     }
 
 
-@router.post("/logo")
-@router.post("/v1/logo")
+@router.post("/logo", dependencies=[Depends(require_analyst)])
+@router.post("/v1/logo", dependencies=[Depends(require_analyst)])
 async def upload_logo_v1(
     company_name: str | None = Form(default=None),
     file: UploadFile = File(...),

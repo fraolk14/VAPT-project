@@ -155,14 +155,18 @@ def create_auth_session(
     return session
 
 
-def touch_auth_session(db: Session, session_token: str | None) -> None:
+def touch_auth_session(db: Session, session_token: str | None) -> bool:
+    """Refresh last-seen on an active session. Returns False when the session was revoked."""
     if not session_token:
-        return
-    session = db.query(AuthSession).filter(AuthSession.session_token == session_token, AuthSession.is_active.is_(True)).first()
+        return True
+    session = db.query(AuthSession).filter(AuthSession.session_token == session_token).first()
     if not session:
-        return
+        return True
+    if not session.is_active:
+        return False
     session.last_seen_at = datetime.now(timezone.utc)
     db.commit()
+    return True
 
 
 def deactivate_session(db: Session, user: User, session_id: str) -> None:
@@ -189,19 +193,60 @@ def get_current_user(
     except JWTError as exc:
         raise credentials_exception from exc
 
-    if payload.get("type") == "mfa":
+    # Only regular access tokens may be used as bearer credentials (not MFA tickets or SSO state).
+    if payload.get("type") not in (None, "access"):
         raise credentials_exception
 
     user = db.query(User).filter(User.username == username, User.is_active.is_(True)).first()
     if not user:
         raise credentials_exception
-    touch_auth_session(db, payload.get("sid"))
+    if not touch_auth_session(db, payload.get("sid")):
+        raise credentials_exception
     return user
 
 
+# Canonical platform roles. IAM role names and legacy spellings are mapped onto these.
+ROLE_ALIASES = {
+    "admin": "admin",
+    "administrator": "admin",
+    "analyst": "analyst",
+    "securityengineer": "analyst",
+    "security_engineer": "analyst",
+    "engineer": "analyst",
+    "auditor": "auditor",
+    "viewer": "viewer",
+}
+CANONICAL_ROLES = ("admin", "analyst", "auditor", "viewer")
+
+
+def normalize_role(role: str | None) -> str:
+    key = (role or "").strip().lower().replace(" ", "").replace("-", "_")
+    return ROLE_ALIASES.get(key, ROLE_ALIASES.get(key.replace("_", ""), "viewer"))
+
+
 def enforce_roles(current_user: User, *roles: str) -> None:
-    if roles and current_user.role not in roles:
+    if not roles:
+        return
+    allowed = {normalize_role(role) for role in roles}
+    # Auditors are read-only users: anything open to viewers is open to auditors.
+    if "viewer" in allowed:
+        allowed.add("auditor")
+    if normalize_role(current_user.role) not in allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Role '{current_user.role}' is not permitted for this action",
         )
+
+
+def require_roles(*roles: str):
+    """FastAPI dependency: the caller must be signed in and hold one of `roles`."""
+
+    def checker(current_user: User = Depends(get_current_user)) -> User:
+        enforce_roles(current_user, *roles)
+        return current_user
+
+    return checker
+
+
+require_admin = require_roles("admin")
+require_analyst = require_roles("admin", "analyst")

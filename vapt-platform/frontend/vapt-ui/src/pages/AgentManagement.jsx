@@ -15,13 +15,13 @@ export default function AgentManagement() {
 
   useEffect(() => {
     fetchDevices();
-    const interval = setInterval(fetchDevices, 5000);
+    const interval = setInterval(fetchDevices, 30000);
     return () => clearInterval(interval);
   }, []);
 
   const handleGenerateToken = async () => {
     try {
-      const res = await api.post("/agent/tokens/generate", { created_by: "admin", ttl_hours: 72 });
+      const res = await api.post("/agent/tokens/generate", { ttl_hours: 72 });
       setGeneratedToken(res.data.token);
       setTokenModal(true);
       setFeedback("Single-use enrollment token generated.");
@@ -40,6 +40,19 @@ export default function AgentManagement() {
       fetchDevices();
     } catch (error) {
       setFeedback("Failed to revoke agent device.");
+    }
+  };
+
+  const handleDeleteDevice = async (deviceId, hostname) => {
+    if (!window.confirm(`Delete '${hostname}'? It can then enroll again with a new token.`)) {
+      return;
+    }
+    try {
+      await api.delete(`/agent/devices/${deviceId}`);
+      setFeedback(`Device '${hostname}' was deleted and may re-enroll.`);
+      fetchDevices();
+    } catch (error) {
+      setFeedback("Failed to delete agent device.");
     }
   };
 
@@ -145,7 +158,16 @@ export default function AgentManagement() {
                         Revoke Credential
                       </button>
                     ) : (
-                      <span className="pill pill--info">REVOKED</span>
+                      <>
+                        <span className="pill pill--info">REVOKED</span>{" "}
+                        <button
+                          type="button"
+                          className="scan-action scan-action--cancel"
+                          onClick={() => handleDeleteDevice(device.device_id, device.hostname)}
+                        >
+                          Delete
+                        </button>
+                      </>
                     )}
                   </td>
                 </tr>

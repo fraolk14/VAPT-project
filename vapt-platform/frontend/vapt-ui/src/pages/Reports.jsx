@@ -2,7 +2,7 @@ import React, { useState, useMemo, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useDropzone } from "react-dropzone";
 import { motion, AnimatePresence } from "framer-motion";
-import axios from "axios";
+import api from "../api/client";
 import {
   FiFileText,
   FiDownload,
@@ -24,7 +24,7 @@ import {
 } from "react-icons/fi";
 
 const fetchReportDataApi = async (scanJobId = "latest") => {
-  const res = await axios.get(`/api/reports/data/${scanJobId}`);
+  const res = await api.get(`/reports/data/${scanJobId}`);
   return res.data;
 };
 
@@ -68,7 +68,7 @@ export default function Reports() {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("company_name", companyName);
-      await axios.post("/api/reports/logo", formData, {
+      await api.post("/reports/logo", formData, {
         headers: { "Content-Type": "multipart/form-data" },
       });
     } catch (err) {
@@ -136,7 +136,7 @@ export default function Reports() {
         include_compliance_map: includeComplianceMap,
       };
 
-      const res = await axios.post(`/api/reports/download/${jobId}`, payload, {
+      const res = await api.post(`/reports/download/${jobId}`, payload, {
         responseType: "blob",
       });
 

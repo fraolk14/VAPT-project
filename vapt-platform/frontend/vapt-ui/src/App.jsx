@@ -151,8 +151,13 @@ function App() {
   useEffect(() => {
     if (authState.status !== "authenticated") return;
     let ignore = false;
+    let inFlight = false;
 
+    // Shared data refresh for all pages. Kept deliberately light: it used to fire 24 requests
+    // (about 1 MB) every 4 seconds per open tab, which starved the API while scans ran.
     const loadData = () => {
+      if (inFlight || document.hidden) return;
+      inFlight = true;
       Promise.allSettled([
         api.get("/dashboard/summary"),
         api.get("/scans/"),
@@ -160,32 +165,27 @@ function App() {
         api.get("/findings/"),
         api.get("/iam/users"),
         api.get("/iam/groups"),
-        api.get("/integrations/status"),
         api.get("/threat-intelligence/summary"),
         api.get("/auth/status"),
         api.get("/auth/sessions"),
-        api.get("/posture/summary"),
-        api.get("/platform/attack-surface"),
-        api.get("/platform/attack-paths"),
         api.get("/platform/plugins"),
         api.get("/platform/api-keys"),
         api.get("/platform/devsecops/hooks"),
         api.get("/platform/devsecops/events"),
-        api.get("/platform/tenants"),
         api.get("/operations/monitoring/rules"),
         api.get("/operations/monitoring/events"),
         api.get("/operations/incidents"),
-        api.get("/operations/compliance/dashboard"),
         api.get("/alerts/rules"),
         api.get("/alerts/events"),
       ]).then((results) => {
+        inFlight = false;
         if (ignore) return;
         const [
           summaryRes, scansRes, assetsRes, findingsRes, usersRes, groupsRes,
-          integrationsRes, threatIntelRes, authStatusRes, authSessionsRes,
-          postureRes, attackSurfaceRes, attackPathsRes, pluginsRes, apiKeysRes,
-          hooksRes, eventsRes, tenantsRes, monitoringRulesRes, monitoringEventsRes,
-          incidentsRes, complianceRes, alertRulesRes, alertEventsRes
+          threatIntelRes, authStatusRes, authSessionsRes,
+          pluginsRes, apiKeysRes, hooksRes, eventsRes,
+          monitoringRulesRes, monitoringEventsRes, incidentsRes,
+          alertRulesRes, alertEventsRes
         ] = results;
 
         if (summaryRes.status === "fulfilled") setSummary(summaryRes.value.data);
@@ -194,25 +194,24 @@ function App() {
         if (findingsRes.status === "fulfilled") setFindings(findingsRes.value.data);
         if (usersRes.status === "fulfilled") setUsers(usersRes.value.data);
         if (groupsRes.status === "fulfilled") setGroups(groupsRes.value.data);
-        if (integrationsRes.status === "fulfilled") setIntegrations(integrationsRes.value.data);
         if (threatIntelRes.status === "fulfilled") setThreatIntel(threatIntelRes.value.data);
         if (authStatusRes.status === "fulfilled") setAuthStatus(authStatusRes.value.data);
         if (authSessionsRes.status === "fulfilled") setAuthSessions(authSessionsRes.value.data);
-        if (postureRes.status === "fulfilled") setPosture(postureRes.value.data);
 
-        setPlatformData({
-          attackSurface: attackSurfaceRes.status === "fulfilled" ? attackSurfaceRes.value.data : {},
-          attackPaths: attackPathsRes.status === "fulfilled" ? attackPathsRes.value.data : {},
+        setPlatformData((previous) => ({
+          ...previous,
+          attackSurface: previous?.attackSurface || {},
+          attackPaths: previous?.attackPaths || {},
           plugins: pluginsRes.status === "fulfilled" ? pluginsRes.value.data : [],
           apiKeys: apiKeysRes.status === "fulfilled" ? apiKeysRes.value.data : [],
           hooks: hooksRes.status === "fulfilled" ? hooksRes.value.data : [],
           events: eventsRes.status === "fulfilled" ? eventsRes.value.data : [],
-          tenants: tenantsRes.status === "fulfilled" ? tenantsRes.value.data : [],
+          tenants: previous?.tenants || [],
           monitoringRules: monitoringRulesRes.status === "fulfilled" ? monitoringRulesRes.value.data : [],
           monitoringEvents: monitoringEventsRes.status === "fulfilled" ? monitoringEventsRes.value.data : [],
           incidents: incidentsRes.status === "fulfilled" ? incidentsRes.value.data : [],
-          compliance: complianceRes.status === "fulfilled" ? complianceRes.value.data : {},
-        });
+          compliance: previous?.compliance || {},
+        }));
 
         setAlerts({
           rules: alertRulesRes.status === "fulfilled" ? alertRulesRes.value.data : [],
@@ -221,11 +220,19 @@ function App() {
       });
     };
 
+    // Integration health probes external feeds, so fetch it once per sign-in, not on every poll.
+    api.get("/integrations/health")
+      .then((res) => { if (!ignore) setIntegrations(res.data); })
+      .catch(() => {});
+
     loadData();
-    const interval = window.setInterval(loadData, 4000);
+    const interval = window.setInterval(loadData, 30000);
+    const onVisible = () => { if (!document.hidden) loadData(); };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       ignore = true;
       window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [authState.status]);
 

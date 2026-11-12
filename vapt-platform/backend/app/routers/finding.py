@@ -233,6 +233,16 @@ def list_findings(db: Session = Depends(get_db)):
     return findings
 
 
+# Must be declared before /{finding_id}, otherwise FastAPI treats the path as a finding id.
+@router.get("/false-positive-rules", response_model=list[FalsePositiveRuleOut])
+def list_false_positive_rules(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    enforce_roles(current_user, "admin")
+    return db.query(FalsePositiveRule).order_by(FalsePositiveRule.created_at.desc()).all()
+
+
 @router.get("/{finding_id}", response_model=FindingOut)
 def get_finding_detail(finding_id: str, db: Session = Depends(get_db)):
     finding = db.get(Finding, finding_id)
@@ -445,15 +455,6 @@ def batch_delete_findings(
     )
     db.commit()
     return {"deleted_count": total_deleted, "message": f"Permanently deleted {total_deleted} finding record(s) from database"}
-
-
-@router.get("/false-positive-rules", response_model=list[FalsePositiveRuleOut])
-def list_false_positive_rules(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    enforce_roles(current_user, "admin")
-    return db.query(FalsePositiveRule).order_by(FalsePositiveRule.created_at.desc()).all()
 
 
 @router.post("/{finding_id}/suppress-global", response_model=FalsePositiveRuleOut)

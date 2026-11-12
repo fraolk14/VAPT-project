@@ -451,7 +451,8 @@ def _http_security_findings(host: str, port: int, service: str, metadata: dict[s
         )
 
     actuator_probe = next((probe for probe in probes if probe["path"] == "/actuator/health"), None)
-    if actuator_probe and actuator_probe.get("status_line", "").startswith("HTTP/1.1 200"):
+    actuator_body = (actuator_probe or {}).get("body_excerpt", "").lower()
+    if _is_real_page(actuator_probe, probes) and '"status"' in actuator_body and "<html" not in actuator_body:
         findings.append(
             _base_finding(
                 host=host,
@@ -467,7 +468,10 @@ def _http_security_findings(host: str, port: int, service: str, metadata: dict[s
         )
 
     server_status_probe = next((probe for probe in probes if probe["path"] == "/server-status"), None)
-    if server_status_probe and server_status_probe.get("status_line", "").startswith("HTTP/1.1 200"):
+    status_body = (server_status_probe or {}).get("body_excerpt", "").lower()
+    if _is_real_page(server_status_probe, probes) and any(
+        marker in status_body for marker in ("server status", "server uptime", "active connections", "total accesses")
+    ):
         findings.append(
             _base_finding(
                 host=host,
@@ -570,8 +574,24 @@ def _service_specific_findings(host: str, port: int, service: str, metadata: dic
     return findings
 
 
+SOFT_404_PROBE_PATH = "/__vap_soft404_probe_7f3a9c"
+
+
+def _is_real_page(probe: dict[str, Any] | None, probes: list[dict[str, Any]]) -> bool:
+    """True when `probe` returned 200 and is not the same catch-all page a random path returns."""
+    if not probe or not probe.get("status_line", "").split(" ")[1:2] == ["200"]:
+        return False
+    control = next((p for p in probes if p["path"] == SOFT_404_PROBE_PATH), None)
+    if control and control.get("status_line", "").split(" ")[1:2] == ["200"]:
+        body, control_body = probe.get("body_excerpt", ""), control.get("body_excerpt", "")
+        if body == control_body or (body[:200] == control_body[:200] and abs(len(body) - len(control_body)) < 50):
+            return False
+    return True
+
+
 def _http_probe_bundle(host: str, port: int, tls: bool) -> list[dict[str, Any]]:
-    paths = ["/", "/robots.txt", "/.well-known/security.txt", "/server-status", "/actuator/health"]
+    # The random path lets checks tell a real page from an SPA/catch-all "soft 404" response.
+    paths = ["/", "/robots.txt", "/.well-known/security.txt", "/server-status", "/actuator/health", SOFT_404_PROBE_PATH]
     results: list[dict[str, Any]] = []
     for path in paths:
         try:

@@ -138,14 +138,20 @@ docker compose -f docker/openvas-compose.yml up -d
 
 See [openvas-setup.md](/C:/Users/User/Documents/VAPT%20project/vapt-platform/docs/openvas-setup.md) for details.
 
-## Default local admin
+## First admin account
 
-Bootstrap/default local admin in the current code path:
+On first start, if no admin exists, the API creates the user `admin`:
 
-- Username: `admin`
-- Password: `ChangeMe123!`
+- Password: the value of `BOOTSTRAP_ADMIN_PASSWORD` in `.env`, or, if that is empty, a random password printed once in the API logs (`docker compose logs api | grep "initial admin"`).
+- Existing accounts are never modified on restart.
 
-Change this immediately in any non-demo environment.
+To recover a lost admin password:
+
+```bash
+docker compose exec api python -m app.scripts.bootstrap_admin --reset
+```
+
+Self-registration is disabled; administrators create all other users. Demo assets and findings are only seeded when `SEED_DEMO_DATA=true`.
 
 ## Reports
 

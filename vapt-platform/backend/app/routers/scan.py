@@ -22,10 +22,12 @@ from app.services.orchestrator import (
 )
 from app.services.security import enforce_roles, get_current_user
 
+from app.services.security import require_analyst
+
 router = APIRouter(prefix="/scans", tags=["Scans"])
 
 
-@router.post("/", response_model=ScanResponse)
+@router.post("/", response_model=ScanResponse, dependencies=[Depends(require_analyst)])
 def create_scan_record(
     scan: ScanCreate,
     background_tasks: BackgroundTasks,
@@ -82,7 +84,7 @@ def create_scan_record(
     return db_scan
 
 
-@router.post("/network", response_model=ScanResponse)
+@router.post("/network", response_model=ScanResponse, dependencies=[Depends(require_analyst)])
 def create_network_scan(
     payload: NetworkScanRequest,
     background_tasks: BackgroundTasks,
@@ -106,7 +108,7 @@ def create_network_scan(
     return scan
 
 
-@router.post("/web", response_model=ScanResponse)
+@router.post("/web", response_model=ScanResponse, dependencies=[Depends(require_analyst)])
 def create_web_scan(
     payload: WebScanRequest,
     background_tasks: BackgroundTasks,
@@ -135,7 +137,7 @@ def create_web_scan(
     return scan
 
 
-@router.post("/mobile", response_model=ScanResponse)
+@router.post("/mobile", response_model=ScanResponse, dependencies=[Depends(require_analyst)])
 async def create_mobile_scan(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -228,7 +230,7 @@ def get_scan_debug(
     )
 
 
-@router.post("/{scan_id}/pause", response_model=ScanResponse)
+@router.post("/{scan_id}/pause", response_model=ScanResponse, dependencies=[Depends(require_analyst)])
 def pause_scan_record(scan_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     enforce_roles(current_user, "admin", "analyst")
     scan = db.get(Scan, scan_id)
@@ -237,7 +239,7 @@ def pause_scan_record(scan_id: str, db: Session = Depends(get_db), current_user:
     return pause_scan(db, scan)
 
 
-@router.post("/{scan_id}/resume", response_model=ScanResponse)
+@router.post("/{scan_id}/resume", response_model=ScanResponse, dependencies=[Depends(require_analyst)])
 def resume_scan_record(scan_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     enforce_roles(current_user, "admin", "analyst")
     scan = db.get(Scan, scan_id)
@@ -246,7 +248,7 @@ def resume_scan_record(scan_id: str, db: Session = Depends(get_db), current_user
     return resume_scan(db, scan)
 
 
-@router.post("/{scan_id}/cancel")
+@router.post("/{scan_id}/cancel", dependencies=[Depends(require_analyst)])
 def cancel_scan_record(scan_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     enforce_roles(current_user, "admin", "analyst")
     scan = db.get(Scan, scan_id)
@@ -259,7 +261,7 @@ def cancel_scan_record(scan_id: str, db: Session = Depends(get_db), current_user
     return {"message": "Scan cancelled and deleted successfully"}
 
 
-@router.post("/{scan_id}/reprocess", response_model=ScanResponse)
+@router.post("/{scan_id}/reprocess", response_model=ScanResponse, dependencies=[Depends(require_analyst)])
 def reprocess_scan_record(
     scan_id: str,
     db: Session = Depends(get_db),
@@ -275,7 +277,7 @@ def reprocess_scan_record(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/{scan_id}/rescan", response_model=ScanResponse)
+@router.post("/{scan_id}/rescan", response_model=ScanResponse, dependencies=[Depends(require_analyst)])
 def rescan_record(
     scan_id: str,
     background_tasks: BackgroundTasks,
@@ -310,7 +312,7 @@ def rescan_record(
     return new_scan
 
 
-@router.delete("/{scan_id}")
+@router.delete("/{scan_id}", dependencies=[Depends(require_analyst)])
 def delete_scan_record(
     scan_id: str,
     db: Session = Depends(get_db),
@@ -342,8 +344,8 @@ def list_scan_jobs(db: Session = Depends(get_db)):
     return db.query(ScanJobModel).order_by(ScanJobModel.created_at.desc()).all()
 
 
-@router.post("/jobs", response_model=ScanJobResponseSchema)
-@router.post("/v1/jobs", response_model=ScanJobResponseSchema)
+@router.post("/jobs", response_model=ScanJobResponseSchema, dependencies=[Depends(require_analyst)])
+@router.post("/v1/jobs", response_model=ScanJobResponseSchema, dependencies=[Depends(require_analyst)])
 def create_scan_job(
     payload: ScanJobCreateSchema,
     background_tasks: BackgroundTasks,
@@ -377,8 +379,8 @@ def get_scan_job(job_id: int, db: Session = Depends(get_db)):
     return job
 
 
-@router.post("/jobs/{job_id}/cancel", response_model=ScanJobResponseSchema)
-@router.post("/v1/jobs/{job_id}/cancel", response_model=ScanJobResponseSchema)
+@router.post("/jobs/{job_id}/cancel", response_model=ScanJobResponseSchema, dependencies=[Depends(require_analyst)])
+@router.post("/v1/jobs/{job_id}/cancel", response_model=ScanJobResponseSchema, dependencies=[Depends(require_analyst)])
 def cancel_scan_job(job_id: int, db: Session = Depends(get_db)):
     job = db.get(ScanJobModel, job_id)
     if not job:
@@ -389,8 +391,8 @@ def cancel_scan_job(job_id: int, db: Session = Depends(get_db)):
     return job
 
 
-@router.delete("/jobs/{job_id}")
-@router.delete("/v1/jobs/{job_id}")
+@router.delete("/jobs/{job_id}", dependencies=[Depends(require_analyst)])
+@router.delete("/v1/jobs/{job_id}", dependencies=[Depends(require_analyst)])
 def delete_scan_job(job_id: int, db: Session = Depends(get_db)):
     job = db.get(ScanJobModel, job_id)
     if not job:
@@ -400,8 +402,8 @@ def delete_scan_job(job_id: int, db: Session = Depends(get_db)):
     return {"message": "Scan job deleted successfully"}
 
 
-@router.post("/jobs/{job_id}/rescan", response_model=ScanJobResponseSchema)
-@router.post("/v1/jobs/{job_id}/rescan", response_model=ScanJobResponseSchema)
+@router.post("/jobs/{job_id}/rescan", response_model=ScanJobResponseSchema, dependencies=[Depends(require_analyst)])
+@router.post("/v1/jobs/{job_id}/rescan", response_model=ScanJobResponseSchema, dependencies=[Depends(require_analyst)])
 def rescan_scan_job(
     job_id: int,
     background_tasks: BackgroundTasks,

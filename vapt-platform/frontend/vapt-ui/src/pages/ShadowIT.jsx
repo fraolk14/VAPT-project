@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo, Component } from "react";
 import { useForm } from "react-hook-form";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import axios from "axios";
+import api from "../api/client";
 import { motion, AnimatePresence } from "framer-motion";
 import ForceGraph2D from "react-force-graph-2d";
 import {
@@ -73,11 +73,11 @@ class SafeErrorBoundary extends Component {
 const fetchShadowITData = async (org) => {
   const cleanOrg = encodeURIComponent(org || "acmecorp.com");
   try {
-    const res = await axios.get(`/api/v1/shadow-it/discover/${cleanOrg}`);
+    const res = await api.get(`/v1/shadow-it/discover/${cleanOrg}`);
     return res.data;
   } catch (err1) {
     try {
-      const fallbackRes = await axios.get(`/api/shadow-it/discover/${cleanOrg}`);
+      const fallbackRes = await api.get(`/shadow-it/discover/${cleanOrg}`);
       return fallbackRes.data;
     } catch (err2) {
       throw new Error(`Shadow IT discovery endpoint unavailable: ${err2.message || err1.message}`);
