@@ -1,7 +1,8 @@
+import os
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -758,6 +759,11 @@ def refresh_openvas_scan(db: Session, scan: Scan) -> Scan:
     return scan
 
 
+ZAP_MAX_ACTIVE_MINUTES = int(os.getenv("ZAP_MAX_ACTIVE_MINUTES", "120"))
+ZAP_MAX_STATUS_FAILURES = int(os.getenv("ZAP_MAX_STATUS_FAILURES", "12"))
+ZAP_POLL_SECONDS = 10
+
+
 def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
     client = ZAPClient()
     metadata = scan.engine_metadata or {}
@@ -790,14 +796,39 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
                     "active_progress": 0,
                 }
         elif phase == "active":
+            # NOTE: ZAP numbers scans from 0, so "0" is a real scan id and must be polled.
             active_scan_id = metadata.get("active_scan_id")
-            if not active_scan_id or str(active_scan_id) == "0":
+            warnings = list(metadata.get("scan_warnings") or [])
+            if active_scan_id is None or str(active_scan_id).strip() == "":
+                warnings.append(metadata.get("active_scan_error") or "ZAP active scan did not start; results come from spidering and passive checks only.")
                 active_status = {"status": "completed", "progress": 100}
             else:
+                started = metadata.get("active_started_at")
+                if not started:
+                    started = datetime.now(timezone.utc).isoformat()
+                    metadata = {**metadata, "active_started_at": started}
+                elapsed_min = (datetime.now(timezone.utc) - datetime.fromisoformat(started)).total_seconds() / 60
                 try:
                     active_status = client.get_active_scan_status(str(active_scan_id))
-                except Exception:
-                    active_status = {"status": "completed", "progress": 100}
+                    metadata = {**metadata, "status_failures": 0}
+                except Exception as status_exc:
+                    failures = int(metadata.get("status_failures") or 0) + 1
+                    metadata = {**metadata, "status_failures": failures}
+                    if failures < ZAP_MAX_STATUS_FAILURES:
+                        # Transient ZAP/API hiccup: keep the scan running and try again next poll.
+                        scan.engine_metadata = metadata
+                        db.commit()
+                        db.refresh(scan)
+                        return scan
+                    warnings.append(f"Lost contact with ZAP while the active scan was running ({status_exc}); results may be incomplete.")
+                    active_status = {"status": "completed", "progress": int(metadata.get("active_progress") or 0)}
+                if active_status["status"] != "completed" and elapsed_min >= ZAP_MAX_ACTIVE_MINUTES:
+                    client.stop_active_scan(str(active_scan_id))
+                    warnings.append(
+                        f"Active scan stopped after the {ZAP_MAX_ACTIVE_MINUTES}-minute limit at {active_status.get('progress', 0)}%; results are partial."
+                    )
+                    active_status = {"status": "completed", "progress": active_status.get("progress", 0)}
+            metadata = {**metadata, "scan_warnings": warnings}
 
             active_progress = active_status.get("progress", 100)
             mapped_progress = 40 + round(active_progress * 0.58)
@@ -805,6 +836,7 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
             scan.progress = str(min(mapped_progress, 98))
             scan.error_message = f"⚡ ZAP Active Scan: {active_progress}% complete. Probing target for SQLi, XSS, SSRF, & auth vulnerabilities..."
             scan.engine_metadata = {**metadata, "phase": "active", "active_progress": active_progress}
+            metadata = scan.engine_metadata
 
             if active_status["status"] == "completed":
                 scan.progress = "99"
@@ -814,7 +846,20 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
                     raw_alerts = client.get_alerts(target)
                     normalized_findings = client.normalize_results(raw_alerts)
                 except Exception as exc:
-                    print(f"[ZAP] Failed to fetch raw alerts: {exc}")
+                    fetch_failures = int(metadata.get("alert_fetch_failures") or 0) + 1
+                    print(f"[ZAP] Failed to fetch alerts for {target} (attempt {fetch_failures}): {exc}")
+                    if fetch_failures < ZAP_MAX_STATUS_FAILURES:
+                        # Do not finish the scan with zero ZAP results; try again on the next poll.
+                        scan.engine_metadata = {**metadata, "alert_fetch_failures": fetch_failures}
+                        db.commit()
+                        db.refresh(scan)
+                        return scan
+                    scan.engine_metadata = {
+                        **metadata,
+                        "alert_fetch_failures": fetch_failures,
+                        "scan_warnings": list(metadata.get("scan_warnings") or [])
+                        + [f"ZAP alerts could not be retrieved ({exc}); only built-in web checks are included."],
+                    }
                     normalized_findings = []
 
                 # ALWAYS run web_assessment in addition to ZAP — not just as fallback.
@@ -847,7 +892,8 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
                 scan.status = "completed"
                 scan.progress = "100"
                 scan.finished_at = datetime.now(timezone.utc)
-                scan.error_message = None
+                scan_warnings = (scan.engine_metadata or {}).get("scan_warnings") or []
+                scan.error_message = " ".join(scan_warnings) if scan_warnings else None
                 scan.engine_metadata = {
                     **scan.engine_metadata,
                     "phase": "completed",
@@ -920,7 +966,8 @@ def _background_openvas_worker(scan_id: str) -> None:
 
 def _background_zap_worker(scan_id: str) -> None:
     try:
-        for _ in range(180):
+        max_polls = int((ZAP_MAX_ACTIVE_MINUTES + 60) * 60 / ZAP_POLL_SECONDS)
+        for _ in range(max_polls):
             db = SessionLocal()
             try:
                 scan = db.get(Scan, scan_id)
@@ -1125,3 +1172,47 @@ def enqueue_zap_scan(scan_id: str) -> None:
         name=f"zap-scan-{scan_id}",
     )
     worker.start()
+
+
+RESUME_MAX_AGE_HOURS = int(os.getenv("RESUME_MAX_AGE_HOURS", "6"))
+
+
+def resume_inflight_scans() -> int:
+    """Re-attach background workers to scans left in flight by an API restart (e.g. a deploy).
+
+    Without this, scans that were running when the container restarted stay "running" forever.
+    """
+    db = SessionLocal()
+    try:
+        inflight = (
+            db.query(Scan)
+            .filter(Scan.status.in_(["waiting", "queued", "running"]))
+            .all()
+        )
+        resumed = 0
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=RESUME_MAX_AGE_HOURS)
+        for scan in inflight:
+            created = scan.created_at
+            if created is not None and created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if created is None or created < cutoff:
+                # Too old to resume safely (it may target a host that is no longer authorized).
+                scan.status = "failed"
+                scan.error_message = "Interrupted by a platform restart and not resumed (older than the resume window). Re-run it if still needed."
+                db.commit()
+                continue
+            tool = (scan.tool or "").lower()
+            if tool == "zap":
+                enqueue_zap_scan(str(scan.id))
+            elif tool == "mobsf":
+                enqueue_mobsf_scan(str(scan.id))
+            elif tool == "openvas":
+                enqueue_openvas_scan(str(scan.id))
+            else:
+                continue
+            resumed += 1
+        if resumed:
+            print(f"[orchestrator] Resumed {resumed} in-flight scan(s) after restart.", flush=True)
+        return resumed
+    finally:
+        db.close()

@@ -8,6 +8,8 @@ from app.database import get_db
 from app.models.misconfiguration import MisconfigAsset, Misconfiguration, Organization, ScanJob
 from app.services.misconfig_scanner import parse_scope_type, run_misconfiguration_scan_job
 
+from app.services.security import require_analyst
+
 router = APIRouter(prefix="/misconfig", tags=["Misconfigurations Engine"])
 
 
@@ -16,8 +18,8 @@ class ScanJobCreate(BaseModel):
     organization_name: str | None = "Acme Security Org"
 
 
-@router.post("/scan")
-@router.post("/v1/scan")
+@router.post("/scan", dependencies=[Depends(require_analyst)])
+@router.post("/v1/scan", dependencies=[Depends(require_analyst)])
 def trigger_misconfig_scan(
     payload: ScanJobCreate,
     background_tasks: BackgroundTasks,

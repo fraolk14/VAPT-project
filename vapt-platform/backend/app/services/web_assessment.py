@@ -28,13 +28,7 @@ SENSITIVE_PATHS: list[tuple[str, str, float, str, str]] = [
     ("/database.sql", "Exposed Database SQL Script", 9.4, "critical", "CWE-538"),
     ("/backup.zip", "Exposed Compressed Site Backup Archive", 8.8, "high", "CWE-538"),
     ("/site.tar.gz", "Exposed Tarball Archive File", 8.8, "high", "CWE-538"),
-    ("/ftp", "Exposed FTP Storage Directory Index", 8.8, "high", "CWE-548"),
-    ("/ftp/acquisitions.md", "Exposed Confidential Corporate Acquisition File", 9.0, "critical", "CWE-538"),
-    ("/ftp/coupons_2013.md.bak", "Exposed Legacy Promotional Discount Credentials", 8.1, "high", "CWE-538"),
-    ("/ftp/package.json.bak", "Exposed Application Package Backup Archive", 7.5, "high", "CWE-538"),
-    ("/ftp/eastere.gg", "Exposed Hidden Developer Easter Egg File", 5.0, "medium", "CWE-200"),
-    ("/ftp/legal.md", "Exposed Internal Legal Terms Document", 5.0, "medium", "CWE-200"),
-    ("/assets/public/images/uploads/", "Exposed Public Uploads Directory Index", 6.5, "medium", "CWE-548"),
+    ("/ftp/", "Exposed FTP Storage Directory Index", 6.5, "medium", "CWE-548"),
     ("/uploads/", "Exposed Uploads Directory Index", 6.5, "medium", "CWE-548"),
     ("/storage/", "Exposed Public Storage Directory Index", 6.5, "medium", "CWE-548"),
     ("/downloads/", "Exposed Downloads Directory Index", 6.5, "medium", "CWE-548"),
@@ -73,6 +67,40 @@ SENSITIVE_PATHS: list[tuple[str, str, float, str, str]] = [
     ("/robots.txt", "Robots.txt Crawling Policy File", 0.0, "info", "NIST RA-5"),
     ("/sitemap.xml", "Sitemap XML Architecture Map File", 0.0, "info", "CWE-200"),
 ]
+
+
+
+SENSITIVE_JSON_FIELDS = {
+    "password", "passwordhash", "password_hash", "passwd", "token", "accesstoken", "access_token",
+    "refreshtoken", "refresh_token", "secret", "clientsecret", "client_secret", "apikey", "api_key",
+    "totpsecret", "totp_secret", "ssn", "cardnumber", "card_number", "creditcard", "cvv", "email",
+    "phone", "phonenumber", "securityanswer", "security_answer", "privatekey", "private_key",
+}
+
+
+def _sensitive_json_fields(body: str) -> list[str]:
+    """Return sensitive field names present as JSON keys (not just words in the text)."""
+    import json as _json
+
+    try:
+        data = _json.loads(body)
+    except ValueError:
+        return []
+    found: set[str] = set()
+    stack = [data]
+    seen = 0
+    while stack and seen < 2000:
+        node = stack.pop()
+        seen += 1
+        if isinstance(node, dict):
+            for key, value in node.items():
+                normalized = str(key).lower().replace("-", "_")
+                if normalized in SENSITIVE_JSON_FIELDS or normalized.replace("_", "") in SENSITIVE_JSON_FIELDS:
+                    found.add(str(key))
+                stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(node[:200])
+    return sorted(found)
 
 
 def _crawl_target(
@@ -215,26 +243,9 @@ def run_web_assessment(
     host = parsed.hostname or raw_target
     port = parsed.port or (443 if base_url.startswith("https") else 80)
 
-    # Known external → local Docker service fallback mappings for local testing environments
-    KNOWN_DOCKER_FALLBACKS: dict[str, str] = {
-        "juice-shop.herokuapp.com": "http://juice-shop:3000",
-        "www.juice-sh.op": "http://juice-shop:3000",
-        "juice-sh.op": "http://juice-shop:3000",
-        "dvwa": "http://dvwa:80",
-        "dvwa.local": "http://dvwa:80",
-    }
-
+    # Scan exactly the target the user authorized. (Earlier builds silently swapped some
+    # hostnames and localhost ports for local lab containers; that is intentionally gone.)
     target_candidates = [base_url]
-    local_fallback = KNOWN_DOCKER_FALLBACKS.get(host)
-    if local_fallback:
-        target_candidates.insert(0, local_fallback)
-
-    if host in ["localhost", "127.0.0.1", "0.0.0.0"]:
-        if port == 3000:
-            target_candidates.insert(0, "http://juice-shop:3000")
-        elif port == 80:
-            target_candidates.insert(0, "http://dvwa:80")
-        target_candidates.append(base_url.replace(host, "host.docker.internal"))
 
     session = requests.Session()
     session.headers.update({
@@ -619,13 +630,13 @@ def run_web_assessment(
                         continue
                     if "json" in ct or (body.startswith(("{", "[")) and "<!doctype html" not in body.lower()):
                         # Check for sensitive data indicators
-                        is_sensitive = any(kw in body.lower() for kw in [
-                            "email", "password", "token", "user", "secret", "question",
-                            "challenge", "hash", "card", "credential", "address", "phone", "key"
-                        ])
-                        sev = "high" if is_sensitive else "medium"
-                        cvss = 8.2 if is_sensitive else 5.3
-                        title = f"Unauthenticated Sensitive API Endpoint Exposed ({p})" if is_sensitive else f"Unprotected REST API Endpoint Disclosure ({p})"
+                        sensitive_fields = _sensitive_json_fields(body)
+                        is_sensitive = bool(sensitive_fields)
+                        # A public JSON endpoint is only a vulnerability if it returns sensitive fields;
+                        # otherwise it is recorded as informational for access-control review.
+                        sev = "high" if is_sensitive else "info"
+                        cvss = 8.2 if is_sensitive else 0.0
+                        title = f"Unauthenticated Sensitive API Endpoint Exposed ({p})" if is_sensitive else f"Public API endpoint discovered ({p})"
                         findings.append({
                             "title": title,
                             "category": "web",
@@ -637,7 +648,11 @@ def run_web_assessment(
                             "cve_id": None,
                             "cvss_score": cvss,
                             "severity": sev,
-                            "evidence": f"Sensitive data accessible without authentication at {disc_url} (HTTP 200 OK). Sample payload: {body[:150].strip()}",
+                            "evidence": (
+                                f"Sensitive fields ({', '.join(sensitive_fields[:8])}) returned without authentication at {disc_url} (HTTP 200 OK)."
+                                if is_sensitive
+                                else f"{disc_url} returns JSON without authentication (HTTP 200). Confirm this data is meant to be public."
+                            ),
                             "remediation": "Implement strict authentication and authorization tokens (JWT/Bearer) across all sensitive API routes.",
                             "compliance_map": ["OWASP ASVS V2.1", "CWE-200", "CWE-284"],
                             "metadata": {"url": disc_url, "host": host, "path": p, "cwe_id": "200"},
@@ -694,53 +709,80 @@ def run_web_assessment(
     # =========================================================================
     _report(82, "sqli_probes", "Testing parameter inputs and login authentication handlers for SQL Injection...")
 
-    sqli_endpoints = [
-        (f"{base_url}/rest/products/search?q=%27%29%29%20OR%201=1--", "SQL Injection in Product Search API", 8.8, "high"),
-        (f"{base_url}/api/v1/products?id=1%27%20OR%201=1--", "Error-Based SQL Injection in Query Parameter", 8.9, "high"),
-        (f"{base_url}/search?q=%27%20OR%20%271%27=%271", "SQL Injection in Search Input Handler", 8.8, "high"),
+    sqli_errors = [
+        "you have an error in your sql syntax", "warning: mysql", "unclosed quotation mark",
+        "quoted string not properly terminated", "pg_query", "psycopg2", "sqlite3.operationalerror",
+        "sqlite_error", "ora-01756", "ora-00933", "syntax error at or near", "sqlstate[",
     ]
-    for sqli_url, sqli_title, sqli_cvss, sqli_sev in sqli_endpoints:
+    sqli_params = [
+        (f"{base_url}/search", "q"),
+        (f"{base_url}/api/search", "q"),
+        (f"{base_url}/api/v1/products", "id"),
+    ]
+    for sqli_base, param in sqli_params:
         try:
-            sqli_res = session.get(sqli_url, timeout=5, verify=False)
-            sqli_errors = ["SQL syntax", "MySQL", "PostgreSQL", "SQLite", "ORA-", "SyntaxError", "psycopg2", "Unclosed quotation mark"]
-            has_db_error = any(err.lower() in sqli_res.text.lower() for err in sqli_errors)
-            has_manipulated_data = sqli_res.status_code == 200 and ("status" in sqli_res.text or "data" in sqli_res.text or len(sqli_res.text) > 1000)
+            control = session.get(sqli_base, params={param: "vapt1"}, timeout=5, verify=False)
+            if control.status_code == 404 or (soft_404_body and control.text == soft_404_body):
+                continue
+            control_text = control.text.lower()
+            quote_res = session.get(sqli_base, params={param: "vapt1'"}, timeout=5, verify=False)
+            quote_text = quote_res.text.lower()
+            error_hit = next((e for e in sqli_errors if e in quote_text and e not in control_text), None)
 
-            if has_db_error or has_manipulated_data:
-                if not (soft_404_body and sqli_res.text == soft_404_body) and "<!doctype html" not in sqli_res.text.lower():
-                    findings.append({
-                        "title": sqli_title,
-                        "category": "web",
-                        "source": "zap",
-                        "port": port,
-                        "protocol": "https" if base_url.startswith("https") else "http",
-                        "service": "http",
-                        "state": "open",
-                        "cve_id": None,
-                        "cvss_score": sqli_cvss,
-                        "severity": sqli_sev,
-                        "evidence": f"SQL Injection probe succeeded at {sqli_url}. Query returned manipulated database records (Response length: {len(sqli_res.text)} bytes).",
-                        "remediation": "Use parameterized queries (Prepared Statements) or ORM abstractions; never concatenate untrusted user input into raw SQL statements.",
-                        "compliance_map": ["OWASP ASVS V5.3.4", "CWE-89"],
-                        "metadata": {"url": sqli_url, "host": host, "cwe_id": "89"},
-                    })
-                    break
+            true_res = session.get(sqli_base, params={param: "vapt1' OR '1'='1"}, timeout=5, verify=False)
+            false_res = session.get(sqli_base, params={param: "vapt1' AND '1'='2"}, timeout=5, verify=False)
+            boolean_hit = (
+                true_res.status_code == 200
+                and false_res.status_code == 200
+                and abs(len(false_res.text) - len(control.text)) < 30
+                and len(true_res.text) > len(false_res.text) + 200
+            )
+            if not (error_hit or boolean_hit):
+                continue
+            if error_hit:
+                proof = f"database error signature '{error_hit}' appeared after injecting a single quote into '{param}'"
+            else:
+                proof = (
+                    f"boolean-based differential: TRUE condition returned {len(true_res.text)} bytes "
+                    f"vs {len(false_res.text)} bytes for FALSE condition"
+                )
+            findings.append({
+                "title": f"SQL Injection in '{param}' parameter",
+                "category": "web",
+                "source": "zap",
+                "port": port,
+                "protocol": "https" if base_url.startswith("https") else "http",
+                "service": "http",
+                "state": "open",
+                "cve_id": None,
+                "cvss_score": 8.8,
+                "severity": "high",
+                "evidence": f"SQL injection confirmed at {sqli_base}?{param}=...: {proof}.",
+                "remediation": "Use parameterized queries (Prepared Statements) or ORM abstractions; never concatenate untrusted user input into raw SQL statements.",
+                "compliance_map": ["OWASP ASVS V5.3.4", "CWE-89"],
+                "metadata": {"url": sqli_base, "parameter": param, "host": host, "cwe_id": "89", "detection": "error" if error_hit else "boolean"},
+            })
+            break
         except Exception:
             pass
 
     # 2. SQLi Login Authentication Bypass Probes
     login_endpoints = [
-        f"{base_url}/rest/user/login",
         f"{base_url}/api/user/login",
         f"{base_url}/api/login",
         f"{base_url}/login",
         f"{base_url}/auth/login",
     ]
+    token_markers = ('"token"', '"access_token"', '"jwt"')
     for login_url in login_endpoints:
         try:
-            login_payload = {"email": "' OR 1=1--", "password": "vapt_sqli_test"}
-            login_res = session.post(login_url, json=login_payload, timeout=5, verify=False)
-            if login_res.status_code == 200 and ("token" in login_res.text.lower() or "authentication" in login_res.text.lower() or "jwt" in login_res.text.lower()):
+            control = session.post(
+                login_url, json={"email": "vapt-control@invalid.example", "password": "vapt_control_test"}, timeout=5, verify=False
+            )
+            if control.status_code == 404 or any(m in control.text.lower() for m in token_markers):
+                continue
+            login_res = session.post(login_url, json={"email": "' OR 1=1--", "password": "vapt_sqli_test"}, timeout=5, verify=False)
+            if login_res.status_code == 200 and any(m in login_res.text.lower() for m in token_markers):
                 findings.append({
                     "title": "SQL Injection Authentication Bypass in Login Endpoint",
                     "category": "web",
@@ -752,7 +794,10 @@ def run_web_assessment(
                     "cve_id": None,
                     "cvss_score": 9.8,
                     "severity": "critical",
-                    "evidence": f"Authentication bypass succeeded at {login_url} using SQL injection payload \"' OR 1=1--\". Server returned HTTP 200 with session JWT token: {login_res.text[:80]}...",
+                    "evidence": (
+                        f"At {login_url}, a normal invalid login was rejected (HTTP {control.status_code}) but the SQL "
+                        "injection payload ' OR 1=1-- returned HTTP 200 with a session token."
+                    ),
                     "remediation": "Enforce parameterized database queries for all user authentication handlers. Never build raw SQL queries from login credentials.",
                     "compliance_map": ["OWASP ASVS V2.1.1", "CWE-89", "CWE-287"],
                     "metadata": {"url": login_url, "host": host, "cwe_id": "89"},
@@ -767,7 +812,6 @@ def run_web_assessment(
     _report(88, "lfi_probes", "Testing file retrieval handlers for Directory Traversal and Local File Inclusion...")
 
     lfi_test_routes = [
-        f"{base_url}/ftp/package.json.bak%2500.md",
         f"{base_url}/download?file=../../../../etc/passwd",
         f"{base_url}/view?page=../../../../etc/passwd",
         f"{base_url}/include?file=../../../../etc/passwd",
@@ -776,7 +820,7 @@ def run_web_assessment(
         try:
             lfi_res = session.get(lfi_url, timeout=4, verify=False)
             if lfi_res.status_code == 200:
-                if "root:x:0:0:" in lfi_res.text or "[fonts]" in lfi_res.text.lower() or "[extensions]" in lfi_res.text.lower() or "dependencies" in lfi_res.text.lower():
+                if "root:x:0:0:" in lfi_res.text or "[fonts]" in lfi_res.text.lower() or "[extensions]" in lfi_res.text.lower():
                     findings.append({
                         "title": "Directory Traversal / Arbitrary File Disclosure Vulnerability",
                         "category": "web",

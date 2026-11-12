@@ -1,3 +1,7 @@
+import logging
+import os
+import secrets
+
 from sqlalchemy.orm import Session
 
 from app.models.auth import AuthPolicy, SSOProvider
@@ -23,29 +27,13 @@ def seed_demo_data(db: Session) -> None:
         db.add(default_tenant)
         db.commit()
 
-    admin = db.query(User).filter((User.username == "admin") | (User.email == "admin@vapt.local")).first()
-    if not admin:
-        db.add(
-            User(
-                username="admin",
-                email="admin@vapt.local",
-                tenant_id="default",
-                password_hash=hash_password("ChangeMe123!"),
-                role="admin",
-                auth_source="local",
-                mfa_enabled=False,
-            )
-        )
-        db.commit()
-    else:
-        admin.password_hash = hash_password("ChangeMe123!")
-        admin.locked_until = None
-        admin.failed_login_attempts = 0
-        admin.mfa_enabled = False
-        admin.tenant_id = "default"
-        db.commit()
+    _ensure_bootstrap_admin(db)
 
-    if db.query(Asset).count() == 0:
+    # Sample assets, findings, monitoring rules and SSO providers are demo content only.
+    # They must never appear on a production install unless SEED_DEMO_DATA=true.
+    seed_demo = os.getenv("SEED_DEMO_DATA", "false").strip().lower() == "true"
+
+    if seed_demo and db.query(Asset).count() == 0:
         db.add_all(
             [
                 Asset(
@@ -111,7 +99,7 @@ def seed_demo_data(db: Session) -> None:
                 ),
             ]
         )
-    else:
+    elif seed_demo:
         asset_names = {asset.asset_name for asset in db.query(Asset).all()}
         additions = []
         if "Finance Workstation 07" not in asset_names:
@@ -155,7 +143,7 @@ def seed_demo_data(db: Session) -> None:
             db.add_all(additions)
 
     existing_rules = {rule.name for rule in db.query(MonitoringRule).all()}
-    if "Suspicious External Login" not in existing_rules:
+    if seed_demo and "Suspicious External Login" not in existing_rules:
         db.add(
             MonitoringRule(
                 name="Suspicious External Login",
@@ -190,7 +178,7 @@ def seed_demo_data(db: Session) -> None:
         )
 
     existing_providers = {provider.name for provider in db.query(SSOProvider).all()}
-    if "Corporate OIDC" not in existing_providers:
+    if seed_demo and "Corporate OIDC" not in existing_providers:
         db.add(
             SSOProvider(
                 name="Corporate OIDC",
@@ -200,7 +188,7 @@ def seed_demo_data(db: Session) -> None:
                 enabled=True,
             )
         )
-    if db.query(Finding).count() == 0:
+    if seed_demo and db.query(Finding).count() == 0:
         from app.models.scan import Scan
         from sqlalchemy.sql import func
         scan = Scan(
@@ -283,3 +271,43 @@ def seed_demo_data(db: Session) -> None:
         ])
 
     db.commit()
+
+
+logger = logging.getLogger("vapt.bootstrap")
+
+
+def _ensure_bootstrap_admin(db: Session) -> None:
+    """Create the first administrator once. Never touch an existing account.
+
+    The initial password comes from BOOTSTRAP_ADMIN_PASSWORD. When it is not set, a random
+    password is generated and printed once to the API logs. To recover a lost admin password,
+    run: docker compose exec api python -m app.scripts.bootstrap_admin --reset
+    """
+    if db.query(User).filter(User.role == "admin").first():
+        return
+    if db.query(User).filter((User.username == "admin") | (User.email == "admin@vapt.local")).first():
+        return
+
+    password = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "").strip()
+    generated = not password
+    if generated:
+        password = secrets.token_urlsafe(16)
+
+    db.add(
+        User(
+            username="admin",
+            email="admin@vapt.local",
+            tenant_id="default",
+            password_hash=hash_password(password),
+            role="admin",
+            auth_source="local",
+            mfa_enabled=False,
+        )
+    )
+    db.commit()
+    if generated:
+        message = f"Created initial admin account 'admin' with generated password: {password} -- change it after first sign-in."
+        logger.warning(message)
+        print(message, flush=True)
+    else:
+        print("Created initial admin account 'admin' from BOOTSTRAP_ADMIN_PASSWORD.", flush=True)

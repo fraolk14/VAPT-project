@@ -2,6 +2,26 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../api/client";
 
+// Report downloads must go through the API client so the bearer token is sent.
+async function downloadScanReport(scanId) {
+  try {
+    const res = await api.get(`/reports/v1/download/${scanId}`, {
+      params: { format: "pdf", type: "executive" },
+      responseType: "blob",
+    });
+    const url = window.URL.createObjectURL(res.data);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `VAPT_Report_${scanId}.pdf`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  } catch (error) {
+    window.alert("Report download failed. Please try again.");
+  }
+}
+
 // ─── Engine definitions ───────────────────────────────────────────────────────
 const ENGINES = {
   Web: {
@@ -465,10 +485,11 @@ export default function Scans() {
 
                           {/* PDF report */}
                           <a
-                            href={`/api/reports/v1/download/${scan.id}?format=pdf&type=executive`}
-                            target="_blank"
-                            rel="noreferrer"
-                            download={`VAPT_Report_${scan.id}.pdf`}
+                            href="#"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              downloadScanReport(scan.id);
+                            }}
                             style={{
                               background: "#0284c722",
                               color: "#38bdf8",

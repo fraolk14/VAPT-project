@@ -71,6 +71,8 @@ def _finding(
     return {
         "title": title,
         "category": "mobile",
+        # "mobsf" is the mobile-engine source key used by the UI tabs; the metadata below
+        # records that this result came from the built-in fallback, not from MobSF itself.
         "source": "mobsf",
         "port": 0,
         "protocol": "file",
@@ -79,10 +81,10 @@ def _finding(
         "cve_id": None,
         "cvss_score": cvss,
         "severity": severity,
-        "evidence": evidence,
+        "evidence": f"{evidence} [Detected by built-in static checks; MobSF was unavailable.]",
         "remediation": remediation,
         "compliance_map": ["MASVS", "OWASP MSTG"],
-        "metadata": metadata,
+        "metadata": {**metadata, "analysis_engine": "local-static-mobile"},
     }
 
 

@@ -44,6 +44,7 @@ from app.services.security import (
     get_current_user,
     issue_mfa_ticket,
     issue_sso_state,
+    normalize_role,
     record_login_failure,
     reset_login_failures,
     verify_captcha_token,
@@ -115,7 +116,13 @@ def _upsert_sso_user(db: Session, email: str, username: str, provider: SSOProvid
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def register_user(payload: UserCreate, db: Session = Depends(get_db)):
+def register_user(
+    payload: UserCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Self-registration is disabled: only administrators may create accounts.
+    enforce_roles(current_user, "admin")
     existing = db.query(User).filter(
         (User.username == payload.username) | (User.email == payload.email)
     ).first()
@@ -126,7 +133,7 @@ def register_user(payload: UserCreate, db: Session = Depends(get_db)):
         username=payload.username,
         email=payload.email,
         password_hash=hash_password(payload.password),
-        role=payload.role,
+        role=normalize_role(payload.role),
         group_name=payload.group_name,
         mfa_delivery_method=payload.mfa_delivery_method,
         mfa_enabled=payload.mfa_delivery_method == "email",
@@ -379,7 +386,7 @@ def update_admin_user(
         user.password_hash = hash_password(payload.password)
 
     if payload.role:
-        user.role = payload.role
+        user.role = normalize_role(payload.role)
 
     if payload.group_name is not None:
         user.group_name = payload.group_name or None
@@ -472,7 +479,7 @@ def create_admin_user(
         username=payload.username,
         email=payload.email,
         password_hash=hash_password(payload.password),
-        role=payload.role,
+        role=normalize_role(payload.role),
         group_name=payload.group_name,
         mfa_delivery_method=payload.mfa_delivery_method,
         mfa_enabled=payload.mfa_delivery_method == "email",

@@ -1,12 +1,13 @@
 import os
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from passlib.context import CryptContext
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -14,7 +15,9 @@ from app.models.agent import AgentDevice, AgentEnrollmentToken, SoftwareAllowlis
 from app.models.asset import Asset
 from app.models.finding import Finding
 from app.models.scan import Scan
+from app.models.user import User
 from app.services.orchestrator import _store_findings, _upsert_asset_from_finding
+from app.services.security import require_admin
 
 router = APIRouter(prefix="/agent", tags=["Windows Endpoint Agent"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -34,8 +37,7 @@ class EnrollResponse(BaseModel):
 
 
 class TokenGenerateRequest(BaseModel):
-    created_by: str | None = "admin"
-    ttl_hours: int = 72
+    ttl_hours: int = Field(default=72, ge=1, le=720)
 
 
 class TokenGenerateResponse(BaseModel):
@@ -148,29 +150,37 @@ def enroll_agent_device(request: Request, payload: EnrollRequest, db: Session = 
 
     client_ip = get_preferred_physical_ip(None, raw_ip)
 
-    device_id = payload.hardware_id.strip() if payload.hardware_id else f"WIN-{secrets.token_hex(4).upper()}"
+    # The server always assigns the device identity. A client-supplied hardware_id is stored
+    # for reference only, so one enrollment token can never overwrite another device's key.
+    hardware_id = (payload.hardware_id or "").strip() or None
+    if hardware_id:
+        existing = db.query(AgentDevice).filter(AgentDevice.hardware_id == hardware_id).first()
+        if existing and existing.status == "revoked":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This device has been revoked. An administrator must delete it before it can re-enroll.",
+            )
+        if existing and existing.status == "active":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This device is already enrolled. Revoke and delete it in Agent Management to re-enroll.",
+            )
+
+    device_id = f"WIN-{secrets.token_hex(6).upper()}"
     raw_agent_key = f"vap_agent_sec_{secrets.token_urlsafe(32)}"
     credential_hash = pwd_context.hash(raw_agent_key)
 
-    device = db.query(AgentDevice).filter(AgentDevice.device_id == device_id).first()
-    if not device:
-        device = AgentDevice(
-            device_id=device_id,
-            hostname=payload.hostname,
-            hardware_id=payload.hardware_id,
-            credential_hash=credential_hash,
-            enrollment_token_ref=payload.token,
-            status="active",
-            ip_address=client_ip,
-            os_info=payload.os_info,
-        )
-        db.add(device)
-    else:
-        device.credential_hash = credential_hash
-        device.status = "active"
-        device.hostname = payload.hostname
-        device.ip_address = client_ip
-        device.last_seen = datetime.now(timezone.utc)
+    device = AgentDevice(
+        device_id=device_id,
+        hostname=payload.hostname,
+        hardware_id=hardware_id,
+        credential_hash=credential_hash,
+        enrollment_token_ref=payload.token,
+        status="active",
+        ip_address=client_ip,
+        os_info=payload.os_info,
+    )
+    db.add(device)
 
     # Immediately upsert Asset record so device appears on Assets page instantly upon enrollment
     asset_obj = db.query(Asset).filter(
@@ -400,14 +410,18 @@ def agent_checkin(
 
 # Admin Token & Device Management Endpoints
 @router.post("/tokens/generate", response_model=TokenGenerateResponse)
-def generate_enrollment_token(payload: TokenGenerateRequest, db: Session = Depends(get_db)):
+def generate_enrollment_token(
+    payload: TokenGenerateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
     """Generate a single-use agent enrollment token."""
     raw_token = f"vap_tok_{secrets.token_hex(16)}"
     expires_at = datetime.now(timezone.utc) + timedelta(hours=payload.ttl_hours)
 
     entry = AgentEnrollmentToken(
         token=raw_token,
-        created_by=payload.created_by,
+        created_by=current_user.username,
         is_used=False,
         expires_at=expires_at,
     )
@@ -423,7 +437,7 @@ def generate_enrollment_token(payload: TokenGenerateRequest, db: Session = Depen
 
 
 @router.get("/devices")
-def list_agent_devices(db: Session = Depends(get_db)):
+def list_agent_devices(db: Session = Depends(get_db), _admin: User = Depends(require_admin)):
     """List all registered agent devices."""
     devices = db.query(AgentDevice).order_by(AgentDevice.last_seen.desc()).all()
     return [
@@ -443,7 +457,7 @@ def list_agent_devices(db: Session = Depends(get_db)):
 
 
 @router.post("/devices/{device_id}/revoke")
-def revoke_agent_device(device_id: str, db: Session = Depends(get_db)):
+def revoke_agent_device(device_id: str, db: Session = Depends(get_db), _admin: User = Depends(require_admin)):
     """Revoke an agent device credential immediately blocking subsequent checkins."""
     device = db.query(AgentDevice).filter(AgentDevice.device_id == device_id).first()
     if not device:
@@ -458,6 +472,19 @@ def revoke_agent_device(device_id: str, db: Session = Depends(get_db)):
     device.status = "revoked"
     db.commit()
     return {"status": "success", "message": f"Device '{device.hostname}' credential has been revoked."}
+
+
+@router.delete("/devices/{device_id}")
+def delete_agent_device(device_id: str, db: Session = Depends(get_db), _admin: User = Depends(require_admin)):
+    """Remove a revoked device so the endpoint can enroll again with a fresh token."""
+    device = db.query(AgentDevice).filter(AgentDevice.device_id == device_id).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Agent device not found.")
+    if device.status != "revoked":
+        raise HTTPException(status_code=400, detail="Revoke the device before deleting it.")
+    db.delete(device)
+    db.commit()
+    return {"status": "success", "message": f"Device '{device.hostname}' was deleted and may re-enroll."}
 
 
 @router.get("/download")

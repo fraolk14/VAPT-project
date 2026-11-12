@@ -1,16 +1,21 @@
-fastapi
-uvicorn
-sqlalchemy
-psycopg2-binary
-python-dotenv
-python-jose
+# Pinned so every server build gets the same, tested versions.
+# (Unpinned builds pulled SQLAlchemy 2.1, which switched the default Postgres driver and broke startup.)
+fastapi==0.162.5
+starlette==1.10.0
+uvicorn==0.54.0
+SQLAlchemy==2.0.57
+psycopg2-binary==2.9.13
+pydantic==2.14.3
+python-dotenv==1.2.4
+python-jose==3.5.0
 passlib==1.7.4
 bcrypt==4.0.1
-python-multipart
-ldap3
-requests
-email-validator
-python-gvm
-pyotp
-reportlab
-python-docx
+python-multipart==0.0.33
+ldap3==2.9.1
+requests==2.34.2
+urllib3==2.8.0
+email-validator==2.3.0
+python-gvm==27.10.1
+pyotp==2.10.0
+reportlab==5.1.0
+python-docx==1.2.0

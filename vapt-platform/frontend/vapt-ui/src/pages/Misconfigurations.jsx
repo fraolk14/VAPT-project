@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from "react";
 import { useForm } from "react-hook-form";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import axios from "axios";
+import api from "../api/client";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   FiShield,
@@ -22,12 +22,12 @@ import {
 } from "react-icons/fi";
 
 const fetchMisconfigs = async () => {
-  const res = await axios.get("/api/misconfig/list");
+  const res = await api.get("/misconfig/list");
   return res.data;
 };
 
 const triggerScanApi = async ({ scope, organization_name }) => {
-  const res = await axios.post("/api/misconfig/scan", {
+  const res = await api.post("/misconfig/scan", {
     scope,
     organization_name: organization_name || "Acme Security Org",
   });
