@@ -279,7 +279,12 @@ volumes:
   psql_data_vol:
   vt_data_vol:
   notus_data_vol:
+  # Only Postgres socket and lock files live here. tmpfs means a crash or laptop sleep can't
+  # leave a stale ".s.PGSQL.5432.lock" behind that stops pg-gvm from ever starting again.
   psql_socket_vol:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
   gvmd_socket_vol:
   ospd_openvas_socket_vol:
   redis_socket_vol:

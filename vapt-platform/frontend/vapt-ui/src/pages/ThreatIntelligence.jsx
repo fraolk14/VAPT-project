@@ -1,537 +1,353 @@
-import { useEffect, useMemo, useState, useRef } from "react";
-import { Link } from "react-router-dom";
-import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { motion, AnimatePresence } from "framer-motion";
-import ForceGraph2D from "react-force-graph-2d";
-import { CircularProgressbar, buildStyles } from "react-circular-progressbar";
-import "react-circular-progressbar/dist/styles.css";
-
-import { 
-  FaGlobe, 
-  FaSearch, 
-  FaShieldAlt, 
-  FaBug, 
-  FaNetworkWired, 
-  FaServer, 
-  FaExclamationTriangle, 
-  FaMapMarkerAlt,
-  FaTimes,
-  FaFileAlt
-} from "react-icons/fa";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 
 import api from "../api/client";
-import Card from "../components/Card";
+import TodayIntel from "../components/TodayIntel";
+import "../misconfig.css";
+import "../commandcenter.css";
+import "../scans.css";
+import "../targets.css";
+import "../attackmap.css";
+import "../intel.css";
 
-// Initialize Query Client for page-level state queries
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: 1,
-      refetchOnWindowFocus: false,
-    },
-  },
-});
+const pct = (v, digits = 1) => (v == null ? "—" : `${(v * 100).toFixed(digits)}%`);
+const VERDICT = {
+  malicious: { label: "Malicious", tone: "bad" },
+  suspicious: { label: "Suspicious", tone: "warn" },
+  clean: { label: "No known bad reputation", tone: "good" },
+  unknown: { label: "Not enough data", tone: "info" },
+};
+const RISKY = new Set([21, 23, 135, 139, 445, 1433, 2375, 3306, 3389, 5432, 5900, 6379, 9200, 27017]);
 
-function sourceLabel(source) {
-  if (source === "openvas") return "Network Engine";
-  if (source === "zap") return "Web Engine";
-  if (source === "mobsf") return "Mobile Engine";
-  return source;
-}
-
-function ThreatIntelligenceContent({ threatIntel }) {
-  const [targetSearch, setTargetSearch] = useState("");
-  const [activeTarget, setActiveTarget] = useState("");
-
-  const [filters, setFilters] = useState({
-    severity: "all",
-    source: "all",
-    exploitedOnly: false,
-    pageSize: 10,
-    pageIndex: 0,
-  });
-
-  const [feedState, setFeedState] = useState({
-    status: "idle",
-    items: threatIntel.top_feed || [],
-    total: threatIntel.top_feed?.length || 0,
-  });
-
-  // Query details for active target search
-  const { data: targetData, isFetching: isSearching, error: searchError, refetch } = useQuery({
-    queryKey: ["targetThreatIntel", activeTarget],
-    queryFn: async () => {
-      if (!activeTarget) return null;
-      const res = await api.get(`/threat-intelligence/${encodeURIComponent(activeTarget)}`);
-      return res.data;
-    },
-    enabled: !!activeTarget,
-  });
-
-  useEffect(() => {
-    const params = new URLSearchParams();
-    if (filters.severity !== "all") params.set("severity", filters.severity);
-    if (filters.source !== "all") params.set("source", filters.source);
-    if (filters.exploitedOnly) params.set("exploited_only", "true");
-
-    setFeedState((current) => ({ ...current, status: "loading" }));
-    api.get(`/threat-intelligence/feed?${params.toString()}`).then((response) => {
-      setFeedState({ status: "ready", items: response.data.items, total: response.data.total });
-    }).catch(() => {
-      setFeedState((current) => ({ ...current, status: "error" }));
-    });
-  }, [filters.severity, filters.source, filters.exploitedOnly]);
-
-  useEffect(() => {
-    setFilters((current) => ({ ...current, pageIndex: 0 }));
-  }, [filters.pageSize, filters.severity, filters.source, filters.exploitedOnly]);
-
-  const feedSources = useMemo(() => Object.entries(threatIntel.reference_coverage || {}), [threatIntel.reference_coverage]);
-  const externalEvents = useMemo(() => threatIntel.external_events || [], [threatIntel.external_events]);
-  const visibleItems = useMemo(
-    () => feedState.items.slice(filters.pageIndex * filters.pageSize, filters.pageIndex * filters.pageSize + filters.pageSize),
-    [feedState.items, filters.pageIndex, filters.pageSize]
-  );
-  const totalPages = Math.max(1, Math.ceil(feedState.items.length / filters.pageSize));
-
-  const handleSearchSubmit = (e) => {
-    e.preventDefault();
-    const query = targetSearch.trim();
-    if (query) {
-      setActiveTarget(query);
-    }
-  };
-
-  // Convert target query details into graph representation for React-Force-Graph-2D
-  const graphData = useMemo(() => {
-    if (!targetData) return { nodes: [], links: [] };
-    const nodes = [
-      { id: "target", label: targetData.target, val: 30, color: "#9dd1ff" }
-    ];
-    const links = [];
-
-    const sources = targetData.sources || {};
-    Object.entries(sources).forEach(([srcKey, srcData]) => {
-      if (!srcData) return;
-      nodes.push({ id: srcKey, label: srcKey.toUpperCase(), val: 20, color: "#14b8a6" });
-      links.push({ source: "target", target: srcKey });
-
-      if (srcKey === "shodan" && Array.isArray(srcData.ports)) {
-        srcData.ports.forEach((p) => {
-          const portId = `port-${p}`;
-          nodes.push({ id: portId, label: `Port ${p}`, val: 12, color: "#ffd27d" });
-          links.push({ source: srcKey, target: portId });
-        });
-      }
-
-      if (srcKey === "nvd" && Array.isArray(srcData.cves)) {
-        srcData.cves.forEach((c) => {
-          const cveId = `cve-${c.id}`;
-          nodes.push({ id: cveId, label: c.id, val: 14, color: "#ff8c8c" });
-          links.push({ source: srcKey, target: cveId });
-        });
-      }
-    });
-
-    return { nodes, links };
-  }, [targetData]);
-
-  const graphContainerRef = useRef(null);
-  const [graphWidth, setGraphWidth] = useState(600);
-
-  useEffect(() => {
-    if (!graphContainerRef.current) return;
-    const observer = new ResizeObserver((entries) => {
-      if (entries && entries[0]) {
-        setGraphWidth(entries[0].contentRect.width || 600);
-      }
-    });
-    observer.observe(graphContainerRef.current);
-    return () => observer.disconnect();
-  }, [targetData]);
-
+function EpssBar({ value, percentile }) {
+  if (value == null) return <span className="cc-muted">no score</span>;
+  const tone = value >= 0.5 ? "bad" : value >= 0.1 ? "warn" : "ok";
   return (
-    <div className="threat-intel-workspace" style={{ display: "grid", gap: "24px" }}>
-      {/* Target Search Panel */}
-      <div className="panel" style={{ padding: "20px" }}>
-        <div className="panel__header">
-          <div>
-            <p className="eyebrow">Reputation & IOC lookup</p>
-            <h2>Target threat search</h2>
-          </div>
-        </div>
-        <form onSubmit={handleSearchSubmit} className="dashboard-toolbar" style={{ gridTemplateColumns: "1fr auto auto", marginTop: "12px" }}>
-          <div style={{ position: "relative", width: "100%" }}>
-            <FaSearch style={{ position: "absolute", left: "16px", top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
-            <input 
-              type="text" 
-              className="scan-input" 
-              placeholder="Enter target IP, host, or domain (e.g. example.com)..." 
-              value={targetSearch} 
-              onChange={(e) => setTargetSearch(e.target.value)}
-              style={{ paddingLeft: "42px", width: "100%" }}
-            />
-          </div>
-          <button type="submit" className="scan-action scan-action--resume" disabled={isSearching}>
-            {isSearching ? "Searching..." : "Lookup target"}
-          </button>
-          {activeTarget && (
-            <button type="button" className="scan-action scan-action--cancel" onClick={() => { setActiveTarget(""); setTargetSearch(""); }}>
-              <FaTimes /> Clear lookup
-            </button>
-          )}
-        </form>
-      </div>
-
-      {/* Target Detailed Intelligence Section */}
-      <AnimatePresence mode="wait">
-        {activeTarget && (
-          <motion.div
-            initial={{ opacity: 0, y: 15 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -15 }}
-            transition={{ duration: 0.3 }}
-            style={{ display: "grid", gap: "24px" }}
-          >
-            {isSearching ? (
-              <div className="panel" style={{ padding: "40px", textAlign: "center" }}>
-                <p className="empty-copy">Retrieving real-time threat data logs...</p>
-              </div>
-            ) : searchError ? (
-              <div className="panel" style={{ padding: "30px", border: "1px solid rgba(239, 68, 68, 0.4)" }}>
-                <h2>Search Error</h2>
-                <p className="empty-copy">Unable to connect to the target intelligence database.</p>
-              </div>
-            ) : targetData ? (
-              <>
-                {/* Geolocation & Risk Dial Panel */}
-                <div className="section-grid" style={{ gridTemplateColumns: "1fr 2fr", gap: "24px" }}>
-                  {/* Risk score panel */}
-                  <div className="panel" style={{ padding: "24px", display: "grid", placeItems: "center" }}>
-                    <div style={{ width: "160px", height: "160px", margin: "0 auto" }}>
-                      <CircularProgressbar
-                        value={targetData.overallRiskScore || 0}
-                        text={`${targetData.overallRiskScore || 0}%`}
-                        styles={buildStyles({
-                          textColor: "#f4f7fb",
-                          pathColor: targetData.overallRiskScore >= 75 ? "#ef4444" : targetData.overallRiskScore >= 50 ? "#f59e0b" : "#06b6d4",
-                          trailColor: "rgba(148, 163, 184, 0.12)",
-                          textSize: "16px",
-                        })}
-                      />
-                    </div>
-                    <div style={{ textAlign: "center", marginTop: "16px" }}>
-                      <span className="eyebrow" style={{ display: "block" }}>Overall target score</span>
-                      <strong style={{ fontSize: "1.3rem" }}>
-                        {targetData.overallRiskScore >= 75 ? "Critical threat exposure" : targetData.overallRiskScore >= 50 ? "Moderate exposure" : "Unexposed / Benign"}
-                      </strong>
-                    </div>
-                  </div>
-
-                  {/* Geolocation metadata */}
-                  <div className="panel" style={{ padding: "24px" }}>
-                    <div className="panel__header" style={{ marginBottom: "16px" }}>
-                      <div>
-                        <p className="eyebrow">Geolocation routing</p>
-                        <h2>Asset target location</h2>
-                      </div>
-                    </div>
-                    <div className="metrics-grid">
-                      <Card 
-                        title="ASN handle" 
-                        value={targetData.geolocation?.asn || "N/A"} 
-                        trend={targetData.geolocation?.asn ? "Registered Autonomous System" : "No ASN mapping"} 
-                      />
-                      <Card 
-                        title="Country location" 
-                        value={targetData.geolocation?.country || "N/A"} 
-                        trend={targetData.geolocation?.countryCode ? `Code: ${targetData.geolocation.countryCode}` : "No geo mapping"} 
-                      />
-                      <Card 
-                        title="City resolved" 
-                        value={targetData.geolocation?.city || "N/A"} 
-                        trend="City level approximation" 
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Sources Details Panel */}
-                <div className="panel" style={{ padding: "24px" }}>
-                  <div className="panel__header" style={{ marginBottom: "16px" }}>
-                    <div>
-                      <p className="eyebrow">Raw threat intelligence logs</p>
-                      <h2>External API sources</h2>
-                    </div>
-                  </div>
-                  <div className="section-grid" style={{ gridTemplateColumns: "repeat(3, 1fr)", gap: "18px" }}>
-                    {/* VirusTotal */}
-                    <div className="panel" style={{ padding: "16px", background: "rgba(15, 23, 42, 0.4)" }}>
-                      <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
-                        <FaShieldAlt style={{ color: "#06b6d4" }} />
-                        <strong style={{ textTransform: "uppercase" }}>VirusTotal</strong>
-                      </div>
-                      {targetData.sources?.virustotal ? (
-                        <div className="coverage-list" style={{ gap: "4px" }}>
-                          <div className="coverage-row"><span>Reputation</span><strong>{targetData.sources.virustotal.reputation}</strong></div>
-                          <div className="coverage-row"><span>Malicious</span><strong>{targetData.sources.virustotal.maliciousVotes}</strong></div>
-                          <div className="coverage-row"><span>Harmless</span><strong>{targetData.sources.virustotal.harmlessVotes}</strong></div>
-                        </div>
-                      ) : (
-                        <p className="empty-copy">No VirusTotal records found.</p>
-                      )}
-                    </div>
-
-                    {/* AbuseIPDB */}
-                    <div className="panel" style={{ padding: "16px", background: "rgba(15, 23, 42, 0.4)" }}>
-                      <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
-                        <FaExclamationTriangle style={{ color: "#f59e0b" }} />
-                        <strong style={{ textTransform: "uppercase" }}>AbuseIPDB</strong>
-                      </div>
-                      {targetData.sources?.abuseipdb ? (
-                        <div className="coverage-list" style={{ gap: "4px" }}>
-                          <div className="coverage-row"><span>Confidence score</span><strong>{targetData.sources.abuseipdb.abuseConfidenceScore}%</strong></div>
-                          <div className="coverage-row"><span>Total reports</span><strong>{targetData.sources.abuseipdb.totalReports}</strong></div>
-                        </div>
-                      ) : (
-                        <p className="empty-copy">No AbuseIPDB records found.</p>
-                      )}
-                    </div>
-
-                    {/* GreyNoise */}
-                    <div className="panel" style={{ padding: "16px", background: "rgba(15, 23, 42, 0.4)" }}>
-                      <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
-                        <FaGlobe style={{ color: "#6366f1" }} />
-                        <strong style={{ textTransform: "uppercase" }}>GreyNoise</strong>
-                      </div>
-                      {targetData.sources?.greynoise ? (
-                        <div className="coverage-list" style={{ gap: "4px" }}>
-                          <div className="coverage-row"><span>Classification</span><strong>{targetData.sources.greynoise.classification}</strong></div>
-                          <div className="coverage-row"><span>Tags</span><strong>{(targetData.sources.greynoise.tags || []).join(", ") || "n/a"}</strong></div>
-                        </div>
-                      ) : (
-                        <p className="empty-copy">No GreyNoise records found.</p>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="section-grid" style={{ gridTemplateColumns: "repeat(2, 1fr)", gap: "18px", marginTop: "18px" }}>
-                    {/* Shodan */}
-                    <div className="panel" style={{ padding: "16px", background: "rgba(15, 23, 42, 0.4)" }}>
-                      <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
-                        <FaServer style={{ color: "#10b981" }} />
-                        <strong style={{ textTransform: "uppercase" }}>Shodan ports & services</strong>
-                      </div>
-                      {targetData.sources?.shodan ? (
-                        <div className="coverage-list" style={{ gap: "4px" }}>
-                          <div className="coverage-row"><span>Open ports</span><strong>{(targetData.sources.shodan.ports || []).join(", ") || "None"}</strong></div>
-                          <div className="coverage-row"><span>Exposed services</span><strong>{(targetData.sources.shodan.services || []).join(", ") || "None"}</strong></div>
-                          <div className="coverage-row"><span>SSL Issuer</span><strong>{targetData.sources.shodan.sslInfo?.issuer || "n/a"}</strong></div>
-                        </div>
-                      ) : (
-                        <p className="empty-copy">No Shodan exposed ports records found.</p>
-                      )}
-                    </div>
-
-                    {/* AlienVault */}
-                    <div className="panel" style={{ padding: "16px", background: "rgba(15, 23, 42, 0.4)" }}>
-                      <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
-                        <FaBug style={{ color: "#ec4899" }} />
-                        <strong style={{ textTransform: "uppercase" }}>AlienVault pulses</strong>
-                      </div>
-                      {targetData.sources?.alienvault ? (
-                        <div className="coverage-list" style={{ gap: "4px" }}>
-                          <div className="coverage-row"><span>Active malware families</span><strong>{(targetData.sources.alienvault.malwareFamilies || []).join(", ") || "None recorded"}</strong></div>
-                          <div className="coverage-row"><span>Pulses matching target</span><strong>{targetData.sources.alienvault.pulses?.length || 0}</strong></div>
-                        </div>
-                      ) : (
-                        <p className="empty-copy">No AlienVault threat pulses matching target.</p>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Threat Landscape Graph (React-Force-Graph-2D) */}
-                {graphData.nodes.length > 0 && (
-                  <div ref={graphContainerRef} className="panel" style={{ padding: "24px", overflow: "hidden" }}>
-                    <div className="panel__header" style={{ marginBottom: "16px" }}>
-                      <div>
-                        <p className="eyebrow">Threat topology analysis</p>
-                        <h2>Attack vector graph</h2>
-                      </div>
-                    </div>
-                    <div style={{ width: "100%", background: "#060a12", borderRadius: "18px", overflow: "hidden" }}>
-                      <ForceGraph2D
-                        graphData={graphData}
-                        width={graphWidth}
-                        height={340}
-                        nodeColor={(node) => node.color}
-                        nodeVal={(node) => node.val}
-                        linkLabel={() => ""}
-                        linkWidth={1.5}
-                        linkColor={() => "rgba(148, 163, 184, 0.2)"}
-                        nodeCanvasObject={(node, ctx, globalScale) => {
-                          const label = node.label;
-                          const fontSize = 11 / globalScale;
-                          ctx.font = `${fontSize}px sans-serif`;
-                          ctx.fillStyle = node.color;
-                          ctx.beginPath();
-                          ctx.arc(node.x, node.y, 6, 0, 2 * Math.PI, false);
-                          ctx.fill();
-                          ctx.fillStyle = "#cbd5e1";
-                          ctx.fillText(label, node.x + 8, node.y + 3);
-                        }}
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {/* NVD CVE vulnerabilities List */}
-                <div className="panel" style={{ padding: "24px" }}>
-                  <div className="panel__header" style={{ marginBottom: "16px" }}>
-                    <div>
-                      <p className="eyebrow">National Vulnerability Database</p>
-                      <h2>Target CVE list</h2>
-                    </div>
-                  </div>
-                  <div className="table-wrap">
-                    <table className="table">
-                      <thead>
-                        <tr>
-                          <th>CVE ID</th>
-                          <th>CVSS Score</th>
-                          <th>Severity</th>
-                          <th>Description</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {targetData.sources?.nvd?.cves?.length ? (
-                          targetData.sources.nvd.cves.map((cve) => (
-                            <tr key={cve.id}>
-                              <td style={{ fontWeight: 600, color: "#ff8c8c" }}>{cve.id}</td>
-                              <td><strong>{cve.score}</strong></td>
-                              <td>
-                                <span className={`pill pill--${cve.severity.toLowerCase()}`}>
-                                  {cve.severity}
-                                </span>
-                              </td>
-                              <td className="details-cell">{cve.description}</td>
-                            </tr>
-                          ))
-                        ) : (
-                          <tr>
-                            <td colSpan="4" className="empty-copy">No CVEs matching target resolved in NVD database.</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                {/* Correlated Findings list */}
-                <div className="panel" style={{ padding: "24px" }}>
-                  <div className="panel__header" style={{ marginBottom: "16px" }}>
-                    <div>
-                      <p className="eyebrow">Cross source correlation</p>
-                      <h2>Correlated VAPT findings</h2>
-                    </div>
-                  </div>
-                  <div className="table-wrap">
-                    <table className="table">
-                      <thead>
-                        <tr>
-                          <th>Source</th>
-                          <th>Type</th>
-                          <th>Severity</th>
-                          <th>Description</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {targetData.correlatedFindings?.length ? (
-                          targetData.correlatedFindings.map((finding, idx) => (
-                            <tr key={`${finding.source}-${idx}`}>
-                              <td style={{ fontWeight: 600 }}>{finding.source}</td>
-                              <td>{finding.type}</td>
-                              <td>
-                                <span className={`pill pill--${finding.severity.toLowerCase()}`}>
-                                  {finding.severity}
-                                </span>
-                              </td>
-                              <td>{finding.description}</td>
-                            </tr>
-                          ))
-                        ) : (
-                          <tr>
-                            <td colSpan="4" className="empty-copy">No correlated findings recorded for this target yet.</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="panel" style={{ padding: "30px", textAlign: "center" }}>
-                <p className="empty-copy">No data available for target "{activeTarget}". Ensure it matches an asset or active threat target.</p>
-              </div>
-            )}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Default Feed Panels */}
-      {!activeTarget && (
-        <section className="section-grid">
-          <div className="panel panel--metrics">
-            <div className="panel__header">
-              <div>
-                <p className="eyebrow">External threat context</p>
-                <h2>Threat intelligence</h2>
-              </div>
-            </div>
-            <div className="metrics-grid">
-              <Card title="Enriched Findings" value={threatIntel.total_enriched} trend="Current findings mapped to external context" />
-              <Card title="Exploit Available" value={threatIntel.exploit_available} trend="Likely public exploit path exists" />
-              <Card title="Actively Exploited" value={threatIntel.actively_exploited} trend="Prioritize for immediate action" />
-              <Card title="Feed Sources" value={feedSources.length || 0} trend="NVD, MITRE, CISA KEV, Exploit-DB coverage" />
-            </div>
-          </div>
-
-          <div className="panel panel--metrics">
-            <div className="panel__header">
-              <div>
-                <p className="eyebrow">Open threat feeds</p>
-                <h2>Latest external threats</h2>
-              </div>
-            </div>
-            <div className="dashboard-toolbar threat-toolbar">
-              <div className="threat-toolbar__summary"><span>Feed status</span><strong>{threatIntel.external_feed_status || threatIntel.misp_status}</strong></div>
-              <div className="threat-toolbar__summary"><span>Latest events</span><strong>{externalEvents.length || 0}</strong></div>
-              <div className="threat-toolbar__summary"><span>Sources</span><strong>abuse.ch / URLhaus / CISA / NVD</strong></div>
-            </div>
-            <div className="coverage-list">
-              {externalEvents.length ? externalEvents.map((event) => (
-                <a key={event.id} className="coverage-row coverage-row--link" href={event.url || event.references?.[0] || "#"} target="_blank" rel="noreferrer">
-                  <span>
-                    <strong>{event.name}</strong>
-                    <p>{event.description || "Threat event published by the connected intelligence source."}</p>
-                    <p>{event.matched_targets?.length ? `Matched targets: ${event.matched_targets.slice(0, 3).join(", ")}` : "No direct target match yet"}</p>
-                  </span>
-                  <strong>{event.source} / {event.indicator_count || 0} indicators / {event.matched_findings} matched finding(s)</strong>
-                </a>
-              )) : <p className="empty-copy">External feed items will appear here from the connected open-source threat intelligence sources.</p>}
-            </div>
-          </div>
-        </section>
-      )}
+    <div className="ti-epss" title={`EPSS ${pct(value, 2)} · percentile ${pct(percentile, 0)}`}>
+      <div className="ti-epss__track" aria-hidden="true"><span className={`ti-epss__fill ti-epss__fill--${tone}`} style={{ width: `${Math.max(2, value * 100)}%` }} /></div>
+      <span className="cc-mono">{pct(value)}</span>
     </div>
   );
 }
 
-export default function ThreatIntelligence(props) {
+function Lookup({ initial }) {
+  const [query, setQuery] = useState(initial || "");
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const run = useCallback(async (value) => {
+    const q = (value ?? query).trim();
+    if (!q) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await api.get("/threat-intelligence/lookup", { params: { q } });
+      if (res.data.error) {
+        setError(res.data.error);
+        setResult(null);
+      } else {
+        setResult(res.data);
+      }
+    } catch {
+      setError("The lookup failed. Check the API's internet access and try again.");
+    } finally {
+      setBusy(false);
+    }
+  }, [query]);
+
+  useEffect(() => {
+    if (initial) {
+      const id = window.setTimeout(() => run(initial), 0);
+      return () => window.clearTimeout(id);
+    }
+    return undefined;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initial]);
+
+  const v = result ? VERDICT[result.verdict.level] : null;
+  const idb = result?.internetdb;
+  const gn = result?.greynoise;
+  const ds = result?.dshield;
+
   return (
-    <QueryClientProvider client={queryClient}>
-      <ThreatIntelligenceContent {...props} />
-    </QueryClientProvider>
+    <section className="cc-panel ti-lookup" aria-label="Indicator lookup">
+      <header className="cc-panel__head"><h2>Indicator lookup</h2><span className="cc-muted">IP or domain</span></header>
+      <form className="ti-lookup__form" onSubmit={(e) => { e.preventDefault(); run(); }}>
+        <label className="so-search">
+          <span className="cc-sr">IP address or domain</span>
+          <input type="search" placeholder="e.g. 79.124.49.114 or example.com" value={query} onChange={(e) => setQuery(e.target.value)} />
+        </label>
+        <button type="submit" className="so-launch-btn ti-lookup__go" disabled={busy || !query.trim()}>{busy ? "Checking…" : "Check"}</button>
+      </form>
+      {busy && <p className="cc-muted">Querying Shodan InternetDB, GreyNoise, SANS ISC and your own data…</p>}
+      {error && <p className="so-error" role="alert">{error}</p>}
+
+      {result && (
+        <div className="ti-result" aria-live="polite">
+          <div className={`ti-verdict ti-verdict--${v.tone}`}>
+            <span>VERDICT</span>
+            <strong>{result.verdict.text}</strong>
+          </div>
+          {result.verdict.reasons.length > 0 ? (
+            <ul className="ti-reasons">
+              {result.verdict.reasons.map((r) => <li key={r.text} className={`ti-reason ti-reason--${r.tone}`}>{r.text}</li>)}
+            </ul>
+          ) : <p className="cc-muted">No source reported anything notable about this indicator.</p>}
+
+          <dl className="ti-facts">
+            <div><dt>{result.kind === "domain" ? "Resolves to" : "Address"}</dt><dd className="cc-mono">{result.resolved.join(", ") || "—"}</dd></div>
+            {result.reverse_dns && <div><dt>Reverse DNS</dt><dd className="cc-mono">{result.reverse_dns}</dd></div>}
+            {result.geo && <div><dt>Location</dt><dd>{[result.geo.city, result.geo.country].filter(Boolean).join(", ")}</dd></div>}
+            {(result.geo?.asn || ds?.network) && <div><dt>Network</dt><dd>{result.geo?.asn || ds?.network}</dd></div>}
+            {result.geo?.hosting != null && <div><dt>Hosting / proxy</dt><dd>{result.geo.hosting ? "Hosting provider" : "Not hosting"}{result.geo.proxy ? " · proxy/VPN" : ""}</dd></div>}
+            {ds?.abuse_contact && <div><dt>Abuse contact</dt><dd className="cc-mono">{ds.abuse_contact}</dd></div>}
+          </dl>
+
+          {idb && (
+            <div className="ti-block">
+              <h3>Shodan InternetDB</h3>
+              {idb.not_seen ? <p className="cc-muted">Not seen by Shodan.</p> : (
+                <>
+                  <div className="ti-chips">
+                    {(idb.ports || []).map((p) => <span key={p} className={`ti-chip${RISKY.has(p) ? " ti-chip--risky" : ""}`}>{p}</span>)}
+                    {!idb.ports?.length && <span className="cc-muted">No open ports recorded.</span>}
+                  </div>
+                  {(idb.hostnames || []).length > 0 && <p className="cc-muted cc-mono">{idb.hostnames.slice(0, 6).join(", ")}</p>}
+                  {(idb.tags || []).length > 0 && <p className="cc-muted">Tags: {idb.tags.join(", ")}</p>}
+                </>
+              )}
+              {result.host_cves.length > 0 && (
+                <ul className="ti-cvelist">
+                  {result.host_cves.slice(0, 10).map((c) => (
+                    <li key={c.cve}>
+                      <a className="cc-mono" href={`https://nvd.nist.gov/vuln/detail/${c.cve}`} target="_blank" rel="noreferrer">{c.cve}</a>
+                      {c.kev && <span className="ti-badge-kev">KEV</span>}
+                      {c.ransomware && <span className="ti-badge-ransom">Ransomware</span>}
+                      <span className="cc-muted cc-right">EPSS {pct(c.epss)}</span>
+                    </li>
+                  ))}
+                  {result.host_cves.length > 10 && <li className="cc-muted">…and {result.host_cves.length - 10} more</li>}
+                </ul>
+              )}
+            </div>
+          )}
+
+          {gn && (
+            <div className="ti-block">
+              <h3>GreyNoise</h3>
+              <p>
+                {gn.noise ? "Seen scanning the internet" : "Not seen scanning"}
+                {gn.riot ? " · known benign service" : ""}
+                {gn.classification && gn.classification !== "unknown" ? ` · classified ${gn.classification}` : ""}
+                {gn.last_seen ? ` · last seen ${gn.last_seen}` : ""}
+                {gn.link && <> · <a href={gn.link} target="_blank" rel="noreferrer">details</a></>}
+              </p>
+            </div>
+          )}
+
+          {(result.virustotal || result.abuseipdb || result.otx) && (
+            <div className="ti-block">
+              <h3>Additional sources</h3>
+              {result.virustotal && <p>VirusTotal: {result.virustotal.malicious} malicious, {result.virustotal.suspicious} suspicious · <a href={result.virustotal.link} target="_blank" rel="noreferrer">report</a></p>}
+              {result.abuseipdb && <p>AbuseIPDB: {result.abuseipdb.score}% confidence, {result.abuseipdb.reports} reports</p>}
+              {result.otx && <p>AlienVault OTX: {result.otx.pulses} pulses</p>}
+            </div>
+          )}
+
+          <div className="ti-block">
+            <h3>In your environment</h3>
+            {result.environment.assets.length === 0 && result.environment.findings.length === 0 ? (
+              <p className="cc-muted">Not one of your targets, and no findings reference it.</p>
+            ) : (
+              <>
+                {result.environment.assets.map((a) => <p key={a.id}>Target <strong>{a.name}</strong> ({a.criticality})</p>)}
+                <ul className="cc-list">
+                  {result.environment.findings.slice(0, 8).map((f) => (
+                    <li key={f.id}>
+                      <span className={`nw-sev nw-sev--${f.severity}`}>{f.severity}</span>
+                      <Link to={`/findings/${f.id}`} className="ti-name am-ellipsis">{f.title}</Link>
+                    </li>
+                  ))}
+                </ul>
+                {result.environment.findings.length > 8 && <Link className="cc-btn" to={`/findings?target=${encodeURIComponent(result.query)}`}>All {result.environment.findings.length} findings</Link>}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+export default function ThreatIntelligence() {
+  const [searchParams] = useSearchParams();
+  const [exposure, setExposure] = useState(null);
+  const [kev, setKev] = useState(null);
+  const [sources, setSources] = useState([]);
+  const [filter, setFilter] = useState("all");
+  const [kevDays, setKevDays] = useState(30);
+  const [kevEnvOnly, setKevEnvOnly] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    setError("");
+    try {
+      const [e, s] = await Promise.all([api.get("/threat-intelligence/exposure"), api.get("/threat-intelligence/sources")]);
+      setExposure(e.data);
+      setSources(s.data);
+    } catch {
+      setError("Couldn't load threat intelligence. The API needs internet access to CISA and FIRST.");
+    }
+  }, []);
+
+  useEffect(() => {
+    const id = window.setTimeout(load, 0);
+    return () => window.clearTimeout(id);
+  }, [load]);
+
+  useEffect(() => {
+    api.get("/threat-intelligence/kev/recent", { params: { days: kevDays } }).then((r) => setKev(r.data)).catch(() => setKev(null));
+  }, [kevDays]);
+
+  const rows = useMemo(() => {
+    const all = exposure?.cves || [];
+    if (filter === "possible") return all.filter((r) => r.confirmed === false);
+    const list = all.filter((r) => r.confirmed !== false);
+    if (filter === "kev") return list.filter((r) => r.kev);
+    if (filter === "epss") return list.filter((r) => (r.epss || 0) >= 0.1);
+    return list;
+  }, [exposure, filter]);
+
+  const kevItems = (kev?.items || []).filter((i) => !kevEnvOnly || i.in_environment);
+  const s = exposure?.summary;
+
+  return (
+    <div className="cc ti-page">
+      <header className="cc-top">
+        <div className="cc-top__title">
+          <span className="cc-live-dot" aria-hidden="true" />
+          <h1>Threat Intelligence</h1>
+        </div>
+        <div className="cc-top__tools">
+          {exposure && <span className="cc-clock">CISA KEV {exposure.kev_version || "—"} · {exposure.kev_size.toLocaleString()} exploited CVEs</span>}
+          <button type="button" className="cc-btn" onClick={load}>Refresh</button>
+          <Link className="cc-btn" to="/attack-map">Global threat map</Link>
+        </div>
+      </header>
+
+      <div className="cc-kpis">
+        <div className="cc-kpi"><span>CVEs in your environment</span><strong>{s?.distinct_cves ?? "—"}</strong></div>
+        <div className="cc-kpi cc-kpi--hot"><span>Actively exploited (KEV)</span><strong>{s?.in_kev ?? "—"}</strong></div>
+        <div className="cc-kpi cc-kpi--hot"><span>Used by ransomware</span><strong>{s?.ransomware ?? "—"}</strong></div>
+        <div className="cc-kpi"><span>EPSS ≥ 10%</span><strong>{s?.high_epss ?? "—"}</strong></div>
+        <div className="cc-kpi"><span>Findings with a CVE</span><strong>{s ? `${s.findings_with_cve}/${s.open_findings}` : "—"}</strong></div>
+      </div>
+
+      {error && <p className="so-error" role="alert">{error}</p>}
+
+      <TodayIntel />
+
+      <div className="ti-layout">
+        <section className="cc-panel ti-exposure" aria-label="Exploitation priority">
+          <header className="cc-panel__head">
+            <h2>Fix first: exploitation priority</h2>
+            <div className="cc-range" role="group" aria-label="Filter CVEs">
+              {[["all", "Confirmed CVEs"], ["kev", "Actively exploited"], ["epss", "EPSS ≥ 10%"], ["possible", `Unconfirmed${s?.possible_cves ? ` (${s.possible_cves})` : ""}`]].map(([k, l]) => (
+                <button key={k} type="button" aria-pressed={filter === k} onClick={() => setFilter(k)}>{l}</button>
+              ))}
+            </div>
+          </header>
+          <p className="cc-muted ti-explain">
+            Ranked by real-world evidence: CVEs on CISA's Known Exploited Vulnerabilities list first, then by EPSS — the
+            probability of exploitation in the next 30 days. Severity alone doesn't decide the order.
+            {filter === "possible"
+              ? " These CVEs are only suggested by an exposed port or service — the version wasn't confirmed, so verify before acting. They aren't counted in the totals above."
+              : " Only CVEs confirmed by a version match or a scanner check are counted."}
+          </p>
+          <div className="so-table-wrap">
+            <table className="so-table ti-table">
+              <thead>
+                <tr><th scope="col">CVE</th><th scope="col">Exploitation</th><th scope="col">EPSS (30 d)</th><th scope="col">CVSS</th><th scope="col">Affected</th></tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.cve}>
+                    <td>
+                      <a className="cc-mono ti-cve" href={`https://nvd.nist.gov/vuln/detail/${r.cve}`} target="_blank" rel="noreferrer">{r.cve}</a>
+                      <div className="so-sub ti-cvetitle">{r.kev?.name || r.title}</div>
+                    </td>
+                    <td>
+                      {r.confirmed === false && <div className="ti-kevcell"><span className="ti-badge-unconfirmed" title="Matched on port or service only; version not confirmed">Unconfirmed · port-based</span></div>}
+                      {r.kev ? (
+                        <div className="ti-kevcell">
+                          <span className="ti-badge-kev">Exploited in the wild</span>
+                          {r.kev.ransomware && <span className="ti-badge-ransom">Ransomware</span>}
+                          <span className="so-sub">CISA due {r.kev.due_date}</span>
+                        </div>
+                      ) : <span className="cc-muted">No confirmed exploitation</span>}
+                    </td>
+                    <td><EpssBar value={r.epss} percentile={r.epss_percentile} /></td>
+                    <td className="cc-mono">{r.cvss || "—"}</td>
+                    <td>
+                      <Link to={`/findings?search=${encodeURIComponent(r.confirmed === false ? r.targets[0] || "" : r.cve)}`} className="ti-name">{r.targets.length} target{r.targets.length === 1 ? "" : "s"}</Link>
+                      <div className="so-sub cc-mono am-ellipsis" title={r.targets.join(", ")}>{r.targets.slice(0, 2).join(", ")}{r.targets.length > 2 ? "…" : ""}</div>
+                    </td>
+                  </tr>
+                ))}
+                {!rows.length && <tr><td colSpan={5} className="cc-empty so-empty">{!exposure ? "Loading…" : filter === "possible" ? "No unconfirmed CVE matches." : "No confirmed CVEs match this filter."}</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <Lookup initial={searchParams.get("q") || ""} />
+      </div>
+
+      <div className="ti-layout">
+        <section className="cc-panel ti-kev" aria-label="New in CISA KEV">
+          <header className="cc-panel__head">
+            <h2>New in CISA KEV</h2>
+            <div className="ti-kev__tools">
+              <div className="cc-range" role="group" aria-label="Added within">
+                {[7, 30, 90].map((d) => <button key={d} type="button" aria-pressed={kevDays === d} onClick={() => setKevDays(d)}>{d} days</button>)}
+              </div>
+              <label className="cc-check"><input type="checkbox" checked={kevEnvOnly} onChange={(e) => setKevEnvOnly(e.target.checked)} />In my environment</label>
+            </div>
+          </header>
+          <ul className="ti-kevlist">
+            {kevItems.slice(0, 40).map((i) => (
+              <li key={i.cve} className={i.in_environment ? "is-env" : ""}>
+                <div className="ti-kevlist__head">
+                  <a className="cc-mono ti-cve" href={`https://nvd.nist.gov/vuln/detail/${i.cve}`} target="_blank" rel="noreferrer">{i.cve}</a>
+                  <span className="so-sub">added {i.date_added}</span>
+                  {i.ransomware && <span className="ti-badge-ransom">Ransomware</span>}
+                  {i.in_environment && <span className="ti-badge-env">In your environment</span>}
+                </div>
+                <strong>{i.vendor} {i.product}</strong> — {i.name}
+                <p className="cc-muted">{i.description}</p>
+              </li>
+            ))}
+            {kev && !kevItems.length && <li className="cc-muted">{kevEnvOnly ? "None of these affect your environment." : "No additions in this period."}</li>}
+            {!kev && <li className="cc-muted">Loading the KEV catalog…</li>}
+          </ul>
+        </section>
+
+        <section className="cc-panel ti-sources" aria-label="Intelligence sources">
+          <header className="cc-panel__head"><h2>Sources</h2></header>
+          <ul className="cc-list">
+            {sources.map((src) => (
+              <li key={src.name} className="am-feed">
+                <span className={`cc-dot cc-dot--${src.status === "connected" || src.status === "configured" ? "healthy" : src.status === "needs_key" ? "medium" : "down"}`} />
+                <span>
+                  <strong>{src.name}</strong>
+                  <span className="cc-muted am-feed__detail">{src.status === "needs_key" ? `Optional · ${src.detail}` : src.detail}</span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      </div>
+    </div>
   );
 }

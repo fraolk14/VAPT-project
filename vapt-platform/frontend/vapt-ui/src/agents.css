@@ -1,0 +1,142 @@
+/* Endpoint Fleet page (on top of commandcenter.css, scans.css and targets.css pieces). */
+
+.ag .cc-grid {
+  margin-bottom: 16px;
+}
+
+.ag-locked h2 {
+  margin: 0 0 8px;
+  color: var(--cc-cyan);
+  font-size: 18px;
+}
+
+.ag-locked p {
+  margin: 0;
+  color: #c3ceda;
+  line-height: 1.6;
+}
+
+.ag-locked a {
+  color: var(--cc-cyan);
+  text-decoration: underline;
+}
+
+.ag-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.ag-steps h3 {
+  margin: 0 0 4px;
+  font-size: 14.5px;
+  font-weight: 600;
+  color: #dff6ff;
+}
+
+.ag-steps p {
+  margin: 0 0 10px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: #b9cbe0;
+}
+
+.ag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.ag-token {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--cc-cyan);
+  background: rgba(92, 225, 255, 0.06);
+}
+
+.ag-token code {
+  flex: 1 1 100%;
+  font-size: 14px;
+  color: #ffffff;
+  word-break: break-all;
+}
+
+.ag-method {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.ag-method p {
+  margin: 0;
+}
+
+.ag-method .cc-btn {
+  display: inline-flex;
+  align-items: center;
+}
+
+.ag-code {
+  position: relative;
+  width: 100%;
+}
+
+.ag-code pre {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--cc-line-hi);
+  background: #020713;
+  color: #cfe9ff;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.ag-code .cc-btn {
+  margin-top: 8px;
+}
+
+.ag-server {
+  margin-top: 14px !important;
+}
+
+.ag-server code {
+  color: #dff6ff;
+}
+
+.ag-heartbeat {
+  width: 100%;
+  height: 340px;
+}
+
+.ag-legend {
+  position: static;
+  margin-top: 6px;
+}
+
+.ag-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+}
+
+.ag-health::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--h);
+  box-shadow: 0 0 8px var(--h);
+}

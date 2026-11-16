@@ -577,6 +577,9 @@ def _tools_table(serialized_findings: list[dict]):
     source_map = {
         "openvas": "Network vulnerability scanning and service enumeration",
         "zap": "Web application crawling and vulnerability testing",
+        "web": "Built-in web checks (headers, cookies, exposed paths, API probes)",
+        "nuclei": "Nuclei template-based web vulnerability detection",
+        "testssl": "testssl.sh TLS protocol, cipher and certificate testing",
         "mobsf": "Mobile application static and metadata review",
         "network-db": "Database-backed network correlation and vulnerability enrichment",
         "platform": "Platform-side posture and workflow validation",
@@ -985,6 +988,9 @@ def export_findings_docx(
     source_map = {
         "openvas": "Network vulnerability scanning and service enumeration",
         "zap": "Web application crawling and vulnerability testing",
+        "web": "Built-in web checks (headers, cookies, exposed paths, API probes)",
+        "nuclei": "Nuclei template-based web vulnerability detection",
+        "testssl": "testssl.sh TLS protocol, cipher and certificate testing",
         "mobsf": "Mobile application static and metadata review",
         "network-db": "Database-backed network correlation and vulnerability enrichment",
         "platform": "Platform-side posture and workflow validation",

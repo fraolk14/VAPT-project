@@ -1,724 +1,646 @@
-import React, { useState, useMemo, useCallback } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { useDropzone } from "react-dropzone";
-import { motion, AnimatePresence } from "framer-motion";
-import api from "../api/client";
-import {
-  FiFileText,
-  FiDownload,
-  FiUploadCloud,
-  FiSliders,
-  FiEye,
-  FiCheck,
-  FiAlertTriangle,
-  FiShield,
-  FiX,
-  FiCalendar,
-  FiCheckSquare,
-  FiGlobe,
-  FiServer,
-  FiCpu,
-  FiRefreshCw,
-  FiFile,
-  FiLock,
-} from "react-icons/fi";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-const fetchReportDataApi = async (scanJobId = "latest") => {
-  const res = await api.get(`/reports/data/${scanJobId}`);
-  return res.data;
+import api from "../api/client";
+import "../commandcenter.css";
+import "../scans.css";
+import "../reports.css";
+
+const SETTINGS_KEY = "vapt_report_studio_v1";
+const SEV = ["critical", "high", "medium", "low", "info"];
+const SEV_LABEL = { critical: "Critical", high: "High", medium: "Medium", low: "Low", info: "Informational" };
+const SEV_CVSS = { critical: "9.0 – 10.0", high: "7.0 – 8.9", medium: "4.0 – 6.9", low: "0.1 – 3.9", info: "0.0" };
+const MODES = [
+  { key: "executive", label: "Executive", audience: "Leadership & clients", text: "Risk rating, key numbers and priorities. No technical detail." },
+  { key: "technical", label: "Technical", audience: "Engineers fixing issues", text: "Everything, plus full evidence, affected URLs and remediation per issue." },
+  { key: "compliance", label: "Compliance", audience: "Auditors & GRC", text: "Findings mapped to NIST 800-53 and ISO 27001 controls." },
+];
+const PREVIEW_ROWS = 40;
+const PREVIEW_DETAILS = 6;
+
+const DEFAULTS = {
+  mode: "executive",
+  scanId: "all",
+  targets: [],
+  startDate: "",
+  endDate: "",
+  includeResolved: false,
+  includeInfo: false,
+  includeCves: true,
+  includeRemediation: true,
+  includeEvidence: true,
+  includeCompliance: true,
+  includeDetails: false,
+  reportTitle: "",
+  preparedFor: "",
+  authorName: "",
+  classification: "Confidential",
+  version: "1.0",
 };
 
-export default function Reports() {
-  const [scanJobId, setScanJobId] = useState("latest");
-  const [reportType, setReportType] = useState("executive"); // executive | technical | compliance
-  const [companyName, setCompanyName] = useState("VAP");
-  const [reportTitle, setReportTitle] = useState("Vulnerability & Penetration Testing Executive Summary");
-  const [authorName, setAuthorName] = useState("Lead Security Auditor");
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
-  const [logoPreview, setLogoPreview] = useState(null);
-  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+function loadSettings() {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(SETTINGS_KEY) || "null");
+    return saved ? { ...DEFAULTS, ...saved, targets: [] } : DEFAULTS;
+  } catch {
+    return DEFAULTS;
+  }
+}
 
-  // Toggle Switches
-  const [includeCves, setIncludeCves] = useState(true);
-  const [includeRemediation, setIncludeRemediation] = useState(true);
-  const [includeRawScan, setIncludeRawScan] = useState(true);
-  const [includeComplianceMap, setIncludeComplianceMap] = useState(true);
+const fmtDate = (iso) => {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleDateString([], { day: "2-digit", month: "short", year: "numeric" });
+};
+const period = (meta) => (meta?.period_start && meta?.period_end ? `${fmtDate(meta.period_start)} – ${fmtDate(meta.period_end)}` : "—");
 
-  // Preview Modal
-  const [isPreviewModalOpen, setIsPreviewModalOpen] = useState(false);
-  const [downloadingFormat, setDownloadingFormat] = useState(null);
+const errorText = (err, fallback) => {
+  if (err?.response?.status === 403) return "You don't have permission to change branding. Ask an analyst or admin.";
+  const detail = err?.response?.data?.detail;
+  return typeof detail === "string" ? detail : fallback;
+};
 
-  // Fetch Real Scan Data
-  const { data: rawReportData, isLoading, isError, refetch } = useQuery({
-    queryKey: ["report-data", scanJobId],
-    queryFn: () => fetchReportDataApi(scanJobId),
-    staleTime: 30000,
-  });
+function toRequest(s, format = "pdf") {
+  return {
+    mode: s.mode,
+    format,
+    scan_id: s.scanId === "all" ? null : s.scanId,
+    targets: s.targets,
+    start_date: s.startDate || null,
+    end_date: s.endDate || null,
+    include_resolved: s.includeResolved,
+    include_info: s.includeInfo,
+    include_cves: s.includeCves,
+    include_remediation: s.includeRemediation,
+    include_evidence: s.includeEvidence,
+    include_compliance: s.includeCompliance,
+    include_details: s.includeDetails,
+    report_title: s.reportTitle || null,
+    prepared_for: s.preparedFor || null,
+    author_name: s.authorName || null,
+    classification: s.classification,
+    version: s.version || "1.0",
+  };
+}
 
-  // Dropzone Logo Upload
-  const onDrop = useCallback(async (acceptedFiles) => {
-    if (acceptedFiles.length === 0) return;
-    const file = acceptedFiles[0];
-    const previewUrl = URL.createObjectURL(file);
-    setLogoPreview(previewUrl);
+// ---------- preview document ----------
 
-    setIsUploadingLogo(true);
+function SevChip({ sev }) {
+  return <span className={`rp-chip rp-chip--${sev}`}>{SEV_LABEL[sev]}</span>;
+}
+
+function Page({ children, meta, number, cover = false }) {
+  return (
+    <article className={`rp-page${cover ? " rp-page--cover" : ""}`}>
+      {cover ? (
+        <div className="rp-cover-band"><span>{meta.classification.toUpperCase()}</span></div>
+      ) : (
+        <header className="rp-page__head">
+          <strong>{meta.organization}</strong>
+          <span>{meta.title}</span>
+        </header>
+      )}
+      <div className="rp-page__body">{children}</div>
+      <footer className="rp-page__foot">
+        <span>{cover ? `${meta.classification} — prepared by ${meta.organization}. Do not distribute without permission.` : meta.classification.toUpperCase()}</span>
+        {!cover && <span>Page {number}</span>}
+      </footer>
+    </article>
+  );
+}
+
+function ReportDocument({ model, logoUrl }) {
+  const { meta, summary, options: o } = model;
+  const peak = Math.max(1, ...SEV.map((s) => summary.counts[s]));
+  // Page and section numbers depend on which optional sections are present.
+  const hasDetails = o.include_details && model.issues.length > 0;
+  const hasCompliance = o.include_compliance && model.issues.length > 0;
+  const num = {
+    control: 2,
+    scope: 3,
+    summary: 4,
+    details: 5,
+    compliance: hasDetails ? 6 : 5,
+    appendix: 5 + (hasDetails ? 1 : 0) + (hasCompliance ? 1 : 0),
+  };
+  const sectionNo = { details: 4, compliance: hasDetails ? 5 : 4 };
+
+  return (
+    <div className="rp-doc">
+      <Page meta={meta} number={1} cover>
+        {logoUrl && <img className="rp-cover-logo" src={logoUrl} alt={`${meta.organization} logo`} />}
+        <h1 className="rp-cover-title">{meta.title}</h1>
+        {meta.prepared_for && <p className="rp-cover-sub">Prepared for <strong>{meta.prepared_for}</strong></p>}
+        <p className="rp-cover-sub">Prepared by {meta.organization}</p>
+        <table className="rp-kv">
+          <tbody>
+            <tr><th>Report type</th><td>{model.mode[0].toUpperCase() + model.mode.slice(1)}</td></tr>
+            <tr><th>Assessment period</th><td>{period(meta)}</td></tr>
+            <tr><th>Overall risk</th><td><strong>{summary.rating}</strong></td></tr>
+            <tr><th>Author</th><td>{meta.author}</td></tr>
+            <tr><th>Version / date</th><td>{meta.version} · {fmtDate(meta.generated_at)}</td></tr>
+          </tbody>
+        </table>
+      </Page>
+
+      <Page meta={meta} number={num.control}>
+        <h2>Document control</h2>
+        <table className="rp-table">
+          <thead><tr><th>Field</th><th>Value</th></tr></thead>
+          <tbody>
+            <tr><td>Title</td><td>{meta.title}</td></tr>
+            <tr><td>Prepared for</td><td>{meta.prepared_for || "—"}</td></tr>
+            <tr><td>Prepared by</td><td>{meta.author}, {meta.organization}</td></tr>
+            <tr><td>Classification</td><td>{meta.classification}</td></tr>
+            <tr><td>Version</td><td>{meta.version}</td></tr>
+            <tr><td>Generated</td><td>{fmtDate(meta.generated_at)}</td></tr>
+          </tbody>
+        </table>
+
+        <h2>1. Executive summary</h2>
+        <div className={`rp-rating rp-rating--${summary.rating.toLowerCase().split(" ")[0]}`}>
+          <span>OVERALL RISK</span>
+          <strong>{summary.rating.toUpperCase()}</strong>
+        </div>
+        <p>{summary.narrative}</p>
+        <div className="rp-kpis">
+          {[["Issues", summary.issues], ["Targets", summary.targets], ["Critical", summary.counts.critical], ["High", summary.counts.high], ["Medium", summary.counts.medium]].map(([k, v]) => (
+            <div key={k}><strong>{v}</strong><span>{k.toUpperCase()}</span></div>
+          ))}
+        </div>
+        <h3>Issues by severity</h3>
+        <div className="rp-bars">
+          {SEV.map((s) => (
+            <div key={s} className="rp-bars__row">
+              <span>{SEV_LABEL[s]}</span>
+              <div className="rp-bars__track"><div className={`rp-bars__fill rp-chip--${s}`} style={{ width: `${(summary.counts[s] / peak) * 100}%` }} /></div>
+              <strong>{summary.counts[s]}</strong>
+            </div>
+          ))}
+        </div>
+        {model.recommendations.length > 0 && (
+          <>
+            <h3>Priority recommendations</h3>
+            <table className="rp-table">
+              <thead><tr><th>ID</th><th>Issue</th><th>Severity</th><th>{o.include_remediation ? "Recommended action" : "Target"}</th></tr></thead>
+              <tbody>
+                {model.recommendations.map((r) => (
+                  <tr key={r.id}>
+                    <td className="rp-id">{r.id}</td>
+                    <td>{r.title}<div className="rp-muted">{r.target}</div></td>
+                    <td><SevChip sev={r.severity} /></td>
+                    <td>{o.include_remediation ? r.action : r.target}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </Page>
+
+      <Page meta={meta} number={num.scope}>
+        <h2>2. Scope and methodology</h2>
+        <p>
+          Assessment window: <strong>{period(meta)}</strong>.
+          {model.scan && <> Scope limited to scan <strong>{model.scan.name}</strong> ({model.scan.target}).</>}
+        </p>
+        {summary.engines.length > 0 && <p>Tools used: {summary.engines.join(", ")}.</p>}
+        {model.targets.length > 0 && (
+          <table className="rp-table rp-table--num">
+            <thead><tr><th>Target</th><th>Issues</th><th>Crit.</th><th>High</th><th>Med.</th><th>Low</th><th>Highest</th></tr></thead>
+            <tbody>
+              {model.targets.slice(0, 25).map((t) => (
+                <tr key={t.target}>
+                  <td>{t.target}</td><td>{t.issues}</td><td>{t.counts.critical}</td><td>{t.counts.high}</td><td>{t.counts.medium}</td><td>{t.counts.low}</td>
+                  <td><SevChip sev={t.highest} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {model.targets.length > 25 && <p className="rp-muted">…and {model.targets.length - 25} more targets in the exported report.</p>}
+        <h3>Limitations</h3>
+        <ul>{model.limitations.map((l) => <li key={l}>{l}</li>)}</ul>
+      </Page>
+
+      <Page meta={meta} number={num.summary}>
+        <h2>3. Findings summary</h2>
+        {model.issues.length ? (
+          <table className="rp-table">
+            <thead><tr><th>ID</th><th>Issue</th><th>Target</th><th>Severity</th><th>CVSS</th>{o.include_cves && <th>CVE</th>}</tr></thead>
+            <tbody>
+              {model.issues.slice(0, PREVIEW_ROWS).map((g) => (
+                <tr key={g.id}>
+                  <td className="rp-id">{g.id}</td><td>{g.title}</td><td className="rp-mono">{g.target}</td>
+                  <td><SevChip sev={g.severity} /></td><td>{g.cvss ? g.cvss.toFixed(1) : "—"}</td>
+                  {o.include_cves && <td className="rp-mono">{g.cves.slice(0, 2).join(", ") || "—"}</td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <p>No issues in the selected scope.</p>}
+        {model.issues.length > PREVIEW_ROWS && <p className="rp-muted">Preview shows the first {PREVIEW_ROWS} of {model.issues.length} issues; the export contains all of them.</p>}
+      </Page>
+
+      {hasDetails && (
+        <Page meta={meta} number={num.details}>
+          <h2>{sectionNo.details}. Detailed findings</h2>
+          {model.issues.slice(0, PREVIEW_DETAILS).map((g) => (
+            <section key={g.id} className="rp-detail">
+              <h3>{g.id} · {g.title}</h3>
+              <table className="rp-kv rp-kv--grid">
+                <tbody>
+                  <tr><th>Severity</th><td><SevChip sev={g.severity} /></td><th>CVSS</th><td>{g.cvss ? g.cvss.toFixed(1) : "—"}</td></tr>
+                  <tr><th>Target</th><td className="rp-mono">{g.target}</td><th>Occurrences</th><td>{g.occurrences}</td></tr>
+                  <tr><th>Detected by</th><td>{g.engines.join(", ") || "—"}</td><th>Status</th><td>{g.status.replace(/_/g, " ")}</td></tr>
+                  {o.include_cves && g.cves.length > 0 && <tr><th>CVE</th><td colSpan={3} className="rp-mono">{g.cves.join(", ")}</td></tr>}
+                </tbody>
+              </table>
+              <h4>Description</h4>
+              <p>{g.description || "No description provided by the scanner."}</p>
+              {o.include_evidence && g.evidence && (<><h4>Evidence</h4><pre className="rp-pre">{g.evidence}</pre></>)}
+              {g.urls.length > 0 && (<><h4>Affected locations</h4><p className="rp-muted rp-mono">{g.urls.slice(0, 6).join(", ")}{g.urls.length > 6 ? ` … +${g.urls.length - 6}` : ""}</p></>)}
+              {o.include_remediation && (<><h4>Remediation</h4><p>{g.remediation || "No remediation guidance provided by the scanner."}</p></>)}
+              {o.include_compliance && <p className="rp-muted">Controls: NIST {g.controls.nist.join(", ")} · ISO 27001 {g.controls.iso.join(", ")}</p>}
+            </section>
+          ))}
+          {model.issues.length > PREVIEW_DETAILS && <p className="rp-muted">Preview shows {PREVIEW_DETAILS} of {model.issues.length} detailed findings; the export contains all of them.</p>}
+        </Page>
+      )}
+
+      {hasCompliance && (
+        <Page meta={meta} number={num.compliance}>
+          <h2>{sectionNo.compliance}. Control mapping</h2>
+          <p>Findings are mapped to controls by finding type. This mapping is indicative and supports remediation planning; it is not a formal compliance audit or attestation.</p>
+          {[["nist", "NIST SP 800-53 Rev. 5"], ["iso", "ISO/IEC 27001:2022 Annex A"]].map(([fw, label]) => (
+            <div key={fw}>
+              <h3>{label}</h3>
+              <table className="rp-table">
+                <thead><tr><th>Control</th><th>Highest severity</th><th>Related issues</th><th>Targets</th></tr></thead>
+                <tbody>
+                  {model.compliance[fw].map((c) => (
+                    <tr key={c.control}>
+                      <td className="rp-id">{c.control}</td><td><SevChip sev={c.highest} /></td>
+                      <td className="rp-mono">{c.issues.slice(0, 8).join(", ")}{c.issues.length > 8 ? " …" : ""}</td>
+                      <td>{c.targets.length}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </Page>
+      )}
+
+      <Page meta={meta} number={num.appendix}>
+        <h2>Appendix A. Risk rating method</h2>
+        <p>Each issue is rated by the scanner's severity, aligned with CVSS v3 score bands. The overall risk equals the most severe open issue in scope.</p>
+        <table className="rp-table">
+          <thead><tr><th>Rating</th><th>CVSS range</th></tr></thead>
+          <tbody>{SEV.map((s) => <tr key={s}><td><SevChip sev={s} /></td><td>{SEV_CVSS[s]}</td></tr>)}</tbody>
+        </table>
+      </Page>
+    </div>
+  );
+}
+
+// ---------- page ----------
+
+export default function Reports({ canBrand = true }) {
+  const [settings, setSettings] = useState(loadSettings);
+  const [model, setModel] = useState(null);
+  const [allTargets, setAllTargets] = useState([]);
+  const [scans, setScans] = useState([]);
+  const [updating, setUpdating] = useState(false);
+  const [previewError, setPreviewError] = useState("");
+  const [exporting, setExporting] = useState(null);
+  const [notice, setNotice] = useState(null);
+  const [branding, setBranding] = useState({ company_name: "", logo_uploaded: false });
+  const [orgName, setOrgName] = useState("");
+  const [logoUrl, setLogoUrl] = useState(null);
+  const [zoom, setZoom] = useState(0.8);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [targetQuery, setTargetQuery] = useState("");
+  const fileRef = useRef(null);
+  const requestId = useRef(0);
+
+  const set = (key) => (value) => setSettings((s) => ({ ...s, [key]: value }));
+
+  // Remember report details between visits (per browser).
+  useEffect(() => {
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("company_name", companyName);
-      await api.post("/reports/logo", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-    } catch (err) {
-      console.error("Logo upload failed", err);
-    } finally {
-      setIsUploadingLogo(false);
+      const { targets, ...rest } = settings; // eslint-disable-line no-unused-vars
+      window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(rest));
+    } catch {
+      // storage unavailable; settings simply aren't remembered
     }
-  }, [companyName]);
+  }, [settings]);
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: { "image/*": [".png", ".jpg", ".jpeg", ".svg"] },
-    maxSize: 5 * 1024 * 1024,
-    multiple: false,
-  });
-
-  // Filtered Findings based on Date Range
-  const filteredMisconfigs = useMemo(() => {
-    if (!rawReportData?.misconfigurations) return [];
-    return rawReportData.misconfigurations.filter((item) => {
-      if (!item.discovered_at) return true;
-      const itemDate = new Date(item.discovered_at).getTime();
-      if (startDate) {
-        const start = new Date(startDate).getTime();
-        if (itemDate < start) return false;
-      }
-      if (endDate) {
-        const end = new Date(endDate).getTime() + 86400000;
-        if (itemDate > end) return false;
-      }
-      return true;
-    });
-  }, [rawReportData, startDate, endDate]);
-
-  const summaryMetrics = useMemo(() => {
-    const totalAssets = Math.max(1, rawReportData?.summary?.total_assets || rawReportData?.assets?.length || 1);
-    const totalFindings = filteredMisconfigs.length;
-    const critical = filteredMisconfigs.filter((m) => m.severity?.toUpperCase() === "CRITICAL").length;
-    const high = filteredMisconfigs.filter((m) => m.severity?.toUpperCase() === "HIGH").length;
-    const medium = filteredMisconfigs.filter((m) => m.severity?.toUpperCase() === "MEDIUM").length;
-    const low = filteredMisconfigs.filter((m) => m.severity?.toUpperCase() === "LOW").length;
-
-    const penalty = (critical * 25 + high * 12 + medium * 5 + low * 1) / (totalAssets * 2);
-    const complianceScore = Math.min(100, Math.max(20, Math.round(100 - penalty)));
-
-    return { totalAssets, totalFindings, critical, high, medium, low, complianceScore };
-  }, [filteredMisconfigs, rawReportData]);
-
-  // Download File Handler
-  const handleDownload = async (format) => {
-    setDownloadingFormat(format);
+  const loadLogo = useCallback(async () => {
     try {
-      const jobId = rawReportData?.scan_job_id || "latest";
-      const payload = {
-        mode: reportType,
-        format,
-        company_name: companyName,
-        report_title: reportTitle,
-        author_name: authorName,
-        start_date: startDate,
-        end_date: endDate,
-        include_cves: includeCves,
-        include_remediation: includeRemediation,
-        include_raw_scan: includeRawScan,
-        include_compliance_map: includeComplianceMap,
-      };
-
-      const res = await api.post(`/reports/download/${jobId}`, payload, {
-        responseType: "blob",
+      const res = await api.get("/reports/branding/logo", { responseType: "blob" });
+      setLogoUrl((old) => {
+        if (old) URL.revokeObjectURL(old);
+        return URL.createObjectURL(res.data);
       });
+    } catch {
+      setLogoUrl((old) => {
+        if (old) URL.revokeObjectURL(old);
+        return null;
+      });
+    }
+  }, []);
 
-      const blob = new Blob([res.data]);
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.setAttribute("download", `VAPT_${companyName.replace(/\s+/g, "_")}_${reportType.toUpperCase()}_Report.${format}`);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error(`Failed to download ${format} report`, err);
+  useEffect(() => {
+    api.get("/reports/branding").then((res) => {
+      setBranding(res.data);
+      setOrgName(res.data.company_name || "");
+      if (res.data.logo_uploaded) loadLogo();
+    }).catch(() => {});
+    api.get("/scans/").then((res) => {
+      setScans((res.data || []).filter((s) => String(s.status).toLowerCase() === "completed"));
+    }).catch(() => {});
+  }, [loadLogo]);
+
+  // Live preview: debounce settings changes, ignore out-of-order responses.
+  useEffect(() => {
+    const id = ++requestId.current;
+    const timer = window.setTimeout(async () => {
+      setUpdating(true);
+      try {
+        const res = await api.post("/reports/studio/preview", toRequest(settings));
+        if (id !== requestId.current) return;
+        setModel(res.data);
+        setPreviewError("");
+        if (!settings.targets.length) setAllTargets(res.data.targets.map((t) => t.target));
+      } catch {
+        if (id === requestId.current) setPreviewError("Couldn't build the preview. Check the API and try again.");
+      } finally {
+        if (id === requestId.current) setUpdating(false);
+      }
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [settings]);
+
+  useEffect(() => {
+    if (!fullscreen) return undefined;
+    const onKey = (e) => { if (e.key === "Escape") setFullscreen(false); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [fullscreen]);
+
+  const exportReport = async (format) => {
+    setExporting(format);
+    try {
+      const res = await api.post("/reports/studio/export", toRequest(settings, format), { responseType: "blob" });
+      const disposition = res.headers?.["content-disposition"] || "";
+      const match = disposition.match(/filename="?([^";]+)"?/);
+      const name = match ? match[1] : `report.${format}`;
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setNotice({ ok: true, text: `${name} downloaded.` });
+    } catch {
+      setNotice({ ok: false, text: `Couldn't export the ${format.toUpperCase()} report.` });
     } finally {
-      setDownloadingFormat(null);
+      setExporting(null);
     }
   };
 
+  const uploadLogo = async (file) => {
+    if (!file) return;
+    if (!/\.(png|jpe?g)$/i.test(file.name)) {
+      setNotice({ ok: false, text: "Use a PNG or JPG logo (SVG can't be embedded in PDF reports)." });
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setNotice({ ok: false, text: "Logo must be under 5 MB." });
+      return;
+    }
+    const form = new FormData();
+    form.append("file", file);
+    if (orgName.trim()) form.append("company_name", orgName.trim());
+    try {
+      await api.post("/reports/logo", form);
+      setBranding((b) => ({ ...b, logo_uploaded: true }));
+      await loadLogo();
+      setNotice({ ok: true, text: "Logo saved. It appears on every report." });
+    } catch (err) {
+      setNotice({ ok: false, text: errorText(err, "Couldn't upload the logo.") });
+    } finally {
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const removeLogo = async () => {
+    try {
+      await api.delete("/reports/branding/logo");
+      setBranding((b) => ({ ...b, logo_uploaded: false }));
+      await loadLogo();
+    } catch (err) {
+      setNotice({ ok: false, text: errorText(err, "Couldn't remove the logo.") });
+    }
+  };
+
+  const saveOrg = async () => {
+    try {
+      const res = await api.put("/reports/branding", { company_name: orgName.trim() });
+      setBranding((b) => ({ ...b, ...res.data }));
+      setSettings((s) => ({ ...s })); // refresh preview with the new name
+      setNotice({ ok: true, text: "Organization name saved." });
+    } catch (err) {
+      setNotice({ ok: false, text: errorText(err, "Couldn't save the organization name.") });
+    }
+  };
+
+  const visibleTargets = useMemo(() => {
+    const q = targetQuery.trim().toLowerCase();
+    return allTargets.filter((t) => !q || t.toLowerCase().includes(q)).slice(0, 80);
+  }, [allTargets, targetQuery]);
+
+  const toggleTarget = (t) => setSettings((s) => ({
+    ...s,
+    targets: s.targets.includes(t) ? s.targets.filter((x) => x !== t) : [...s.targets, t],
+  }));
+
+  const preview = model ? <ReportDocument model={model} logoUrl={logoUrl} /> : null;
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "24px", padding: "8px 0" }}>
-      {/* Header Studio Banner */}
-      <div
-        className="panel"
-        style={{
-          background: "linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.85))",
-          border: "1px solid rgba(148, 163, 184, 0.15)",
-          borderRadius: "16px",
-          padding: "20px 24px",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          flexWrap: "wrap",
-          gap: "16px",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
-          <div style={{ background: "rgba(56, 189, 248, 0.1)", padding: "12px", borderRadius: "12px", border: "1px solid rgba(56, 189, 248, 0.2)" }}>
-            <FiFileText style={{ color: "#38bdf8", fontSize: "24px" }} />
-          </div>
-          <div>
-            <h1 style={{ fontSize: "1.5rem", fontWeight: "700", color: "#f8fafc", margin: 0 }}>
-              Report Studio & Document Generator
-            </h1>
-            <p style={{ color: "#94a3b8", fontSize: "0.88rem", margin: 0 }}>
-              Real-time report aggregation, compliance mapping, and custom PDF / DOCX / CSV downloads.
-            </p>
-          </div>
+    <div className="cc rs">
+      <header className="cc-top">
+        <div className="cc-top__title">
+          <span className="cc-live-dot" aria-hidden="true" />
+          <h1>Report Studio</h1>
         </div>
-
-        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-          <span style={{ fontSize: "0.85rem", color: "#94a3b8" }}>Target Scan ID:</span>
-          <select
-            className="scan-select"
-            value={scanJobId}
-            onChange={(e) => setScanJobId(e.target.value)}
-            style={{ width: "130px", height: "38px" }}
-          >
-            <option value="latest">Latest Scan</option>
-            <option value="1">Scan #1</option>
-            <option value="2">Scan #2</option>
-          </select>
-
-          <button
-            onClick={() => refetch()}
-            className="btn btn--secondary"
-            style={{ height: "38px", padding: "0 14px", display: "flex", alignItems: "center", gap: "6px" }}
-          >
-            <FiRefreshCw className={isLoading ? "spin" : ""} /> Refresh
+        <div className="cc-top__tools">
+          <button type="button" className="so-launch-btn rs-export" disabled={!!exporting || !model} onClick={() => exportReport("pdf")}>
+            {exporting === "pdf" ? "Generating…" : "Export PDF"}
           </button>
+          {["docx", "csv", "json"].map((f) => (
+            <button key={f} type="button" className="cc-btn" disabled={!!exporting || !model} onClick={() => exportReport(f)}>
+              {exporting === f ? "…" : f.toUpperCase()}
+            </button>
+          ))}
         </div>
-      </div>
+      </header>
 
-      {/* Main 2-Column Grid (30% / 70%) */}
-      <div style={{ display: "grid", gridTemplateColumns: "3.2fr 6.8fr", gap: "24px" }}>
-        
-        {/* LEFT COLUMN: Report Configuration Panel (30%) */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-          
-          {/* 1. Organization Branding Card */}
-          <div className="panel" style={{ padding: "20px" }}>
-            <h3 style={{ fontSize: "0.95rem", fontWeight: "600", color: "#f8fafc", marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-              <FiUploadCloud style={{ color: "#38bdf8" }} /> Organization Branding
-            </h3>
+      {notice && (
+        <div className={`so-notice${notice.ok ? "" : " so-notice--error"}`} role="status">
+          <span>{notice.text}</span>
+          <button type="button" className="cc-icon" aria-label="Dismiss" onClick={() => setNotice(null)}>×</button>
+        </div>
+      )}
 
-            <div
-              {...getRootProps()}
-              style={{
-                border: "2px dashed " + (isDragActive ? "#38bdf8" : "rgba(148, 163, 184, 0.25)"),
-                borderRadius: "12px",
-                padding: "20px",
-                textAlign: "center",
-                background: isDragActive ? "rgba(56, 189, 248, 0.05)" : "rgba(15, 23, 42, 0.5)",
-                cursor: "pointer",
-                transition: "all 0.2s ease",
-              }}
-            >
-              <input {...getInputProps()} />
-              {logoPreview ? (
-                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "10px" }}>
-                  <img src={logoPreview} alt="Company Logo" style={{ maxHeight: "60px", maxWidth: "100%", objectFit: "contain" }} />
-                  <span style={{ fontSize: "0.78rem", color: "#10b981", display: "flex", alignItems: "center", gap: "4px" }}>
-                    <FiCheck /> Logo uploaded
-                  </span>
-                </div>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "8px", color: "#94a3b8" }}>
-                  <FiUploadCloud style={{ fontSize: "28px", color: "#64748b" }} />
-                  <p style={{ margin: 0, fontSize: "0.85rem", fontWeight: "500", color: "#cbd5e1" }}>
-                    Drag & drop logo or click to browse
-                  </p>
-                  <small style={{ fontSize: "0.75rem", color: "#64748b" }}>Supports PNG, JPG, SVG (Max 5MB)</small>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* 2. Company Information */}
-          <div className="panel" style={{ padding: "20px" }}>
-            <h3 style={{ fontSize: "0.95rem", fontWeight: "600", color: "#f8fafc", marginBottom: "14px" }}>
-              Company Information
-            </h3>
-            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-              <div>
-                <label style={{ fontSize: "0.78rem", color: "#94a3b8", display: "block", marginBottom: "4px" }}>Company Name</label>
-                <input
-                  className="scan-input"
-                  value={companyName}
-                  onChange={(e) => setCompanyName(e.target.value)}
-                  placeholder="e.g. Acme Corporation"
-                  style={{ width: "100%" }}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: "0.78rem", color: "#94a3b8", display: "block", marginBottom: "4px" }}>Report Title</label>
-                <input
-                  className="scan-input"
-                  value={reportTitle}
-                  onChange={(e) => setReportTitle(e.target.value)}
-                  placeholder="e.g. Technical Assessment Audit"
-                  style={{ width: "100%" }}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: "0.78rem", color: "#94a3b8", display: "block", marginBottom: "4px" }}>Author Name</label>
-                <input
-                  className="scan-input"
-                  value={authorName}
-                  onChange={(e) => setAuthorName(e.target.value)}
-                  placeholder="e.g. Security Engineering Team"
-                  style={{ width: "100%" }}
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* 3. Report Type Selector (Toggle Tabs) */}
-          <div className="panel" style={{ padding: "20px" }}>
-            <h3 style={{ fontSize: "0.95rem", fontWeight: "600", color: "#f8fafc", marginBottom: "14px" }}>
-              Report Format Type
-            </h3>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px" }}>
-              {[
-                { id: "executive", label: "Executive" },
-                { id: "technical", label: "Technical" },
-                { id: "compliance", label: "Compliance" },
-              ].map((tab) => (
+      <div className="rs-layout">
+        {/* ---------- Settings ---------- */}
+        <div className="rs-settings">
+          <section className="cc-panel" aria-label="Report type">
+            <header className="cc-panel__head"><h2>Report type</h2></header>
+            <div className="rs-modes" role="radiogroup" aria-label="Report type">
+              {MODES.map((m) => (
                 <button
-                  key={tab.id}
-                  onClick={() => setReportType(tab.id)}
-                  style={{
-                    padding: "10px 8px",
-                    borderRadius: "8px",
-                    border: reportType === tab.id ? "1px solid #38bdf8" : "1px solid rgba(148, 163, 184, 0.15)",
-                    background: reportType === tab.id ? "rgba(56, 189, 248, 0.15)" : "rgba(15, 23, 42, 0.6)",
-                    color: reportType === tab.id ? "#38bdf8" : "#94a3b8",
-                    fontSize: "0.85rem",
-                    fontWeight: "600",
-                    cursor: "pointer",
-                    transition: "all 0.2s ease",
-                  }}
+                  key={m.key}
+                  type="button"
+                  role="radio"
+                  aria-checked={settings.mode === m.key}
+                  className="rs-mode"
+                  onClick={() => set("mode")(m.key)}
                 >
-                  {tab.label}
+                  <strong>{m.label}</strong>
+                  <span className="rs-mode__aud">{m.audience}</span>
+                  <span className="rs-mode__text">{m.text}</span>
                 </button>
               ))}
             </div>
-          </div>
+          </section>
 
-          {/* 4. Date Range Filter */}
-          <div className="panel" style={{ padding: "20px" }}>
-            <h3 style={{ fontSize: "0.95rem", fontWeight: "600", color: "#f8fafc", marginBottom: "14px", display: "flex", alignItems: "center", gap: "6px" }}>
-              <FiCalendar style={{ color: "#38bdf8" }} /> Date Range Filter
-            </h3>
-            <div style={{ display: "flex", gap: "10px" }}>
-              <div style={{ flex: 1 }}>
-                <label style={{ fontSize: "0.75rem", color: "#94a3b8", display: "block", marginBottom: "4px" }}>Start Date</label>
-                <input
-                  type="date"
-                  className="scan-input"
-                  value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
-                  style={{ width: "100%", fontSize: "0.8rem" }}
-                />
+          <section className="cc-panel" aria-label="Scope">
+            <header className="cc-panel__head"><h2>Scope</h2></header>
+            <label className="so-field">
+              Findings from
+              <select className="so-input" value={settings.scanId} onChange={(e) => setSettings((s) => ({ ...s, scanId: e.target.value, targets: [] }))}>
+                <option value="all">All scans</option>
+                {scans.slice(0, 60).map((sc) => (
+                  <option key={sc.id} value={sc.id}>{sc.scan_name} — {sc.target}</option>
+                ))}
+              </select>
+            </label>
+            <div className="rs-two">
+              <label className="so-field">From<input type="date" className="so-input" value={settings.startDate} onChange={(e) => set("startDate")(e.target.value)} /></label>
+              <label className="so-field">To<input type="date" className="so-input" value={settings.endDate} onChange={(e) => set("endDate")(e.target.value)} /></label>
+            </div>
+            <fieldset className="rs-targets">
+              <legend>Targets {settings.targets.length ? `(${settings.targets.length} selected)` : "(all)"}</legend>
+              <input type="search" className="so-input" placeholder="Filter targets" aria-label="Filter targets" value={targetQuery} onChange={(e) => setTargetQuery(e.target.value)} />
+              <div className="rs-targets__list">
+                {visibleTargets.map((t) => (
+                  <label key={t} className="cc-check rs-target">
+                    <input type="checkbox" checked={settings.targets.includes(t)} onChange={() => toggleTarget(t)} />
+                    <span className="cc-mono">{t}</span>
+                  </label>
+                ))}
+                {!visibleTargets.length && <p className="cc-muted">No targets.</p>}
               </div>
-              <div style={{ flex: 1 }}>
-                <label style={{ fontSize: "0.75rem", color: "#94a3b8", display: "block", marginBottom: "4px" }}>End Date</label>
-                <input
-                  type="date"
-                  className="scan-input"
-                  value={endDate}
-                  onChange={(e) => setEndDate(e.target.value)}
-                  style={{ width: "100%", fontSize: "0.8rem" }}
-                />
+              {settings.targets.length > 0 && <button type="button" className="cc-btn" onClick={() => set("targets")([])}>Clear selection</button>}
+            </fieldset>
+            <label className="cc-check"><input type="checkbox" checked={settings.includeResolved} onChange={(e) => set("includeResolved")(e.target.checked)} />Include resolved issues</label>
+            <label className="cc-check"><input type="checkbox" checked={settings.includeInfo} onChange={(e) => set("includeInfo")(e.target.checked)} />Include informational issues</label>
+            <p className="cc-muted rs-note">Issues marked as false positives are always excluded.</p>
+          </section>
+
+          <section className="cc-panel" aria-label="Organization branding">
+            <header className="cc-panel__head"><h2>Organization branding</h2></header>
+            <div className="rs-logo">
+              <div className="rs-logo__box">
+                {logoUrl ? <img src={logoUrl} alt="Current report logo" /> : <span className="cc-muted">No logo</span>}
               </div>
-            </div>
-          </div>
-
-          {/* 5. Report Settings (Toggle Switches) */}
-          <div className="panel" style={{ padding: "20px" }}>
-            <h3 style={{ fontSize: "0.95rem", fontWeight: "600", color: "#f8fafc", marginBottom: "14px", display: "flex", alignItems: "center", gap: "6px" }}>
-              <FiSliders style={{ color: "#38bdf8" }} /> Report Sections
-            </h3>
-            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-              {[
-                { label: "Include CVE Mapping", state: includeCves, set: setIncludeCves },
-                { label: "Include Remediation Steps", state: includeRemediation, set: setIncludeRemediation },
-                { label: "Include Raw Scan Output", state: includeRawScan, set: setIncludeRawScan },
-                { label: "Include Compliance Matrix", state: includeComplianceMap, set: setIncludeComplianceMap },
-              ].map((opt, i) => (
-                <label key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontSize: "0.85rem", color: "#cbd5e1" }}>
-                  <span>{opt.label}</span>
-                  <input
-                    type="checkbox"
-                    checked={opt.state}
-                    onChange={(e) => opt.set(e.target.checked)}
-                    style={{ width: "16px", height: "16px", accentColor: "#38bdf8" }}
-                  />
-                </label>
-              ))}
-            </div>
-          </div>
-
-          {/* 6. Download Actions Button Group */}
-          <div className="panel" style={{ padding: "20px", display: "flex", flexDirection: "column", gap: "10px" }}>
-            <button
-              onClick={() => setIsPreviewModalOpen(true)}
-              className="btn btn--secondary"
-              style={{ width: "100%", height: "42px", display: "flex", justifyContent: "center", alignItems: "center", gap: "8px" }}
-            >
-              <FiEye /> Full Screen Preview
-            </button>
-
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
-              <button
-                onClick={() => handleDownload("pdf")}
-                disabled={downloadingFormat === "pdf"}
-                className="btn btn--primary"
-                style={{ height: "40px", display: "flex", justifyContent: "center", alignItems: "center", gap: "6px", fontSize: "0.82rem" }}
-              >
-                <FiDownload /> {downloadingFormat === "pdf" ? "Exporting..." : "Download PDF"}
-              </button>
-
-              <button
-                onClick={() => handleDownload("docx")}
-                disabled={downloadingFormat === "docx"}
-                className="btn btn--secondary"
-                style={{ height: "40px", display: "flex", justifyContent: "center", alignItems: "center", gap: "6px", fontSize: "0.82rem" }}
-              >
-                <FiFile /> {downloadingFormat === "docx" ? "Exporting..." : "Download DOCX"}
-              </button>
-            </div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
-              <button
-                onClick={() => handleDownload("csv")}
-                disabled={downloadingFormat === "csv"}
-                style={{
-                  height: "36px",
-                  background: "rgba(30, 41, 59, 0.6)",
-                  border: "1px solid rgba(148, 163, 184, 0.15)",
-                  color: "#cbd5e1",
-                  borderRadius: "8px",
-                  fontSize: "0.78rem",
-                  cursor: "pointer",
-                  display: "flex",
-                  justifyContent: "center",
-                  alignItems: "center",
-                  gap: "4px",
-                }}
-              >
-                <FiDownload /> Export CSV
-              </button>
-
-              <button
-                onClick={() => handleDownload("json")}
-                disabled={downloadingFormat === "json"}
-                style={{
-                  height: "36px",
-                  background: "rgba(30, 41, 59, 0.6)",
-                  border: "1px solid rgba(148, 163, 184, 0.15)",
-                  color: "#cbd5e1",
-                  borderRadius: "8px",
-                  fontSize: "0.78rem",
-                  cursor: "pointer",
-                  display: "flex",
-                  justifyContent: "center",
-                  alignItems: "center",
-                  gap: "4px",
-                }}
-              >
-                <FiDownload /> Export JSON
-              </button>
-            </div>
-          </div>
-
-        </div>
-
-        {/* RIGHT COLUMN: Live Report Preview Paper Container (70%) */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span style={{ fontSize: "0.88rem", fontWeight: "600", color: "#94a3b8" }}>
-              LIVE DOCUMENT PREVIEW ({reportType.toUpperCase()} MODE)
-            </span>
-            <span style={{ fontSize: "0.78rem", color: "#64748b" }}>Paper View 8.5" x 11"</span>
-          </div>
-
-          {/* Paper Style Scrollable Box */}
-          <div
-            style={{
-              maxHeight: "85vh",
-              overflowY: "auto",
-              background: "#ffffff",
-              color: "#1e293b",
-              borderRadius: "12px",
-              padding: "40px 48px",
-              boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.4)",
-              fontFamily: "'Times New Roman', 'Georgia', serif",
-            }}
-          >
-            {/* Document Header */}
-            <div style={{ borderBottom: "2px solid #e2e8f0", paddingBottom: "24px", marginBottom: "28px", display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <div>
-                <h1 style={{ fontFamily: "'Inter', sans-serif", fontSize: "1.8rem", fontWeight: "800", color: "#0f172a", margin: "0 0 6px 0" }}>
-                  {companyName}
-                </h1>
-                <h2 style={{ fontFamily: "'Inter', sans-serif", fontSize: "1.2rem", fontWeight: "600", color: "#2563eb", margin: "0 0 12px 0" }}>
-                  {reportTitle}
-                </h2>
-                <div style={{ fontSize: "0.85rem", color: "#64748b", display: "flex", gap: "16px" }}>
-                  <span><strong>Author:</strong> {authorName}</span>
-                  <span><strong>Generated:</strong> {new Date().toLocaleDateString()}</span>
-                </div>
-              </div>
-
-              {logoPreview ? (
-                <img src={logoPreview} alt="Logo" style={{ maxHeight: "50px", maxWidth: "160px", objectFit: "contain" }} />
-              ) : (
-                <div style={{ padding: "8px 14px", border: "1px dashed #cbd5e1", borderRadius: "6px", fontSize: "0.75rem", color: "#94a3b8" }}>
-                  {companyName} Logo
+              {canBrand && (
+                <div className="rs-logo__actions">
+                  <label className="cc-btn rs-upload">
+                    {branding.logo_uploaded ? "Replace logo" : "Upload logo"}
+                    <input ref={fileRef} type="file" accept=".png,.jpg,.jpeg" className="cc-sr" onChange={(e) => uploadLogo(e.target.files?.[0])} />
+                  </label>
+                  {branding.logo_uploaded && <button type="button" className="cc-btn so-danger" onClick={removeLogo}>Remove</button>}
+                  <span className="cc-muted">PNG or JPG, under 5 MB</span>
                 </div>
               )}
             </div>
+            <label className="so-field">
+              Your organization (report author)
+              <span className="rs-inline">
+                <input className="so-input" value={orgName} onChange={(e) => setOrgName(e.target.value)} disabled={!canBrand} />
+                {canBrand && <button type="button" className="cc-btn" disabled={!orgName.trim() || orgName.trim() === branding.company_name} onClick={saveOrg}>Save</button>}
+              </span>
+            </label>
+          </section>
 
-            {/* SECTION 1: EXECUTIVE SUMMARY */}
-            <div style={{ marginBottom: "32px" }}>
-              <h3 style={{ fontFamily: "'Inter', sans-serif", fontSize: "1.1rem", fontWeight: "700", color: "#0f172a", borderBottom: "1px solid #cbd5e1", paddingBottom: "6px", marginBottom: "16px" }}>
-                1. Executive Summary & Risk Overview
-              </h3>
-
-              {/* 4 Metric Cards */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: "16px", marginBottom: "24px" }}>
-                <div style={{ background: "#f8fafc", padding: "14px", borderRadius: "8px", border: "1px solid #e2e8f0", textAlign: "center" }}>
-                  <span style={{ fontSize: "0.78rem", color: "#64748b", fontFamily: "'Inter', sans-serif" }}>TOTAL ASSETS</span>
-                  <div style={{ fontSize: "1.6rem", fontWeight: "800", color: "#0f172a", marginTop: "4px" }}>{summaryMetrics.totalAssets}</div>
-                </div>
-
-                <div style={{ background: "#f8fafc", padding: "14px", borderRadius: "8px", border: "1px solid #e2e8f0", textAlign: "center" }}>
-                  <span style={{ fontSize: "0.78rem", color: "#64748b", fontFamily: "'Inter', sans-serif" }}>TOTAL FINDINGS</span>
-                  <div style={{ fontSize: "1.6rem", fontWeight: "800", color: "#0f172a", marginTop: "4px" }}>{summaryMetrics.totalFindings}</div>
-                </div>
-
-                <div style={{ background: "#fef2f2", padding: "14px", borderRadius: "8px", border: "1px solid #fecaca", textAlign: "center" }}>
-                  <span style={{ fontSize: "0.78rem", color: "#dc2626", fontFamily: "'Inter', sans-serif" }}>CRITICAL</span>
-                  <div style={{ fontSize: "1.6rem", fontWeight: "800", color: "#991b1b", marginTop: "4px" }}>{summaryMetrics.critical}</div>
-                </div>
-
-                <div style={{ background: "#fffbebe", padding: "14px", borderRadius: "8px", border: "1px solid #fde68a", textAlign: "center" }}>
-                  <span style={{ fontSize: "0.78rem", color: "#d97706", fontFamily: "'Inter', sans-serif" }}>HIGH SEVERITY</span>
-                  <div style={{ fontSize: "1.6rem", fontWeight: "800", color: "#92400e", marginTop: "4px" }}>{summaryMetrics.high}</div>
-                </div>
-              </div>
-
-              {/* Compliance Gauge */}
-              <div style={{ display: "flex", alignItems: "center", gap: "24px", background: "#f8fafc", padding: "20px", borderRadius: "10px", border: "1px solid #e2e8f0" }}>
-                <svg width="80" height="80" viewBox="0 0 36 36">
-                  <path
-                    d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
-                    fill="none"
-                    stroke="#e2e8f0"
-                    strokeWidth="3.8"
-                  />
-                  <path
-                    d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
-                    fill="none"
-                    stroke={summaryMetrics.complianceScore > 75 ? "#16a34a" : summaryMetrics.complianceScore > 50 ? "#d97706" : "#dc2626"}
-                    strokeWidth="3.8"
-                    strokeDasharray={`${summaryMetrics.complianceScore}, 100`}
-                  />
-                  <text x="18" y="20.35" fill="#0f172a" fontSize="9" textAnchor="middle" fontWeight="bold" fontFamily="'Inter', sans-serif">
-                    {summaryMetrics.complianceScore}%
-                  </text>
-                </svg>
-                <div>
-                  <h4 style={{ fontFamily: "'Inter', sans-serif", margin: "0 0 4px 0", color: "#0f172a", fontSize: "1rem" }}>
-                    Security Posture Score
-                  </h4>
-                  <p style={{ margin: 0, fontSize: "0.88rem", color: "#475569", lineHeight: "1.4" }}>
-                    Evaluated across active infrastructure, web applications, and network endpoints.
-                  </p>
-                </div>
-              </div>
+          <section className="cc-panel" aria-label="Report details">
+            <header className="cc-panel__head"><h2>Report details</h2></header>
+            <label className="so-field">Title<input className="so-input" value={settings.reportTitle} placeholder="Vulnerability Assessment — Executive Report" onChange={(e) => set("reportTitle")(e.target.value)} /></label>
+            <label className="so-field">Prepared for (client)<input className="so-input" value={settings.preparedFor} placeholder="e.g. Acme Corporation" onChange={(e) => set("preparedFor")(e.target.value)} /></label>
+            <label className="so-field">Author<input className="so-input" value={settings.authorName} placeholder="Security Assessment Team" onChange={(e) => set("authorName")(e.target.value)} /></label>
+            <div className="rs-two">
+              <label className="so-field">Classification
+                <select className="so-input" value={settings.classification} onChange={(e) => set("classification")(e.target.value)}>
+                  {["Confidential", "Restricted", "Internal", "Public"].map((c) => <option key={c}>{c}</option>)}
+                </select>
+              </label>
+              <label className="so-field">Version<input className="so-input" value={settings.version} onChange={(e) => set("version")(e.target.value)} /></label>
             </div>
+          </section>
 
-            {/* SECTION 2: TECHNICAL FINDINGS (Visible in Technical mode or if enabled) */}
-            {(reportType === "technical" || reportType === "executive") && (
-              <div style={{ marginBottom: "32px" }}>
-                <h3 style={{ fontFamily: "'Inter', sans-serif", fontSize: "1.1rem", fontWeight: "700", color: "#0f172a", borderBottom: "1px solid #cbd5e1", paddingBottom: "6px", marginBottom: "16px" }}>
-                  2. Detailed Technical Findings ({filteredMisconfigs.length})
-                </h3>
-
-                {filteredMisconfigs.length > 0 ? (
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
-                    <thead>
-                      <tr style={{ background: "#f1f5f9", borderBottom: "2px solid #cbd5e1", textAlign: "left", fontFamily: "'Inter', sans-serif" }}>
-                        <th style={{ padding: "8px 10px" }}>Target</th>
-                        <th style={{ padding: "8px 10px" }}>Issue Description</th>
-                        <th style={{ padding: "8px 10px" }}>Type</th>
-                        {includeCves && <th style={{ padding: "8px 10px" }}>CVE</th>}
-                        <th style={{ padding: "8px 10px" }}>Severity</th>
-                        {includeRemediation && <th style={{ padding: "8px 10px" }}>Remediation</th>}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredMisconfigs.map((m, idx) => (
-                        <tr key={m.id || idx} style={{ borderBottom: "1px solid #e2e8f0" }}>
-                          <td style={{ padding: "10px", fontWeight: "bold" }}>{m.hostname || m.ip}</td>
-                          <td style={{ padding: "10px" }}>{m.issue}</td>
-                          <td style={{ padding: "10px" }}>{m.asset_type}</td>
-                          {includeCves && <td style={{ padding: "10px", color: "#dc2626" }}>{m.cve || "n/a"}</td>}
-                          <td style={{ padding: "10px" }}>
-                            <span
-                              style={{
-                                padding: "2px 8px",
-                                borderRadius: "4px",
-                                fontSize: "0.75rem",
-                                fontWeight: "bold",
-                                fontFamily: "'Inter', sans-serif",
-                                background: m.severity?.toUpperCase() === "CRITICAL" ? "#fee2e2" : m.severity?.toUpperCase() === "HIGH" ? "#fef3c7" : "#e0f2fe",
-                                color: m.severity?.toUpperCase() === "CRITICAL" ? "#991b1b" : m.severity?.toUpperCase() === "HIGH" ? "#92400e" : "#0369a1",
-                              }}
-                            >
-                              {m.severity}
-                            </span>
-                          </td>
-                          {includeRemediation && (
-                            <td style={{ padding: "10px", fontSize: "0.8rem", color: "#334155" }}>
-                              {m.remediation}
-                            </td>
-                          )}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ) : (
-                  <p style={{ textAlign: "center", color: "#94a3b8", padding: "30px 0", fontStyle: "italic" }}>
-                    No findings discovered for this report.
-                  </p>
-                )}
-              </div>
-            )}
-
-            {/* SECTION 3: COMPLIANCE MATRIX (Compliance mode or if enabled) */}
-            {(reportType === "compliance" || includeComplianceMap) && (
-              <div>
-                <h3 style={{ fontFamily: "'Inter', sans-serif", fontSize: "1.1rem", fontWeight: "700", color: "#0f172a", borderBottom: "1px solid #cbd5e1", paddingBottom: "6px", marginBottom: "16px" }}>
-                  3. Regulatory Compliance Control Matrix
-                </h3>
-
-                {filteredMisconfigs.length > 0 ? (
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem", textAlign: "center" }}>
-                    <thead>
-                      <tr style={{ background: "#f1f5f9", borderBottom: "2px solid #cbd5e1", fontFamily: "'Inter', sans-serif" }}>
-                        <th style={{ padding: "8px", textAlign: "left" }}>Finding Issue</th>
-                        <th style={{ padding: "8px" }}>CIS</th>
-                        <th style={{ padding: "8px" }}>NIST</th>
-                        <th style={{ padding: "8px" }}>GDPR</th>
-                        <th style={{ padding: "8px" }}>HIPAA</th>
-                        <th style={{ padding: "8px" }}>SOC 2</th>
-                        <th style={{ padding: "8px" }}>ISO 27001</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredMisconfigs.map((m, idx) => (
-                        <tr key={m.id || idx} style={{ borderBottom: "1px solid #e2e8f0" }}>
-                          <td style={{ padding: "8px", textAlign: "left", fontWeight: "600" }}>{m.issue}</td>
-                          <td style={{ padding: "8px", color: "#dc2626", fontWeight: "bold" }}>X</td>
-                          <td style={{ padding: "8px", color: m.severity === "CRITICAL" ? "#dc2626" : "#cbd5e1" }}>{m.severity === "CRITICAL" ? "X" : "-"}</td>
-                          <td style={{ padding: "8px", color: m.issue?.includes("Password") || m.issue?.includes("Exposed") ? "#dc2626" : "#cbd5e1" }}>{m.issue?.includes("Password") || m.issue?.includes("Exposed") ? "X" : "-"}</td>
-                          <td style={{ padding: "8px", color: m.severity === "CRITICAL" ? "#dc2626" : "#cbd5e1" }}>{m.severity === "CRITICAL" ? "X" : "-"}</td>
-                          <td style={{ padding: "8px", color: m.issue?.includes("CORS") ? "#dc2626" : "#cbd5e1" }}>{m.issue?.includes("CORS") ? "X" : "-"}</td>
-                          <td style={{ padding: "8px", color: "#dc2626", fontWeight: "bold" }}>X</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ) : (
-                  <p style={{ textAlign: "center", color: "#94a3b8", padding: "30px 0", fontStyle: "italic" }}>
-                    No compliance violations identified in the current scope.
-                  </p>
-                )}
-              </div>
-            )}
-          </div>
+          <section className="cc-panel" aria-label="Sections">
+            <header className="cc-panel__head"><h2>Sections</h2></header>
+            <label className="cc-check"><input type="checkbox" checked={settings.mode === "technical" || settings.includeDetails} disabled={settings.mode === "technical"} onChange={(e) => set("includeDetails")(e.target.checked)} />Detailed findings{settings.mode === "technical" && " (always in Technical)"}</label>
+            <label className="cc-check"><input type="checkbox" checked={settings.includeEvidence} onChange={(e) => set("includeEvidence")(e.target.checked)} />Evidence and proof</label>
+            <label className="cc-check"><input type="checkbox" checked={settings.includeRemediation} onChange={(e) => set("includeRemediation")(e.target.checked)} />Remediation guidance</label>
+            <label className="cc-check"><input type="checkbox" checked={settings.includeCves} onChange={(e) => set("includeCves")(e.target.checked)} />CVE references</label>
+            <label className="cc-check"><input type="checkbox" checked={settings.mode === "compliance" || settings.includeCompliance} disabled={settings.mode === "compliance"} onChange={(e) => set("includeCompliance")(e.target.checked)} />Control mapping (NIST / ISO 27001){settings.mode === "compliance" && " (always in Compliance)"}</label>
+            <button type="button" className="cc-btn rs-reset" onClick={() => setSettings(DEFAULTS)}>Reset all settings</button>
+          </section>
         </div>
+
+        {/* ---------- Preview ---------- */}
+        <section className="cc-panel rs-preview" aria-label="Live document preview">
+          <header className="cc-panel__head">
+            <h2>Live preview</h2>
+            <div className="rs-preview__tools">
+              <span className={`rs-status${updating ? " is-busy" : ""}`} role="status">
+                {updating ? "Updating…" : model ? `${model.summary.issues} issues · ${model.summary.targets} targets · ${model.summary.rating}` : ""}
+              </span>
+              <div className="cc-range" role="group" aria-label="Zoom">
+                {[[0.6, "60%"], [0.8, "80%"], [1, "100%"]].map(([z, l]) => (
+                  <button key={l} type="button" aria-pressed={zoom === z} onClick={() => setZoom(z)}>{l}</button>
+                ))}
+              </div>
+              <button type="button" className="cc-btn" onClick={() => setFullscreen(true)} disabled={!model}>Full screen</button>
+            </div>
+          </header>
+          {previewError && <p className="so-error">{previewError}</p>}
+          <div className="rs-stage">
+            <div className="rs-zoom" style={{ zoom }}>
+              {preview || <p className="cc-empty">Building preview…</p>}
+            </div>
+          </div>
+        </section>
       </div>
 
-      {/* Full Screen Preview Modal */}
-      <AnimatePresence>
-        {isPreviewModalOpen && (
-          <div
-            style={{
-              position: "fixed",
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              background: "rgba(0, 0, 0, 0.85)",
-              backdropFilter: "blur(6px)",
-              zIndex: 99999,
-              display: "flex",
-              flexDirection: "column",
-              padding: "24px",
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-              <h2 style={{ color: "#fff", fontSize: "1.3rem", margin: 0, display: "flex", alignItems: "center", gap: "10px" }}>
-                <FiEye style={{ color: "#38bdf8" }} /> Full Screen Report Preview ({reportType.toUpperCase()})
-              </h2>
-              <button
-                onClick={() => setIsPreviewModalOpen(false)}
-                style={{ background: "none", border: "none", color: "#cbd5e1", fontSize: "24px", cursor: "pointer" }}
-              >
-                <FiX />
-              </button>
-            </div>
-
-            <div style={{ flex: 1, overflowY: "auto", display: "flex", justifyContent: "center" }}>
-              <div
-                style={{
-                  width: "900px",
-                  background: "#fff",
-                  color: "#1e293b",
-                  padding: "48px",
-                  borderRadius: "12px",
-                  fontFamily: "'Times New Roman', serif",
-                }}
-              >
-                <h1 style={{ fontFamily: "'Inter', sans-serif", color: "#0f172a", fontSize: "2rem" }}>{companyName}</h1>
-                <h2 style={{ fontFamily: "'Inter', sans-serif", color: "#2563eb", fontSize: "1.3rem" }}>{reportTitle}</h2>
-                <hr style={{ margin: "20px 0" }} />
-                <p><strong>Generated for:</strong> {companyName}</p>
-                <p><strong>Date:</strong> {new Date().toLocaleDateString()}</p>
-                <p><strong>Total Audited Assets:</strong> {summaryMetrics.totalAssets}</p>
-                <p><strong>Discovered Misconfigurations:</strong> {summaryMetrics.totalFindings}</p>
-              </div>
-            </div>
+      {fullscreen && model && (
+        <div className="rs-full" role="dialog" aria-modal="true" aria-label="Full screen report preview">
+          <div className="rs-full__bar">
+            <strong>{model.meta.title}</strong>
+            <span className="rs-full__actions">
+              <button type="button" className="so-launch-btn rs-export" disabled={!!exporting} onClick={() => exportReport("pdf")}>{exporting === "pdf" ? "Generating…" : "Export PDF"}</button>
+              <button type="button" className="cc-btn" autoFocus onClick={() => setFullscreen(false)}>Close</button>
+            </span>
           </div>
-        )}
-      </AnimatePresence>
+          <div className="rs-full__stage">{preview}</div>
+        </div>
+      )}
     </div>
   );
 }

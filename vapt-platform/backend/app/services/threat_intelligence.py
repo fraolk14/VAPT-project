@@ -55,7 +55,7 @@ def fetch_cisa_kev_cves() -> set[str]:
             return cve_set
     except Exception:
         pass
-    return KEV_SAMPLE
+    return cached_cves if isinstance(cached_cves, set) else set()
 
 
 ALL_COUNTRY_NAMES = [
@@ -233,19 +233,19 @@ def _mitre_tags(finding: Finding) -> list[str]:
 
 
 def _exploit_flags(finding: Finding) -> tuple[bool, bool, str]:
-    severity = (finding.severity or "info").lower()
-    title = (finding.title or "").lower()
+    """Actively exploited only when a finding's CVE is in the CISA KEV catalog.
+
+    Earlier versions also called every critical finding "actively exploited" and every
+    high/critical one "exploit available", which overstated risk without evidence.
+    """
     kev_set = fetch_cisa_kev_cves()
-    exploit_available = bool(
-        finding.cve_id
-        or severity in {"critical", "high"}
-        or any(keyword in title for keyword in ("xss", "sql", "injection", "secret"))
-    )
-    actively_exploited = bool((finding.cve_id and finding.cve_id in kev_set) or severity == "critical")
+    cves = set(re.findall(r"CVE-\d{4}-\d{4,}", str(finding.cve_id or ""), flags=re.I))
+    actively_exploited = any(c.upper() in kev_set for c in cves)
+    exploit_available = actively_exploited
     if actively_exploited:
-        indicator = "Actively exploited"
-    elif exploit_available:
-        indicator = "Exploit path likely"
+        indicator = "Actively exploited (CISA KEV)"
+    elif cves:
+        indicator = "Known CVE — no confirmed exploitation"
     else:
         indicator = "Monitoring"
     return exploit_available, actively_exploited, indicator
@@ -267,7 +267,7 @@ def build_threat_feed(findings: Iterable[Finding], scan_map: dict[str, Scan]) ->
         if _mitre_tags(finding):
             references.append("https://attack.mitre.org/")
             feed_sources.append("MITRE ATT&CK")
-        if finding.source == "zap":
+        if finding.source in {"zap", "web", "nuclei", "testssl"}:
             feed_sources.append("OWASP Top 10")
             references.append("https://owasp.org/www-project-top-ten/")
         if exploit_available:
@@ -1204,17 +1204,17 @@ def get_target_threat_intel(db: Session, target: str) -> dict:
     from app.models.asset import Asset
 
     # 1. User provided API credentials
-    VT_API_KEY = os.environ.get("VIRUSTOTAL_API_KEY", "ab219cf8941902fcd7295ea5f4a20f3e45956b092a174dc0b5b402f00baba4c6")
-    SHODAN_API_KEY = os.environ.get("SHODAN_API_KEY", "tODVigEtRqIVCi6m6CieeYm58TkiPAm2")
-    ABUSEIPDB_API_KEY = os.environ.get("ABUSEIPDB_API_KEY", "9f011a967dcdcaa38dd4b0a510a9d53f77485ae47ea06477602278d3f9ae702ba4ecf519b30d7aec")
-    OTX_API_KEY = os.environ.get("OTX_API_KEY", "8b50e75dadf1759c4fb00e90dce1d2382d884a0e16d438424aa506c26216e79c")
+    VT_API_KEY = os.environ.get("VIRUSTOTAL_API_KEY", "")
+    SHODAN_API_KEY = os.environ.get("SHODAN_API_KEY", "")
+    ABUSEIPDB_API_KEY = os.environ.get("ABUSEIPDB_API_KEY", "")
+    OTX_API_KEY = os.environ.get("OTX_API_KEY", "")
 
     clean_target = target.strip().replace("https://", "").replace("http://", "").split("/")[0].split(":")[0]
     
-    country = "United States"
-    country_code = "US"
-    city = "San Francisco"
-    asn = "AS15169"
+    country = "Unknown"
+    country_code = ""
+    city = ""
+    asn = ""
 
     import concurrent.futures
     
@@ -1434,7 +1434,7 @@ def get_target_threat_intel(db: Session, target: str) -> dict:
                 "severity": f.severity.upper() if f.severity else "HIGH",
                 "score": f.cvss_score or 7.5,
                 "description": f.evidence or f.title,
-                "publishedDate": "2024-01-10"
+                "publishedDate": None
             })
     for v in vulnerabilities:
         if v not in [c["id"] for c in nvd_cves]:
@@ -1443,7 +1443,7 @@ def get_target_threat_intel(db: Session, target: str) -> dict:
                 "severity": "HIGH",
                 "score": 8.0,
                 "description": f"Vulnerability {v} reported by Shodan external scanner.",
-                "publishedDate": "2024-01-10"
+                "publishedDate": None
             })
 
     # 9. Compute Dynamic Overall Risk Score
@@ -1457,8 +1457,6 @@ def get_target_threat_intel(db: Session, target: str) -> dict:
             risk_scores.append(min(100.0, mal_v * 10.0))
     if abuseipdb:
         risk_scores.append(float(abuseipdb.get("abuseConfidenceScore", 0)))
-    if nvd_cves:
-        risk_scores.append(90.0)
     
     overall_risk_score = 0.0
     if risk_scores:
@@ -1500,11 +1498,7 @@ def get_target_threat_intel(db: Session, target: str) -> dict:
             "shodan": shodan,
             "alienvault": alienvault,
             "abuseipdb": abuseipdb,
-            "greynoise": {
-                "classification": "malicious" if overall_risk_score > 60 else "benign",
-                "tags": ["scanner"] + services,
-                "lastSeen": datetime.now(timezone.utc).isoformat()
-            } if overall_risk_score > 30 else None,
+            "greynoise": None,  # not queried here; see /threat-intelligence/lookup
             "nvd": {
                 "cves": nvd_cves
             } if nvd_cves else None

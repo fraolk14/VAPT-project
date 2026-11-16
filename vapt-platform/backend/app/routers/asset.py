@@ -10,29 +10,9 @@ from app.models.misconfiguration import Misconfiguration, MisconfigAsset, ScanJo
 from app.models.user import User
 from app.schemas.asset import AssetCreate, AssetUpdate, AssetResponse, MisconfigurationBrief
 from app.services.security import enforce_roles, get_current_user
-from app.services.misconfig_scanner import parse_scope_type, run_misconfiguration_scan_job
+from app.services.misconfig_scanner import fabricated_filter
 
 router = APIRouter(prefix="/assets", tags=["Assets"])
-
-
-def trigger_auto_scan(target_scope: str, db_session_factory):
-    """Triggers an automatic background scan for newly registered assets."""
-    db = db_session_factory()
-    try:
-        scope_type = parse_scope_type(target_scope)
-        scan_job = ScanJob(
-            scope=target_scope,
-            scope_type=scope_type,
-            status="PENDING",
-        )
-        db.add(scan_job)
-        db.commit()
-        db.refresh(scan_job)
-        run_misconfiguration_scan_job(scan_job.id)
-    except Exception as e:
-        print(f"[AutoScan] Error running background scan for asset target '{target_scope}': {e}")
-    finally:
-        db.close()
 
 
 def _format_asset_response(a: Asset, db: Session) -> dict[str, Any]:
@@ -50,7 +30,7 @@ def _format_asset_response(a: Asset, db: Session) -> dict[str, Any]:
         m_list = (
             db.query(Misconfiguration)
             .join(MisconfigAsset, Misconfiguration.asset_id == MisconfigAsset.id)
-            .filter(or_(*conds))
+            .filter(or_(*conds), fabricated_filter(Misconfiguration))
             .order_by(Misconfiguration.discovered_at.desc())
             .all()
         )
@@ -196,12 +176,6 @@ def create_asset(
         db.refresh(db_asset)
         asset_obj = db_asset
 
-    # INTEGRATION REQUIREMENT 4: Trigger background scan for newly registered asset
-    scan_target = asset_obj.url or asset_obj.ip_address or asset_obj.hostname
-    if scan_target:
-        from app.database import SessionLocal
-        background_tasks.add_task(trigger_auto_scan, scan_target, SessionLocal)
-
     return _format_asset_response(asset_obj, db)
 
 
@@ -281,6 +255,7 @@ def get_asset_misconfigurations(asset_id: str, db: Session = Depends(get_db)):
             (MisconfigAsset.hostname == asset.hostname) |
             (MisconfigAsset.hostname == asset.asset_name)
         )
+        .filter(fabricated_filter(Misconfiguration))
         .order_by(Misconfiguration.discovered_at.desc())
         .all()
     )
@@ -375,6 +350,10 @@ def get_asset_full_details(asset_id: str, db: Session = Depends(get_db)):
             shadow_it.append(item)
         elif "software" in cat_lower or "drift" in title_lower or "unauthorized" in title_lower:
             unauthorized_software.append(item)
+        else:
+            # Ordinary scanner findings (network, web, mobile) — previously dropped, so every
+            # scanned target showed zero findings in its detail view.
+            other_findings.append(item)
     from app.models.software import Software, SoftwareAsset
     installed_software_records = (
         db.query(Software, SoftwareAsset)

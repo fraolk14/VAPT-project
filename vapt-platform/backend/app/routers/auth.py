@@ -48,6 +48,8 @@ from app.services.security import (
     record_login_failure,
     reset_login_failures,
     verify_captcha_token,
+    access_code_required,
+    verify_access_code,
     verify_totp_code,
     decode_token,
 )
@@ -159,10 +161,7 @@ def login(
     policy = get_auth_policy(db)
     if policy and not policy.allow_local_login:
         raise HTTPException(status_code=403, detail="Local login is disabled. Use configured SSO.")
-    if (policy.captcha_enabled if policy else False):
-        verify_captcha_token(captcha_token)
-    else:
-        verify_captcha_token(None)
+    verify_access_code(policy, captcha_token)
     user = db.query(User).filter((User.username == username) | (User.email == username)).first()
     if user:
         ensure_account_not_locked(user)
@@ -258,7 +257,7 @@ def read_auth_status(current_user: User = Depends(get_current_user), db: Session
     policy = get_auth_policy(db)
     return AuthStatusResponse(
         brute_force_protection=True,
-        captcha_enabled=policy.captcha_enabled if policy else False,
+        captcha_enabled=access_code_required(policy),
         mfa_required=(policy.mfa_required if policy else False) or current_user.mfa_enabled,
         active_sessions=active_sessions,
         locked_until=current_user.locked_until,
@@ -290,6 +289,18 @@ def list_sessions(current_user: User = Depends(get_current_user), db: Session = 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 def revoke_session(session_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     deactivate_session(db, current_user, session_id)
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """End the session behind the presented token, so the token stops working immediately."""
+    token = request.headers.get("authorization", "").partition(" ")[2]
+    sid = decode_token(token).get("sid") if token else None
+    if sid:
+        session = db.query(AuthSession).filter(AuthSession.session_token == sid, AuthSession.user_id == current_user.id).first()
+        if session:
+            session.is_active = False
+            db.commit()
 
 
 @router.post("/mfa/setup", response_model=MFATotpSetupResponse)
@@ -550,13 +561,21 @@ def list_sso_providers(db: Session = Depends(get_db)):
 
 @router.get("/policy", response_model=AuthPolicyResponse)
 def read_auth_policy(db: Session = Depends(get_db)):
+    """Public sign-in policy. captcha_enabled is the effective value: whether sign-in asks for the access code."""
     policy = get_auth_policy(db)
     if not policy:
         policy = AuthPolicy(policy_name="default", captcha_enabled=False, mfa_required=False, sso_required=False, allow_local_login=True)
         db.add(policy)
         db.commit()
         db.refresh(policy)
-    return policy
+    return AuthPolicyResponse(
+        policy_name=policy.policy_name,
+        captcha_enabled=access_code_required(policy),
+        mfa_required=policy.mfa_required,
+        sso_required=policy.sso_required,
+        allow_local_login=policy.allow_local_login,
+        updated_at=policy.updated_at,
+    )
 
 
 @router.post("/admin/sso/providers", response_model=SSOProviderResponse)

@@ -234,6 +234,19 @@ def list_findings(db: Session = Depends(get_db)):
 
 
 # Must be declared before /{finding_id}, otherwise FastAPI treats the path as a finding id.
+@router.get("/assignees")
+def list_assignees(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """People and teams a finding can be assigned to. Analysts need this; /iam/users is admin-only."""
+    from app.models.iam import Group
+
+    enforce_roles(current_user, "admin", "analyst")
+    users = db.query(User).filter(User.is_active.is_(True)).order_by(User.username).all()
+    return {
+        "users": [{"username": u.username, "full_name": u.full_name or u.username} for u in users],
+        "groups": [g.name for g in db.query(Group).order_by(Group.name).all()],
+    }
+
+
 @router.get("/false-positive-rules", response_model=list[FalsePositiveRuleOut])
 def list_false_positive_rules(
     db: Session = Depends(get_db),
@@ -277,6 +290,15 @@ def update_finding(
         finding.finding_metadata = {**(finding.finding_metadata or {}), "triage": {"mark_false_positive": True}}
     elif payload.status:
         finding.status = payload.status
+        if payload.status in {"open", "in_progress"}:
+            # Reopened: it is no longer fixed, and no longer a false positive.
+            finding.resolved_at = None
+            triage = {**((finding.finding_metadata or {}).get("triage", {}))}
+            had_flags = "mark_false_positive" in triage or "resolved_by" in triage
+            triage.pop("mark_false_positive", None)
+            triage.pop("resolved_by", None)
+            if had_flags:
+                finding.finding_metadata = {**(finding.finding_metadata or {}), "triage": triage}
         if payload.status == "resolved":
             finding.resolved_at = datetime.now(timezone.utc)
             finding.finding_metadata = {

@@ -4,11 +4,13 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-
 import api from "./api/client";
 import Navbar from "./components/Navbar";
 import "./App.css";
+import "./theme.css";
 import Assets from "./pages/Assets";
 import AIRemediation from "./pages/AIRemediation";
 import AccessDenied from "./pages/AccessDenied";
 import Admin from "./pages/Admin";
-import Dashboard from "./pages/Dashboard";
+import Analytics from "./pages/Analytics";
+import CommandCenter from "./pages/CommandCenter";
 import Developer from "./pages/Developer";
 import Findings from "./pages/Findings";
 import FindingDetail from "./pages/FindingDetail";
@@ -55,20 +57,6 @@ class SafeErrorBoundary extends React.Component {
   }
 }
 
-const emptySummary = {
-  metrics: [],
-  scanned_targets: [],
-  tool_coverage: {},
-  severity_breakdown: {},
-  target_severity_breakdown: {},
-  target_severity_by_tool: {},
-  owasp_top10: [],
-  attack_activity: [],
-  open_findings: 0,
-  active_scans: 0,
-  risk_score: 0,
-};
-
 function App() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -89,33 +77,12 @@ function App() {
     providers: [],
   });
 
-  const [navCollapsed, setNavCollapsed] = useState(false);
-  const [summary, setSummary] = useState(emptySummary);
   const [scans, setScans] = useState([]);
   const [assets, setAssets] = useState([]);
   const [findings, setFindings] = useState([]);
   const [users, setUsers] = useState([]);
   const [groups, setGroups] = useState([]);
   const [integrations, setIntegrations] = useState({});
-  const [threatIntel, setThreatIntel] = useState({});
-  const [authStatus, setAuthStatus] = useState({});
-  const [authSessions, setAuthSessions] = useState([]);
-  const [posture, setPosture] = useState({ shadowIt: {}, unauthorizedSoftware: {}, misconfigurations: {} });
-  const [platformData, setPlatformData] = useState({
-    attackSurface: {},
-    attackPaths: {},
-    plugins: [],
-    apiKeys: [],
-    hooks: [],
-    events: [],
-    tenants: [],
-    monitoringRules: [],
-    monitoringEvents: [],
-    incidents: [],
-    compliance: {},
-    auditLogs: [],
-  });
-  const [alerts, setAlerts] = useState({ rules: [], events: [] });
 
   useEffect(() => {
     Promise.allSettled([api.get("/auth/policy"), api.get("/auth/sso/providers")]).then(([policyRes, providersRes]) => {
@@ -152,71 +119,29 @@ function App() {
     if (authState.status !== "authenticated") return;
     let ignore = false;
     let inFlight = false;
+    let hasLoaded = false;
 
     // Shared data refresh for all pages. Kept deliberately light: it used to fire 24 requests
     // (about 1 MB) every 4 seconds per open tab, which starved the API while scans ran.
     const loadData = () => {
-      if (inFlight || document.hidden) return;
+      // Skip background refreshes in hidden tabs, but always do the first load.
+      if (inFlight || (hasLoaded && document.hidden)) return;
       inFlight = true;
+
+      // Each piece of state is applied as soon as its own request returns, so one slow
+      // endpoint (e.g. threat-intel enrichment) never holds back findings or scans.
+      const take = (path, apply) =>
+        api.get(path).then((res) => { if (!ignore) apply(res.data); }).catch(() => {});
+
       Promise.allSettled([
-        api.get("/dashboard/summary"),
-        api.get("/scans/"),
-        api.get("/assets/"),
-        api.get("/findings/"),
-        api.get("/iam/users"),
-        api.get("/iam/groups"),
-        api.get("/threat-intelligence/summary"),
-        api.get("/auth/status"),
-        api.get("/auth/sessions"),
-        api.get("/platform/plugins"),
-        api.get("/platform/api-keys"),
-        api.get("/platform/devsecops/hooks"),
-        api.get("/platform/devsecops/events"),
-        api.get("/operations/monitoring/rules"),
-        api.get("/operations/monitoring/events"),
-        api.get("/operations/incidents"),
-        api.get("/alerts/rules"),
-        api.get("/alerts/events"),
-      ]).then((results) => {
+        take("/findings/", setFindings),
+        take("/scans/", setScans),
+        take("/assets/", setAssets),
+        take("/iam/users", setUsers),
+        take("/iam/groups", setGroups),
+      ]).then(() => {
         inFlight = false;
-        if (ignore) return;
-        const [
-          summaryRes, scansRes, assetsRes, findingsRes, usersRes, groupsRes,
-          threatIntelRes, authStatusRes, authSessionsRes,
-          pluginsRes, apiKeysRes, hooksRes, eventsRes,
-          monitoringRulesRes, monitoringEventsRes, incidentsRes,
-          alertRulesRes, alertEventsRes
-        ] = results;
-
-        if (summaryRes.status === "fulfilled") setSummary(summaryRes.value.data);
-        if (scansRes.status === "fulfilled") setScans(scansRes.value.data);
-        if (assetsRes.status === "fulfilled") setAssets(assetsRes.value.data);
-        if (findingsRes.status === "fulfilled") setFindings(findingsRes.value.data);
-        if (usersRes.status === "fulfilled") setUsers(usersRes.value.data);
-        if (groupsRes.status === "fulfilled") setGroups(groupsRes.value.data);
-        if (threatIntelRes.status === "fulfilled") setThreatIntel(threatIntelRes.value.data);
-        if (authStatusRes.status === "fulfilled") setAuthStatus(authStatusRes.value.data);
-        if (authSessionsRes.status === "fulfilled") setAuthSessions(authSessionsRes.value.data);
-
-        setPlatformData((previous) => ({
-          ...previous,
-          attackSurface: previous?.attackSurface || {},
-          attackPaths: previous?.attackPaths || {},
-          plugins: pluginsRes.status === "fulfilled" ? pluginsRes.value.data : [],
-          apiKeys: apiKeysRes.status === "fulfilled" ? apiKeysRes.value.data : [],
-          hooks: hooksRes.status === "fulfilled" ? hooksRes.value.data : [],
-          events: eventsRes.status === "fulfilled" ? eventsRes.value.data : [],
-          tenants: previous?.tenants || [],
-          monitoringRules: monitoringRulesRes.status === "fulfilled" ? monitoringRulesRes.value.data : [],
-          monitoringEvents: monitoringEventsRes.status === "fulfilled" ? monitoringEventsRes.value.data : [],
-          incidents: incidentsRes.status === "fulfilled" ? incidentsRes.value.data : [],
-          compliance: previous?.compliance || {},
-        }));
-
-        setAlerts({
-          rules: alertRulesRes.status === "fulfilled" ? alertRulesRes.value.data : [],
-          events: alertEventsRes.status === "fulfilled" ? alertEventsRes.value.data : [],
-        });
+        hasLoaded = true;
       });
     };
 
@@ -322,36 +247,38 @@ function App() {
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    // End the session on the server too, so the token can't be reused.
+    try {
+      await api.post("/auth/logout");
+    } catch {
+      // Already expired or offline: clearing the token locally is all that's left to do.
+    }
     window.localStorage.removeItem("vapt_token");
     setAuthState({ status: "anonymous", user: null, error: "", awaitingMfa: false });
-    navigate("/login", { replace: true });
+    navigate("/", { replace: true });
   };
 
-  const handleAssetCreated = (newAsset) => {
-    setAssets((current) => [newAsset, ...current]);
-  };
+  useEffect(() => {
+    const onSessionEnded = () => {
+      setAuthState((current) => (current.status === "authenticated"
+        ? { status: "anonymous", user: null, error: "Your session ended. Sign in again.", awaitingMfa: false }
+        : current));
+    };
+    window.addEventListener("vapt:session-ended", onSessionEnded);
+    return () => window.removeEventListener("vapt:session-ended", onSessionEnded);
+  }, []);
 
-  const handleScanQueued = (newScan) => {
-    setScans((current) => [newScan, ...current]);
-  };
 
-  const handleScanUpdated = (updatedScan) => {
-    setScans((current) => current.map((item) => (item.id === updatedScan.id ? updatedScan : item)));
-  };
+
 
   if (authState.status === "loading") {
     return (
-      <div className="auth-loading">
-        <div className="auth-loading__panel">
-          <p className="eyebrow">Initializing secure session</p>
-          <h1>Preparing VAP</h1>
-        </div>
-      </div>
+      <div className="lg-loading" role="status"><span>Restoring your session…</span></div>
     );
   }
 
-  if (authState.status !== "authenticated" && location.pathname !== "/login") {
+  if (authState.status !== "authenticated") {
     return (
       <Login
         onLogin={handleLogin}
@@ -360,82 +287,49 @@ function App() {
         isSubmitting={authState.status === "submitting"}
         errorMessage={authState.error}
         awaitingMfa={authState.awaitingMfa}
+        onCancelMfa={() => setAuthState((current) => ({ ...current, awaitingMfa: false, error: "" }))}
       />
     );
   }
 
   return (
     <SafeErrorBoundary>
-      <div className={navCollapsed ? "shell shell--nav-collapsed" : "shell"}>
-        <div className="shell__background" />
-        <Navbar
-          user={authState.user}
-          onLogout={handleLogout}
-          collapsed={navCollapsed}
-          onToggleCollapse={() => setNavCollapsed((current) => !current)}
-        />
-        <main className="shell__main">
+      <div className="shell">
+        <Navbar user={authState.user} onLogout={handleLogout} integrations={integrations} />
+        <main className="shell__main" id="main-content">
           <div className="shell__content">
-            <section className="hero">
-              <div>
-                <p className="eyebrow">Unified Offensive Security Operations</p>
-                <h1>VAP</h1>
-                <p className="hero__lede">
-                  Correlate network, web, mobile, and shadow IT telemetry into one risk-driven
-                  workflow across web, desktop, and mobile surfaces.
-                </p>
+            {!FULL_BLEED_ROUTES.has(location.pathname) && !location.pathname.startsWith("/findings/") && (
+              <div className="nw-page-head">
+                <h1>{pageTitle(location.pathname)}</h1>
               </div>
-              <div className="hero__panel">
-                <div>
-                  <span>Platform Risk</span>
-                  <strong>{summary.risk_score || "0.0"}</strong>
-                </div>
-                <div>
-                  <span>Open Findings</span>
-                  <strong>{summary.open_findings || 0}</strong>
-                </div>
-                <div>
-                  <span>Active Scans</span>
-                  <strong>{summary.active_scans || 0}</strong>
-                </div>
-              </div>
-            </section>
-
-            <div className="page-intro">
-              <p className="eyebrow">Workspace</p>
-              <h2>{pageTitle(location.pathname)}</h2>
-            </div>
+            )}
 
             <Routes>
+              <Route path="/" element={<CommandCenter findings={findings} scans={scans} integrations={integrations} loading={!findings.length && !scans.length} />} />
               <Route
-                path="/"
-                element={<Dashboard summary={summary} assets={assets} findings={findings} threatIntel={threatIntel} posture={posture} attackSurface={platformData.attackSurface} attackPaths={platformData.attackPaths} incidents={platformData.incidents} monitoringEvents={platformData.monitoringEvents} />}
+                path="/insights"
+                element={<Analytics />}
               />
-              <Route path="/assets" element={<Assets assets={assets} findings={findings} attackSurface={platformData.attackSurface} attackPaths={platformData.attackPaths} onAssetCreated={handleAssetCreated} />} />
-              <Route path="/ai-remediation" element={<AIRemediation findings={findings} scans={scans} compliance={platformData.compliance} />} />
+              <Route path="/assets" element={<Assets assets={assets} canOperate={canEditFindings(authState.user)} />} />
+              <Route path="/ai-remediation" element={<AIRemediation findings={findings} />} />
               <Route
                 path="/scans"
                 element={
-                  <Scans
-                    scans={scans}
-                    assets={assets}
-                    onScanQueued={handleScanQueued}
-                    onScanUpdated={handleScanUpdated}
-                  />
+                  <Scans integrations={integrations} canOperate={canEditFindings(authState.user)} />
                 }
               />
-              <Route path="/hosts" element={<Hosts scans={scans} assets={assets} findings={findings} />} />
-              <Route path="/findings" element={<Findings findings={findings} users={users} groups={groups} />} />
-              <Route path="/findings/:findingId" element={<FindingDetail findings={findings} assets={assets} />} />
+              <Route path="/hosts" element={<Hosts canOperate={canEditFindings(authState.user)} />} />
+              <Route path="/findings" element={<Findings findings={findings} users={users} groups={groups} canEdit={canEditFindings(authState.user)} />} />
+              <Route path="/findings/:findingId" element={<FindingDetail />} />
               <Route path="/attack-map" element={<GlobalAttackMap />} />
-              <Route path="/threat-intelligence" element={<ThreatIntelligence threatIntel={threatIntel} />} />
-              <Route path="/shadow-it" element={<ShadowIT summary={posture.shadowIt} assets={assets} incidents={platformData.incidents} monitoringEvents={platformData.monitoringEvents} />} />
-              <Route path="/misconfigurations" element={<Misconfigurations findings={findings} assets={assets} />} />
-              <Route path="/unauthorized-software" element={<UnauthorizedSoftware summary={posture.unauthorizedSoftware} assets={assets} groups={groups} users={users} />} />
-              <Route path="/agent-management" element={<AgentManagement />} />
-              <Route path="/reports" element={<Reports findings={findings} scans={scans} compliance={platformData.compliance} incidents={platformData.incidents} alertRules={alerts.rules} alertEvents={alerts.events} />} />
-              <Route path="/admin" element={<Users />} />
-              <Route path="/users" element={<Users />} />
+              <Route path="/threat-intelligence" element={<ThreatIntelligence />} />
+              <Route path="/shadow-it" element={<ShadowIT canOperate={canEditFindings(authState.user)} />} />
+              <Route path="/misconfigurations" element={<Misconfigurations canOperate={canEditFindings(authState.user)} />} />
+              <Route path="/unauthorized-software" element={<UnauthorizedSoftware canOperate={canEditFindings(authState.user)} />} />
+              <Route path="/agent-management" element={<AgentManagement canAdmin={String(authState.user?.role || "").toLowerCase() === "admin"} />} />
+              <Route path="/reports" element={<Reports canBrand={canEditFindings(authState.user)} />} />
+              <Route path="/admin" element={<Users currentUser={authState.user} />} />
+              <Route path="/users" element={<Users currentUser={authState.user} />} />
               <Route
                 path="/developer"
                 element={
@@ -445,11 +339,11 @@ function App() {
                     fallbackTitle="Hidden developer area"
                     fallbackMessage="The developer console is only exposed to privileged internal operators."
                   >
-                    <Developer scans={scans} findings={findings} users={users} groups={groups} auditLogs={platformData.auditLogs} />
+                    <Developer scans={scans} findings={findings} users={users} groups={groups} auditLogs={[]} />
                   </RoleGuard>
                 }
               />
-              <Route path="/integrations" element={<Integrations integrations={integrations} platformData={platformData} alertRules={alerts.rules} alertEvents={alerts.events} setAlerts={setAlerts} />} />
+              <Route path="/integrations" element={<Integrations canOperate={canEditFindings(authState.user)} canAdmin={String(authState.user?.role || "").toLowerCase() === "admin"} />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </div>
@@ -466,8 +360,19 @@ function RoleGuard({ user, allow, children, fallbackTitle, fallbackMessage }) {
   return <AccessDenied title={fallbackTitle} message={fallbackMessage} />;
 }
 
+// Mirrors the backend's role mapping: admins and analysts (incl. "SecurityEngineer") may triage.
+// Pages that draw their own command-center title band.
+const FULL_BLEED_ROUTES = new Set(["/", "/findings", "/scans", "/assets", "/agent-management", "/reports", "/attack-map", "/threat-intelligence", "/insights", "/misconfigurations", "/shadow-it", "/unauthorized-software", "/integrations", "/admin", "/users", "/ai-remediation", "/hosts"]);
+
+function canEditFindings(user) {
+  const role = String(user?.role || "").toLowerCase().replace(/[\s_-]/g, "");
+  return ["admin", "administrator", "analyst", "securityengineer", "engineer"].includes(role);
+}
+
 function pageTitle(pathname) {
-  if (pathname === "/assets") return "Assets";
+  if (pathname === "/assets") return "Targets";
+  if (pathname === "/insights") return "Analytics";
+  if (pathname === "/agent-management") return "Endpoint agents";
   if (pathname === "/ai-remediation") return "AI Remediation";
   if (pathname === "/scans") return "Scans";
   if (pathname === "/hosts") return "Hosts";
@@ -482,7 +387,7 @@ function pageTitle(pathname) {
   if (pathname === "/admin" || pathname === "/users") return "Identity & Access Management (IAM)";
   if (pathname === "/developer") return "Developer";
   if (pathname === "/integrations") return "Integrations";
-  return "Dashboard";
+  return "Overview";
 }
 
 export default App;

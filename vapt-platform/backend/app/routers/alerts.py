@@ -3,11 +3,9 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.alert import AlertEvent, AlertRule
-from app.models.finding import Finding
-from app.models.scan import Scan
 from app.models.user import User
 from app.schemas.alert import AlertEventResponse, AlertRuleCreate, AlertRuleResponse, AlertRuleTestResponse
-from app.services.alerts import create_alert_rule, deliver_alert_event, queue_alert_events, should_fire
+from app.services.alerts import create_alert_rule, deliver_alert_event, send_test_alert
 from app.services.security import enforce_roles, get_current_user
 
 router = APIRouter(prefix="/alerts", tags=["Alerts"])
@@ -71,55 +69,10 @@ def retry_event(event_id: str, db: Session = Depends(get_db), current_user: User
 
 @router.post("/rules/{rule_id}/test", response_model=AlertRuleTestResponse)
 def test_rule(rule_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Send a labelled test notification through this rule. Creates no finding or scan."""
     enforce_roles(current_user, "admin", "analyst")
     rule = db.get(AlertRule, rule_id)
     if not rule:
         raise HTTPException(status_code=404, detail="Alert rule not found")
-
-    finding = (
-        db.query(Finding)
-        .filter(Finding.status == "open")
-        .order_by(Finding.detected_at.desc())
-        .first()
-    )
-
-    if not finding or not should_fire(rule, finding):
-        synthetic_scan = Scan(
-            scan_name=f"Alert validation for {rule.name}",
-            scan_type="validation",
-            tool=rule.scan_tool or "platform",
-            status="completed",
-            target=rule.destination,
-            profile="alert-validation",
-            progress="100",
-            result_summary={"simulated": True, "rule_id": str(rule.id)},
-            engine_metadata={"source": "alert-rule-test"},
-        )
-        db.add(synthetic_scan)
-        db.flush()
-        finding = Finding(
-            scan_id=synthetic_scan.id,
-            title="Simulated alert validation finding",
-            category="validation",
-            source=rule.scan_tool or "platform",
-            status="open",
-            port=0,
-            protocol="test",
-            service="alerting",
-            state="open",
-            severity=rule.min_severity,
-            confidence=0.95,
-            evidence="Synthetic finding created to validate alert delivery.",
-            remediation="Confirm the alert channel receives notifications and document the runbook.",
-            compliance_map=["OWASP ASVS"],
-            finding_metadata={"simulated": True, "source": "alert-rule-test"},
-        )
-        db.add(finding)
-        db.commit()
-        db.refresh(finding)
-
-    events = queue_alert_events(db, finding, [rule])
-    if not events:
-        raise HTTPException(status_code=400, detail="Alert rule did not match the available finding severity or tool scope")
-    event = events[0]
+    event = send_test_alert(db, rule, current_user.username)
     return {"rule": rule, "event": event}

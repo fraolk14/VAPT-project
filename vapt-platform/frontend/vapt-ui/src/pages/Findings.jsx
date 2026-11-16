@@ -1,56 +1,51 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import api from "../api/client";
+import BarField3D from "../components/cc/BarField3D";
+import { useAnimatedNumber } from "../components/cc/ccHooks";
+import { SEV_HEX } from "../components/cc/ccConstants";
+import "../commandcenter.css";
+import "../findings.css";
+
+const SLA_DAYS = { critical: 7, high: 30, medium: 90, low: 180 };
+const ENGINE_COLS = [["openvas", "Network"], ["zap", "Web"], ["mobsf", "Mobile"], ["endpoint", "Endpoint"]];
+const MATRIX_ROWS = ["critical", "high", "medium", "low"].map((sev) => ({ key: sev, label: sev, color: SEV_HEX[sev] }));
+
+/** "13 Nov 2026, 14:32" in the viewer's time zone. */
+function fmtStamp(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString([], { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+function Kpi({ label, value, tone, hint }) {
+  const shown = useAnimatedNumber(value ?? 0);
+  return (
+    <div className={`cc-kpi${tone ? ` cc-kpi--${tone}` : ""}`}>
+      <span>{label}</span>
+      <strong>{value == null ? "—" : shown}</strong>
+      {hint ? <small className="fxp-hint">{hint}</small> : null}
+    </div>
+  );
+}
 
 const TAB_OPTIONS = [
-  { key: "all", label: "All Findings" },
-  { key: "endpoint", label: "Endpoint Findings" },
-  { key: "openvas", label: "Network Findings" },
-  { key: "zap", label: "Web Findings" },
-  { key: "mobsf", label: "Mobile Findings" },
+  { key: "all", label: "All" },
+  { key: "openvas", label: "Network" },
+  { key: "zap", label: "Web" },
+  { key: "mobsf", label: "Mobile" },
+  { key: "endpoint", label: "Endpoint" },
 ];
 
 const TAB_SOURCE_MAP = {
   all: null,
   endpoint: ["endpoint-agent", "agent", "windows-agent", "Endpoint", "VAP Agent"],
   openvas: ["openvas", "network-db", "host", "host-scan", "network", "nmap", "socket", "nmap+socket", "Network"],
-  zap: ["zap", "web", "web-scan", "web-db", "zap-proxy", "owasp", "nuclei", "Web"],
+  zap: ["zap", "web", "web-scan", "web-db", "zap-proxy", "owasp", "nuclei", "testssl", "Web"],
   mobsf: ["mobsf", "mobile", "apk", "ipa", "Mobile"],
 };
-
-const DEFAULT_COLUMN_WIDTHS = {
-  select: 45,
-  date: 110,
-  severity: 110,
-  title: 220,
-  details: 360,
-  target: 200,
-  cve: 110,
-  count: 70,
-  cvss: 75,
-  owner: 240,
-  verification: 140,
-  recommendation: 260,
-  status: 100,
-};
-
-
-const COLUMN_DEFS = [
-  { key: "select", label: "", sortable: false },
-  { key: "date", label: "Date", sortable: true },
-  { key: "severity", label: "Severity", sortable: true },
-  { key: "title", label: "Title", sortable: true },
-  { key: "details", label: "Details", sortable: false },
-  { key: "target", label: "Target Asset", sortable: true },
-  { key: "cve", label: "CVE", sortable: true },
-  { key: "count", label: "Count", sortable: true },
-  { key: "cvss", label: "CVSS", sortable: true },
-  { key: "owner", label: "Owner / Group", sortable: true },
-  { key: "verification", label: "Verification", sortable: true },
-  { key: "recommendation", label: "AI Recommendation", sortable: true },
-  { key: "status", label: "Status", sortable: true },
-];
 
 function severityLabel(value) {
   return (value || "info").toLowerCase();
@@ -178,10 +173,6 @@ function targetSummary(finding) {
   };
 }
 
-function identifierLabel(finding) {
-  return finding.display_id || finding.cve_id || finding.cve || (finding.finding_metadata?.cwe_id ? `CWE-${finding.finding_metadata.cwe_id}` : "n/a");
-}
-
 function cveValues(finding) {
   const raw = finding.cve_id || finding.cve || finding.display_id || "";
   const matches = raw.match(/CVE-\d{4}-\d{4,}/gi) || [];
@@ -191,6 +182,7 @@ function cveValues(finding) {
 function sanitizeProofText(raw) {
   if (!raw || typeof raw !== "string") return "";
   return raw
+    // eslint-disable-next-line no-control-regex -- stripping control characters from scanner output is the point
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "")
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
@@ -198,85 +190,13 @@ function sanitizeProofText(raw) {
 }
 
 function detailsExplanation(finding) {
+  // Only what the scanner or correlation engine actually recorded. No canned text per keyword.
   const meta = finding.finding_metadata || {};
   const correlation = meta.correlation || {};
-  const title = (finding.title || "").trim();
-  const titleLower = title.toLowerCase();
-  const port = finding.port;
-
-  // 1. Explicit description from scanner metadata if available and meaningful
-  if (meta.description && typeof meta.description === "string" && meta.description.length > 25 && !meta.description.startsWith("Exposed resource accessible at")) {
-    return meta.description.trim();
-  }
-
-  // 2. Domain-aware comprehensive explanations based on vulnerability type & context:
-  if (titleLower.includes("telnet")) {
-    return "Telnet service is actively running and exposed. Telnet transmits all authentication credentials, commands, and session data in unencrypted plaintext, allowing network adversaries to capture sensitive credentials.";
-  }
-  if (titleLower.includes("rdp") || (port === 3389 && titleLower.includes("exposed"))) {
-    return "Remote Desktop Protocol (RDP) management service is exposed on port 3389/tcp. Public or unrestricted RDP interfaces are heavily targeted for brute-force credential attacks, ransomware deployment, and remote exploitation.";
-  }
-  if (titleLower.includes("smb") || (port === 445 && titleLower.includes("exposed"))) {
-    return "Server Message Block (SMB) file sharing service is exposed on port 445/tcp. Unrestricted SMB exposure creates high risk of network lateral movement, NTLM relay attacks, and remote code execution vulnerabilities.";
-  }
-  if (titleLower.includes("ssh") || (port === 22 && titleLower.includes("exposed"))) {
-    return "Secure Shell (SSH) remote management service is accessible. Ensure strong public-key authentication is enforced, root login is disabled, and exposure is restricted via firewall.";
-  }
-  if (titleLower.includes("actuator") || titleLower.includes("spring")) {
-    return "Spring Boot Actuator monitoring interface is exposed without authentication, allowing unauthorized users to inspect internal application health metrics, environment properties, and runtime configurations.";
-  }
-  if (titleLower.includes("phpinfo")) {
-    return "PHPInfo diagnostic page is publicly accessible, leaking complete PHP environment variables, module configurations, file paths, and server architecture details.";
-  }
-  if (titleLower.includes("ftp") && (titleLower.includes("storage") || titleLower.includes("directory index"))) {
-    return "Public directory listing is enabled on the web server, allowing anonymous users to browse, index, and download internal application files and directories.";
-  }
-  if (titleLower.includes("acquisition") || titleLower.includes("confidential")) {
-    return "Sensitive corporate document is publicly accessible without authorization on the server, disclosing confidential business information.";
-  }
-  if (titleLower.includes("challenge") && titleLower.includes("api")) {
-    return "Internal application API route is accessible without authentication, disclosing internal application state, challenge statistics, and backend metadata.";
-  }
-  if (titleLower.includes("legal") && titleLower.includes("document")) {
-    return "Internal legal documentation file is accessible on the server filesystem via direct HTTP request.";
-  }
-  if (titleLower.includes("robots.txt")) {
-    return "Web crawler directive file (robots.txt) is publicly accessible, disclosing restricted administrative and internal URL paths to external reconnaissance tools.";
-  }
-  if (titleLower.includes("security.txt") || titleLower.includes("security contact")) {
-    return "Security contact document (.well-known/security.txt) is hosted on the server detailing vulnerability disclosure guidelines and contact endpoints.";
-  }
-  if (titleLower.includes("content-security-policy") || titleLower.includes("csp")) {
-    return "The web application does not enforce a Content-Security-Policy (CSP) HTTP response header. Without CSP, modern browsers cannot restrict unauthorized script execution, leaving users vulnerable to Cross-Site Scripting (XSS) and data injection.";
-  }
-  if (titleLower.includes("strict-transport-security") || titleLower.includes("hsts")) {
-    return "HTTPS web endpoint is missing the Strict-Transport-Security (HSTS) header. Without HSTS, browsers may downgrade connections to unencrypted HTTP, exposing communication to man-in-the-middle (MITM) attacks and cookie interception.";
-  }
-  if (titleLower.includes("cors") || titleLower.includes("cross-origin")) {
-    return "The web server configures an overly permissive CORS policy with wildcard Access-Control-Allow-Origin (*), allowing untrusted third-party domains to initiate cross-origin requests.";
-  }
-  if (titleLower.includes("timestamp") && titleLower.includes("unix")) {
-    return "The application discloses a Unix timestamp in server responses, which can be leveraged by attackers to infer server time synchronization, session creation windows, or algorithmic seed values.";
-  }
-  if (titleLower.includes("xss") || titleLower.includes("cross-site scripting")) {
-    return "The web application reflects user-supplied input directly in the HTTP response without sufficient sanitization or HTML output encoding, enabling execution of arbitrary JavaScript in the victim's browser.";
-  }
-  if (titleLower.includes("sql") && (titleLower.includes("injection") || titleLower.includes("sqli"))) {
-    return "The application constructs database queries using untrusted user input without parameterization, enabling attackers to extract, modify, or delete sensitive backend database records.";
-  }
-
-  // 3. Fallback
-  if (correlation.correlation_summary) {
-    return correlation.correlation_summary;
-  }
-  if (typeof finding.details === "string" && finding.details.trim().length > 10) {
-    return finding.details.trim();
-  }
-  if (finding.remediation && finding.remediation.length > 20) {
-    return finding.remediation;
-  }
-
-  return `Security vulnerability identified: ${title}. Verify service configuration and enforce access controls.`;
+  if (typeof meta.description === "string" && meta.description.trim().length > 25) return meta.description.trim();
+  if (correlation.correlation_summary) return correlation.correlation_summary;
+  if (typeof finding.details === "string" && finding.details.trim().length > 10) return finding.details.trim();
+  return "";
 }
 
 function detailsProof(finding) {
@@ -308,21 +228,11 @@ function detailsProof(finding) {
   }
 
   if (port && target) {
-    return `Verified active listener on ${target}:${port} (${finding.service || "active service"}). State: ${finding.state || "open"}`;
+    return `The scanner reported ${port} ${finding.state || "open"} on ${target}${finding.service ? ` (${finding.service})` : ""}. No further evidence was recorded.`;
   }
 
   return "";
 }
-
-function hasLongDetails(finding) {
-  const exp = detailsExplanation(finding);
-  const proof = detailsProof(finding);
-  return exp.length > 140 || proof.length > 100 || proof.includes("\n");
-}
-
-
-
-
 
 function findingMatchesTab(finding, tabKey) {
   if (tabKey === "all") return true;
@@ -330,6 +240,28 @@ function findingMatchesTab(finding, tabKey) {
   const src = (finding.source || "").toLowerCase();
   const cat = (finding.category || "").toLowerCase();
   return sources.some((s) => src.includes(s.toLowerCase()) || cat.includes(s.toLowerCase()));
+}
+
+/** Host part of a target: no scheme, path or port, lower-cased. */
+function hostOf(value) {
+  let host = String(value || "").trim().toLowerCase().replace(/^[a-z]+:\/\//, "").split("/")[0];
+  if (host.split(":").length === 2) host = host.split(":")[0];
+  return host === "n/a" ? "" : host;
+}
+
+/** Exact host match, or a subdomain of the wanted domain. Never a partial IP ("10.0.0.2" is not "10.0.0.25"). */
+function hostMatches(host, wanted) {
+  if (!host || !wanted) return false;
+  if (host === wanted) return true;
+  const isIp = /^[\d.]+$/.test(wanted) || wanted.includes(":");
+  return !isIp && host.endsWith(`.${wanted}`);
+}
+
+function statusMatches(finding, filter) {
+  const status = String(finding.status || "open").toUpperCase();
+  if (filter === "ALL") return true;
+  if (filter === "ACTIVE") return status === "OPEN" || status === "IN_PROGRESS";
+  return status === filter;
 }
 
 function sortValue(finding, sortKey) {
@@ -347,36 +279,43 @@ function sortValue(finding, sortKey) {
   return targetLabel(finding);
 }
 
-function detectedLabel(finding) {
-  const dt = finding.detected_at || finding.discovered_at;
-  if (!dt) return "n/a";
-  return new Date(dt).toLocaleString();
+function errorText(error) {
+  const status = error?.response?.status;
+  if (status === 403) return "You don't have permission to change findings.";
+  const detail = error?.response?.data?.detail;
+  return typeof detail === "string" ? detail : "Couldn't save. Please try again.";
 }
 
-function renderCveLinks(finding) {
-  const cves = cveValues(finding);
-  if (!cves.length) return "n/a";
-  return (
-    <div className="cve-link-list">
-      {cves.map((cve) => (
-        <a
-          key={cve}
-          className="cve-link"
-          href={`https://www.cve.org/CVERecord?id=${encodeURIComponent(cve)}`}
-          target="_blank"
-          rel="noreferrer"
-          title={`Open official CVE record for ${cve}`}
-        >
-          {cve}
-        </a>
-      ))}
-    </div>
-  );
+const SOURCE_LABELS = {
+  zap: "ZAP web engine",
+  mobsf: "Mobile engine",
+  nmap: "Nmap",
+  socket: "Socket probe",
+  "nmap+socket": "Nmap + socket",
+  openvas: "Network engine",
+  "endpoint-agent": "Endpoint agent",
+  nuclei: "Nuclei",
+  testssl: "testssl.sh",
+  web: "Built-in web checks",
+  "network-db": "Network checks",
+};
+
+function sourceLabel(source) {
+  const key = String(source || "").toLowerCase();
+  return SOURCE_LABELS[key] || (source ? String(source) : "Scanner");
 }
 
-export default function Findings({ findings, users, groups }) {
+function detectedShort(finding) {
+  return fmtStamp(finding.detected_at || finding.discovered_at) || "—";
+}
+
+/** When this finding was last confirmed by a scan. */
+function lastScanned(finding) {
+  return fmtStamp(finding.last_seen || finding.scan_finished_at);
+}
+
+export default function Findings({ findings, users, groups, canEdit = true }) {
   const [searchParams] = useSearchParams();
-  const resizeStateRef = useRef(null);
   const [localFindings, setLocalFindings] = useState(findings || []);
 
   const scanIdParam = searchParams.get("scan_id") || "";
@@ -393,7 +332,7 @@ export default function Findings({ findings, users, groups }) {
   
   // Advanced Filters
   const [severityFilter, setSeverityFilter] = useState("ALL");
-  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [statusFilter, setStatusFilter] = useState("ACTIVE");
   const [verificationFilter, setVerificationFilter] = useState("ALL");
 
   const [pageSize, setPageSize] = useState(10);
@@ -401,13 +340,11 @@ export default function Findings({ findings, users, groups }) {
   const [assignmentState, setAssignmentState] = useState({});
   const [sortState, setSortState] = useState({ key: "date", direction: "desc" });
   
-  const [aiRecommendations, setAiRecommendations] = useState({});
-  const [aiProvider, setAiProvider] = useState("nvidia-nim");
-  const [aiStatus, setAiStatus] = useState("loading");
-  const [expandedRecommendations, setExpandedRecommendations] = useState({});
+  const [assignees, setAssignees] = useState(null);
+  const [batchError, setBatchError] = useState("");
   const [expandedDetails, setExpandedDetails] = useState({});
-  const [columnWidths, setColumnWidths] = useState(DEFAULT_COLUMN_WIDTHS);
   const [selectedIds, setSelectedIds] = useState(new Set());
+  const [saveNotes, setSaveNotes] = useState({});
   
   const [queryText, setQueryText] = useState(queryParam);
 
@@ -425,16 +362,15 @@ export default function Findings({ findings, users, groups }) {
 
   // Multi-criteria Filtering & Sorting
   const filteredAndSortedFindings = useMemo(() => {
-    const needle = (queryText || targetParam).trim().toLowerCase();
+    const needle = queryText.trim().toLowerCase();
     
     const filtered = localFindings.filter((finding) => {
       // 0. Flexible Target IP / CIDR / URL filter if target query param is present
       if (targetParam) {
-        const paramStr = targetParam.trim().toLowerCase().replace(/^https?:\/\//, "");
-        const rawTarget = (finding.target || "").toLowerCase().replace(/^https?:\/\//, "");
-        const metaHost = (finding.finding_metadata?.host || finding.finding_metadata?.url || finding.finding_metadata?.ip_address || "").toLowerCase().replace(/^https?:\/\//, "");
-        const matches = rawTarget.includes(paramStr) || paramStr.includes(rawTarget) || metaHost.includes(paramStr) || paramStr.includes(metaHost);
-        if (!matches) return false;
+        const wanted = hostOf(targetParam);
+        const meta = finding.finding_metadata || {};
+        const candidates = [finding.target, meta.host, meta.url, meta.ip_address, meta.hostname, targetSummary(finding).primary].map(hostOf);
+        if (!candidates.some((host) => hostMatches(host, wanted))) return false;
       }
 
       // 0b. Strict Scan Job ID filter if scan_id query param is present
@@ -451,9 +387,7 @@ export default function Findings({ findings, users, groups }) {
       }
 
       // 3. Status Filter
-      if (statusFilter !== "ALL" && (finding.status || "").toUpperCase() !== statusFilter) {
-        return false;
-      }
+      if (!statusMatches(finding, statusFilter)) return false;
 
       // 4. Verification Status Filter
       if (verificationFilter !== "ALL") {
@@ -482,34 +416,15 @@ export default function Findings({ findings, users, groups }) {
 
   const totalPages = Math.max(1, Math.ceil(filteredAndSortedFindings.length / pageSize));
   const visibleFindings = filteredAndSortedFindings.slice(pageIndex * pageSize, pageIndex * pageSize + pageSize);
-  const visibleIdsKey = visibleFindings.map((finding) => finding.id).join(",");
 
-  // Fetch AI Recommendations safely without infinite re-render loops
+  // People and teams to assign to. Works for analysts too (the IAM user list is admin-only).
   useEffect(() => {
-    if (!visibleIdsKey) return;
-    const pending = visibleFindings.filter((finding) => finding.id && !aiRecommendations[finding.id]);
-    if (!pending.length) return;
-    const pendingIds = pending.map((f) => f.id);
+    if (!canEdit) return;
+    api.get("/findings/assignees").then((response) => setAssignees(response.data)).catch(() => setAssignees(null));
+  }, [canEdit]);
 
-    api.post("/ai/finding-recommendations", { finding_ids: pendingIds }).then((response) => {
-      setAiProvider(response.data.provider || "local-fallback");
-      setAiStatus(response.data.provider === "nvidia-nim" ? "ready" : "fallback");
-      setAiRecommendations((current) => {
-        const next = { ...current };
-        for (const id of pendingIds) {
-          next[id] = "AI recommendation generated.";
-        }
-        for (const item of response.data.items || []) {
-          if (item.finding_id) {
-            next[item.finding_id] = item.recommendation;
-          }
-        }
-        return next;
-      });
-    }).catch(() => {
-      setAiStatus("error");
-    });
-  }, [visibleIdsKey]);
+  const ownerOptions = assignees?.users || (users || []).map((entry) => ({ username: entry.username, full_name: entry.full_name }));
+  const teamOptions = assignees?.groups || (groups || []).map((group) => group.name);
 
   // Update Finding Assignment / Verification / Status
   const updateFinding = async (findingId) => {
@@ -523,8 +438,9 @@ export default function Findings({ findings, users, groups }) {
         status: payload.status || null,
       });
       setLocalFindings((current) => current.map((item) => (item.id === findingId ? response.data : item)));
-    } catch {
-      // Graceful error handling
+      setSaveNotes((current) => ({ ...current, [findingId]: { ok: true, text: "Saved." } }));
+    } catch (error) {
+      setSaveNotes((current) => ({ ...current, [findingId]: { ok: false, text: errorText(error) } }));
     }
   };
 
@@ -532,8 +448,9 @@ export default function Findings({ findings, users, groups }) {
     try {
       const response = await api.patch(`/findings/${findingId}`, { mark_false_positive: true });
       setLocalFindings((current) => current.map((item) => (item.id === findingId ? response.data : item)));
-    } catch {
-      // Graceful error handling
+      setSaveNotes((current) => ({ ...current, [findingId]: { ok: true, text: "Marked as false positive." } }));
+    } catch (error) {
+      setSaveNotes((current) => ({ ...current, [findingId]: { ok: false, text: errorText(error) } }));
     }
   };
 
@@ -548,7 +465,7 @@ export default function Findings({ findings, users, groups }) {
         return next;
       });
     } catch (error) {
-      console.error("Failed to delete finding:", error);
+      setSaveNotes((current) => ({ ...current, [findingId]: { ok: false, text: errorText(error) } }));
     }
   };
 
@@ -589,8 +506,9 @@ export default function Findings({ findings, users, groups }) {
       await api.post("/findings/batch-delete", { finding_ids: idsToDelete });
       setLocalFindings((current) => current.filter((item) => !selectedIds.has(item.id)));
       setSelectedIds(new Set());
+      setBatchError("");
     } catch (error) {
-      console.error("Failed to delete selected findings:", error);
+      setBatchError(errorText(error));
     }
   };
 
@@ -602,628 +520,468 @@ export default function Findings({ findings, users, groups }) {
     ));
   };
 
-  const renderSortHeader = (label, key) => (
-    <button type="button" className="table-sort" onClick={() => toggleSort(key)}>
+  const severityCounts = useMemo(() => {
+    const counts = { ALL: 0, CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0 };
+    for (const finding of localFindings) {
+      if (!findingMatchesTab(finding, activeTab) || !statusMatches(finding, statusFilter)) continue;
+      counts.ALL += 1;
+      const key = (finding.severity || "info").toUpperCase();
+      if (counts[key] !== undefined) counts[key] += 1;
+    }
+    return counts;
+  }, [localFindings, activeTab, statusFilter]);
+
+  const overview = useMemo(() => {
+    const now = Date.now();
+    const active = localFindings.filter((f) => statusMatches(f, "ACTIVE"));
+    const sevOf = (f) => (f.severity || "info").toLowerCase();
+    const values = MATRIX_ROWS.map((row) => ENGINE_COLS.map(([tab]) => active.filter((f) => sevOf(f) === row.key && findingMatchesTab(f, tab)).length));
+    const pastSla = active.filter((f) => {
+      const days = SLA_DAYS[sevOf(f)];
+      const due = f.sla_due_at ? new Date(f.sla_due_at).getTime() : (days ? new Date(f.detected_at).getTime() + days * 86400000 : NaN);
+      return Number.isFinite(due) && due < now;
+    }).length;
+    const lastScan = localFindings.reduce((max, f) => Math.max(max, new Date(f.last_seen || f.scan_finished_at || 0).getTime() || 0), 0);
+    return {
+      open: active.filter((f) => sevOf(f) !== "info").length,
+      urgent: active.filter((f) => ["critical", "high"].includes(sevOf(f))).length,
+      unassigned: active.filter((f) => !f.assigned_to && sevOf(f) !== "info").length,
+      newDay: active.filter((f) => now - new Date(f.detected_at).getTime() < 86400000).length,
+      pastSla,
+      withCve: active.filter((f) => cveValues(f).length).length,
+      values,
+      lastScan: lastScan ? new Date(lastScan).toISOString() : null,
+    };
+  }, [localFindings]);
+
+  const toggleExpanded = (id) => setExpandedDetails((current) => ({ ...current, [id]: !current[id] }));
+
+  const sortIndicator = (key) => {
+    if (sortState.key !== key) return "none";
+    return sortState.direction === "asc" ? "ascending" : "descending";
+  };
+
+  const sortButton = (label, sortKey) => (
+    <button type="button" className="fx-sort" onClick={() => toggleSort(sortKey)}>
       {label}
-      <span>{sortState.key === key ? (sortState.direction === "asc" ? "↑" : "↓") : "↕"}</span>
+      <span aria-hidden="true">{sortState.key === sortKey ? (sortState.direction === "asc" ? "↑" : "↓") : "↕"}</span>
     </button>
   );
 
-  const recommendationPreview = (finding) => {
-    const text = aiRecommendations[finding.id] || (finding.ai_recommendation ? finding.ai_recommendation : (aiStatus === "error" ? "AI recommendation unavailable." : "Analyzing remediation..."));
-    const expanded = expandedRecommendations[finding.id];
-    if (expanded || text.length <= 112) return text;
-    return `${text.slice(0, 112).trim()}...`;
-  };
+  const visIds = visibleFindings.map((f) => f.id);
+  const allVisSelected = visIds.length > 0 && visIds.every((id) => selectedIds.has(id));
 
-  const detailsPreview = (finding) => {
-    const text = detailsSummary(finding);
-    const expanded = expandedDetails[finding.id];
-    if (expanded || text.length <= 150) return text;
-    return `${text.slice(0, 150).trim()}...`;
-  };
-
-  const stopResize = () => {
-    if (!resizeStateRef.current) return;
-    window.removeEventListener("mousemove", resizeStateRef.current.onMove);
-    window.removeEventListener("mouseup", resizeStateRef.current.onUp);
-    resizeStateRef.current = null;
-    document.body.style.cursor = "";
-    document.body.style.userSelect = "";
-  };
-
-  useEffect(() => stopResize, []);
-
-  const startResize = (columnKey, event) => {
-    event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = columnWidths[columnKey] || DEFAULT_COLUMN_WIDTHS[columnKey] || 120;
-
-    const onMove = (moveEvent) => {
-      const nextWidth = Math.max(64, startWidth + (moveEvent.clientX - startX));
-      setColumnWidths((current) => ({ ...current, [columnKey]: nextWidth }));
-    };
-
-    const onUp = () => stopResize();
-
-    resizeStateRef.current = { onMove, onUp };
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  };
-
-  const renderHeaderCell = (column, index) => {
-    if (column.key === "select") {
-      const visIds = (visibleFindings || []).map((f) => f.id);
-      const allVisSelected = visIds.length > 0 && visIds.every((id) => selectedIds.has(id));
-      return (
-        <th key={column.key} className="findings-table-layout__header-cell" style={{ textAlign: "center", padding: "8px" }}>
-          <input
-            type="checkbox"
-            checked={allVisSelected}
-            onChange={toggleSelectAll}
-            title="Select all visible findings"
-            style={{ cursor: "pointer", width: "16px", height: "16px", accentColor: "#ef4444" }}
-          />
-        </th>
-      );
-    }
-    return (
-      <th key={column.key} className="findings-table-layout__header-cell">
-        <div className="findings-table-layout__header-inner">
-          {column.sortable ? renderSortHeader(column.label, column.key) : <span className="findings-table-layout__header-label">{column.label}</span>}
-          {index < COLUMN_DEFS.length - 1 ? (
-            <span
-              className="findings-table-layout__resize-handle"
-              onMouseDown={(event) => startResize(column.key, event)}
-              role="separator"
-              aria-orientation="vertical"
-              aria-label={`Resize ${column.label} column`}
-            />
-          ) : null}
-        </div>
-      </th>
-    );
-  };
-
-  // Empty state copy depending on selected tab
-  const getEmptyStateMessage = () => {
-    if (activeTab === "openvas") return "No network findings detected";
-    if (activeTab === "zap") return "No web findings detected";
-    if (activeTab === "mobsf") return "No mobile findings detected";
-    return "No findings found";
-  };
+  const emptyMessage = activeTab === "openvas" ? "No network findings" : activeTab === "zap" ? "No web findings" : activeTab === "mobsf" ? "No mobile findings" : activeTab === "endpoint" ? "No endpoint findings" : "No findings";
 
   return (
-    <section className="panel" style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "12px", padding: "24px" }}>
-      {/* Target Active Filter Banner */}
+    <div className="cc fx-page">
+      <header className="cc-top">
+        <div className="cc-top__title">
+          <span className="cc-live-dot" aria-hidden="true" />
+          <h1>Findings</h1>
+        </div>
+        <div className="cc-top__tools">
+          {overview.lastScan ? <span className="cc-clock">Last scan result {fmtStamp(overview.lastScan)}</span> : null}
+          <span className="fxp-live">Live · refreshes every 30 s</span>
+        </div>
+      </header>
+
+      <div className="cc-kpis">
+        <Kpi label="Open findings" value={overview.open} hint="excluding info" />
+        <Kpi label="Critical + high" value={overview.urgent} tone={overview.urgent ? "hot" : ""} />
+        <Kpi label="Past SLA" value={overview.pastSla} tone={overview.pastSla ? "hot" : ""} hint="7 / 30 / 90 / 180 days" />
+        <Kpi label="Unassigned" value={overview.unassigned} />
+        <Kpi label="New · last 24 h" value={overview.newDay} tone="live" />
+        <Kpi label="With a confirmed CVE" value={overview.withCve} />
+      </div>
+
+      {overview.values.some((row) => row.some(Boolean)) ? (
+        <section className="cc-panel fxp-chart" aria-label="Open findings by severity and engine">
+          <header className="cc-panel__head"><h2>Open findings · severity × engine</h2></header>
+          <BarField3D rows={MATRIX_ROWS} cols={ENGINE_COLS.map(([, label]) => label)} values={overview.values}
+            caption="Open findings per severity and scan engine"
+            describe={(row, col, value) => <><strong>{value}</strong> {row.label} open from the {col.toLowerCase()} engine</>} />
+        </section>
+      ) : null}
+
+      <div className="fx">
       {targetParam && (
-        <div style={{ background: "linear-gradient(135deg, #0284c722 0%, #0369a122 100%)", border: "1px solid #0284c755", padding: "12px 16px", borderRadius: "8px", marginBottom: "20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <span style={{ fontSize: "1.4rem" }}>🎯</span>
-            <div>
-              <div style={{ color: "#38bdf8", fontWeight: 700, fontSize: "0.95rem" }}>
-                Filtered Vulnerability Findings for Target: <code style={{ background: "#1e293b", padding: "2px 6px", borderRadius: "4px", color: "#34d399" }}>{targetParam}</code>
-              </div>
-              <div style={{ fontSize: "0.75rem", color: "#94a3b8", marginTop: "2px" }}>
-                Displaying {filteredAndSortedFindings.length} security findings matching target IP, CIDR block, or URL.
-              </div>
-            </div>
-          </div>
-          <Link to="/findings" style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "6px 14px", borderRadius: "6px", fontSize: "0.8rem", textDecoration: "none", fontWeight: 600, transition: "background 0.2s" }}>
-            Show All Findings ✕
-          </Link>
-        </div>
-      )}
-
-      {/* Panel Header & Controls */}
-      <div className="panel__header" style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: "16px", marginBottom: "20px" }}>
-        <div>
-          <p className="eyebrow" style={{ color: "#38bdf8", textTransform: "uppercase", fontSize: "0.75rem", letterSpacing: "1px" }}>
-            Security Findings Engine
-          </p>
-          <h2 style={{ color: "#f8fafc", margin: "4px 0 0 0", fontSize: "1.5rem" }}>
-            Vulnerability Findings & Telemetry
-          </h2>
-        </div>
-
-        {/* Global Controls & Filters */}
-        <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
-          {/* Search Box */}
-          <input
-            className="scan-input"
-            placeholder="Search title, target, CVE, details..."
-            value={queryText}
-            onChange={(event) => setQueryText(event.target.value)}
-            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "8px 12px", borderRadius: "6px", minWidth: "220px" }}
-          />
-
-          {/* Severity Filter */}
-          <select
-            value={severityFilter}
-            onChange={(e) => setSeverityFilter(e.target.value)}
-            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "8px 12px", borderRadius: "6px" }}
-          >
-            <option value="ALL">All Severities</option>
-            <option value="CRITICAL">Critical</option>
-            <option value="HIGH">High</option>
-            <option value="MEDIUM">Medium</option>
-            <option value="LOW">Low</option>
-            <option value="INFO">Info</option>
-          </select>
-
-          {/* Status Filter */}
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "8px 12px", borderRadius: "6px" }}
-          >
-            <option value="ALL">All Statuses</option>
-            <option value="OPEN">Open</option>
-            <option value="IN_PROGRESS">In Progress</option>
-            <option value="RESOLVED">Resolved</option>
-            <option value="FALSE_POSITIVE">False Positive</option>
-          </select>
-
-          {/* Verification Status Filter */}
-          <select
-            value={verificationFilter}
-            onChange={(e) => setVerificationFilter(e.target.value)}
-            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "8px 12px", borderRadius: "6px" }}
-          >
-            <option value="ALL">All Verifications</option>
-            <option value="PENDING">Pending</option>
-            <option value="VERIFIED">Verified</option>
-            <option value="UNVERIFIED">Unverified</option>
-            <option value="FALSE_POSITIVE">False Positive</option>
-          </select>
-
-          {/* Page Size */}
-          <select
-            className="scan-select"
-            value={pageSize}
-            onChange={(event) => setPageSize(Number(event.target.value))}
-            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "8px 12px", borderRadius: "6px" }}
-          >
-            <option value={10}>10 per page</option>
-            <option value={25}>25 per page</option>
-            <option value={50}>50 per page</option>
-            <option value={100}>100 per page</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Batch Actions Bar when items are checked */}
-      {selectedIds.size > 0 && (
-        <div style={{ display: "flex", alignItems: "center", gap: "12px", background: "#451a1a44", border: "1px solid #7f1d1daa", padding: "10px 16px", borderRadius: "8px", marginBottom: "16px" }}>
-          <span style={{ color: "#fca5a5", fontWeight: 600, fontSize: "0.9rem" }}>
-            {selectedIds.size} finding(s) selected
+        <div className="fx-banner" role="status">
+          <span>
+            Showing findings for <code className="nw-mono">{targetParam}</code> ({filteredAndSortedFindings.length})
           </span>
-          <button
-            type="button"
-            className="scan-action scan-action--cancel"
-            onClick={handleBatchDelete}
-            style={{ background: "#dc2626", color: "#ffffff", border: "1px solid #b91c1c", padding: "6px 14px", borderRadius: "6px", cursor: "pointer", fontWeight: 700, fontSize: "0.85rem" }}
-          >
-            🗑️ Delete Selected ({selectedIds.size})
-          </button>
-          <button
-            type="button"
-            onClick={() => setSelectedIds(new Set())}
-            style={{ background: "#1e293b", color: "#94a3b8", border: "1px solid #334155", padding: "6px 12px", borderRadius: "6px", cursor: "pointer", fontSize: "0.85rem" }}
-          >
-            Deselect All
-          </button>
+          <Link to="/findings" className="nw-btn nw-btn--ghost">Clear filter</Link>
         </div>
       )}
 
-      {/* Target Type Filter Tabs (All / Network / Web / Mobile) */}
-      <div className="subtabs" style={{ display: "flex", gap: "8px", borderBottom: "1px solid #1e293b", paddingBottom: "12px", marginBottom: "16px" }}>
-        {TAB_OPTIONS.map((tab) => {
-          const count = localFindings.filter((finding) => findingMatchesTab(finding, tab.key)).length;
-          return (
-            <button
-              key={tab.key}
-              type="button"
-              className={activeTab === tab.key ? "subtab is-active" : "subtab"}
-              onClick={() => setActiveTab(tab.key)}
-              style={{
-                background: activeTab === tab.key ? "#0284c722" : "#1e293b",
-                color: activeTab === tab.key ? "#38bdf8" : "#94a3b8",
-                border: `1px solid ${activeTab === tab.key ? "#0284c766" : "#334155"}`,
-                padding: "8px 16px",
-                borderRadius: "6px",
-                fontWeight: 600,
-                cursor: "pointer",
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-              }}
-            >
-              {tab.label}
-              <span style={{ background: "#0f172a", padding: "2px 6px", borderRadius: "10px", fontSize: "0.75rem" }}>
-                {count}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Findings Data Table */}
-      <div className="table-wrap" style={{ overflowX: "auto" }}>
-        <table className="table findings-table-compact findings-table-layout" style={{ width: "100%", borderCollapse: "collapse" }}>
-          <colgroup>
-            {COLUMN_DEFS.map((column) => (
-              <col
-                key={column.key}
-                className={`findings-col findings-col--${column.key}`}
-                style={{ width: `${columnWidths[column.key] || DEFAULT_COLUMN_WIDTHS[column.key]}px` }}
-              />
+      <section className="nw-card fx-toolbar" aria-label="Filter findings">
+        <div className="fx-toolbar__row">
+          <label className="fx-search">
+            <span className="fx-sr">Search findings</span>
+            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+              <circle cx="7" cy="7" r="5" stroke="currentColor" strokeWidth="1.6" fill="none" />
+              <path d="M11 11l3.5 3.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+            <input
+              type="search"
+              placeholder="Search title, target, CVE or evidence"
+              value={queryText}
+              onChange={(event) => setQueryText(event.target.value)}
+            />
+          </label>
+          <div className="fx-segment" role="group" aria-label="Finding type">
+            {TAB_OPTIONS.map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                aria-pressed={activeTab === tab.key}
+                onClick={() => setActiveTab(tab.key)}
+              >
+                {tab.label}
+                <span className="fx-count">{localFindings.filter((finding) => findingMatchesTab(finding, tab.key) && statusMatches(finding, statusFilter)).length}</span>
+              </button>
             ))}
-          </colgroup>
-          <thead>
-            <tr style={{ borderBottom: "1px solid #334155", textAlign: "left" }}>
-              {COLUMN_DEFS.map(renderHeaderCell)}
-            </tr>
-          </thead>
-          <tbody>
-            {visibleFindings.map((finding) => {
-              const draft = assignmentState[finding.id] || {
-                assigned_to: finding.assigned_to || "",
-                team_name: finding.team_name || "",
-                verification_state: finding.verification_state || finding.verification_status || "pending",
-                status: finding.status || "OPEN",
-              };
-              const targetSum = targetSummary(finding);
-              const isChecked = selectedIds.has(finding.id);
+          </div>
+        </div>
 
-              return (
-                <tr
-                  key={finding.id}
-                  className={isChecked ? "finding-row--selected" : (targetParam && targetLabel(finding).toLowerCase().includes(targetParam.toLowerCase()) ? "finding-row--selected" : "")}
-                  style={{ borderBottom: "1px solid #1e293b", background: isChecked ? "#451a1a22" : "transparent" }}
-                >
-                  {/* Select Checkbox */}
-                  <td style={{ padding: "12px", textAlign: "center" }}>
-                    <input
-                      type="checkbox"
-                      checked={isChecked}
-                      onChange={() => toggleSelectOne(finding.id)}
-                      style={{ cursor: "pointer", width: "16px", height: "16px", accentColor: "#ef4444" }}
-                    />
-                  </td>
+        <div className="fx-toolbar__row">
+          <div className="fx-chips" role="group" aria-label="Severity">
+            {["ALL", "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"].map((sev) => (
+              <button
+                key={sev}
+                type="button"
+                className={`fx-chip fx-chip--${sev.toLowerCase()}`}
+                aria-pressed={severityFilter === sev}
+                onClick={() => setSeverityFilter(sev)}
+              >
+                {sev === "ALL" ? "All severities" : sev.charAt(0) + sev.slice(1).toLowerCase()}
+                <span className="fx-count">{severityCounts[sev]}</span>
+              </button>
+            ))}
+          </div>
+          <div className="fx-selects">
+            <label>
+              <span className="fx-sr">Status</span>
+              <select className="scan-select" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                <option value="ACTIVE">Open + in progress</option>
+                <option value="ALL">Any status</option>
+                <option value="OPEN">Open</option>
+                <option value="IN_PROGRESS">In progress</option>
+                <option value="RESOLVED">Resolved</option>
+                <option value="FALSE_POSITIVE">False positive</option>
+              </select>
+            </label>
+            <label>
+              <span className="fx-sr">Verification</span>
+              <select className="scan-select" value={verificationFilter} onChange={(e) => setVerificationFilter(e.target.value)}>
+                <option value="ALL">Any verification</option>
+                <option value="PENDING">Pending</option>
+                <option value="VERIFIED">Verified</option>
+                <option value="UNVERIFIED">Unverified</option>
+                <option value="FALSE_POSITIVE">False positive</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </section>
 
-                  {/* Date */}
-                  <td data-label="Date" style={{ padding: "12px", fontSize: "0.85rem", color: "#94a3b8" }}>
-                    {detectedLabel(finding)}
-                  </td>
+      {canEdit && selectedIds.size > 0 && (
+        <div className="fx-batch" role="region" aria-label="Bulk actions">
+          <strong>{selectedIds.size} selected</strong>
+          <button type="button" className="nw-btn fx-danger" onClick={handleBatchDelete}>
+            Delete selected
+          </button>
+          <button type="button" className="nw-btn nw-btn--ghost" onClick={() => setSelectedIds(new Set())}>
+            Clear selection
+          </button>
+          {batchError ? <span className="fx-note fx-note--error" role="alert">{batchError}</span> : null}
+        </div>
+      )}
 
-                  {/* Severity */}
-                  <td data-label="Severity" style={{ padding: "12px" }}>
-                    <span className={`pill pill--${severityLabel(finding.severity)}`}>
-                      {severityLabel(finding.severity).toUpperCase()}
-                    </span>
-                  </td>
+      <section className="nw-card fx-table-card" aria-label="Findings">
+        <div className="fx-table-scroll">
+          <table className="fx-table">
+            <thead>
+              <tr>
+                <th scope="col" className="fx-col-check">
+                  <input
+                    type="checkbox"
+                    checked={allVisSelected}
+                    onChange={toggleSelectAll}
+                    aria-label="Select all findings on this page"
+                  />
+                </th>
+                <th scope="col" aria-sort={sortIndicator("severity")}>{sortButton("Severity", "severity")}</th>
+                <th scope="col" aria-sort={sortIndicator("title")}>{sortButton("Issue", "title")}</th>
+                <th scope="col" aria-sort={sortIndicator("target")}>{sortButton("Target", "target")}</th>
+                <th scope="col" aria-sort={sortIndicator("owner")}>{sortButton("Owner", "owner")}</th>
+                <th scope="col" aria-sort={sortIndicator("status")}>{sortButton("Status", "status")}</th>
+                <th scope="col" aria-sort={sortIndicator("date")}>{sortButton("Detected (local time)", "date")}</th>
+                <th scope="col" className="fx-col-expand"><span className="fx-sr">Details</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleFindings.map((finding) => {
+                const draft = assignmentState[finding.id] || {
+                  assigned_to: finding.assigned_to || "",
+                  team_name: finding.team_name || "",
+                  verification_state: finding.verification_state || finding.verification_status || "pending",
+                  status: finding.status || "open",
+                };
+                const setDraft = (patch) => setAssignmentState((current) => ({ ...current, [finding.id]: { ...draft, ...patch } }));
+                const target = targetSummary(finding);
+                const isChecked = selectedIds.has(finding.id);
+                const isOpen = !!expandedDetails[finding.id];
+                const sev = severityLabel(finding.severity);
+                const count = finding.duplicate_count || finding.count || 1;
+                const cves = cveValues(finding);
+                const proof = detailsProof(finding);
+                const explanation = detailsExplanation(finding);
+                const status = String(finding.status || "open").toLowerCase();
+                const detailId = `finding-detail-${finding.id}`;
 
-                  {/* Title & Port */}
-                  <td data-label="Title" style={{ padding: "12px" }}>
-                    <Link className="finding-title-link" to={`/findings/${finding.id}`} style={{ fontWeight: 600, color: "#38bdf8", textDecoration: "none" }}>
-                      {finding.title}
-                    </Link>
-                    <div style={{ display: "flex", gap: "6px", alignItems: "center", marginTop: "4px", flexWrap: "wrap" }}>
-                      {finding.port > 0 && (
-                        <span style={{ fontSize: "0.72rem", color: "#94a3b8", fontFamily: "monospace" }}>
-                          {finding.port}/{finding.protocol || "tcp"}
-                        </span>
-                      )}
-                      <span style={{
-                        fontSize: "0.7rem",
-                        fontWeight: 700,
-                        padding: "1px 7px",
-                        borderRadius: "4px",
-                        background: (finding.source || "").includes("nmap+socket") ? "#065f4622" : (finding.source || "").includes("nmap") ? "#0284c722" : "#3b82f622",
-                        color: (finding.source || "").includes("nmap+socket") ? "#34d399" : (finding.source || "").includes("nmap") ? "#38bdf8" : "#60a5fa",
-                        border: `1px solid ${(finding.source || "").includes("nmap+socket") ? "#05966944" : "#0284c744"}`,
-                      }}>
-                        {finding.source === "nmap+socket" ? "⚡ Dual-Engine (Nmap + Socket)" : finding.source === "nmap" ? "🔍 Nmap Engine" : finding.source === "socket" ? "🔌 Socket Scanner" : finding.source === "zap" ? "🌐 ZAP Web Engine" : finding.source === "mobsf" ? "📱 MobSF Mobile Engine" : (finding.source || "Scanner Engine").toUpperCase()}
-                      </span>
-                    </div>
-                  </td>
-
-                  {/* Details */}
-                  <td data-label="Details" style={{ padding: "12px", fontSize: "0.83rem", color: "#cbd5e1", maxWidth: "360px", verticalAlign: "top" }}>
-                    {(() => {
-                      const isExpanded = !!expandedDetails[finding.id];
-                      const explanation = detailsExplanation(finding);
-                      const proof = detailsProof(finding);
-                      const isLong = hasLongDetails(finding);
-
-                      return (
-                        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                          {/* 1. Vulnerability Explanation */}
-                          <div style={{
-                            color: "#e2e8f0",
-                            lineHeight: "1.45",
-                            fontSize: "0.83rem",
-                            overflow: isExpanded ? "visible" : "hidden",
-                            maxHeight: isExpanded ? "none" : "4.4em",
-                            wordBreak: "break-word",
-                          }}>
-                            {explanation}
+                return [
+                  <tr key={finding.id} className={`fx-row${isChecked ? " is-selected" : ""}${isOpen ? " is-open" : ""}`}>
+                    <td className="fx-col-check">
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => toggleSelectOne(finding.id)}
+                        aria-label={`Select ${finding.title}`}
+                      />
+                    </td>
+                    <td><span className={`nw-sev nw-sev--${sev}`}>{sev}</span></td>
+                    <td className="fx-issue">
+                      <Link to={`/findings/${finding.id}`} className="fx-issue__title">{finding.title}</Link>
+                      <div className="fx-meta">
+                        <span>{sourceLabel(finding.source)}</span>
+                        {finding.port > 0 ? <span className="nw-mono">{finding.port}/{finding.protocol || "tcp"}</span> : null}
+                        {finding.cvss_score != null ? <span className="nw-mono">CVSS {Number(finding.cvss_score).toFixed(1)}</span> : null}
+                        {cves.slice(0, 2).map((cve) => (
+                          <a key={cve} className="nw-mono fx-cve" href={`https://www.cve.org/CVERecord?id=${encodeURIComponent(cve)}`} target="_blank" rel="noreferrer">{cve}</a>
+                        ))}
+                        {count > 1 ? <span className="fx-times">×{count}</span> : null}
+                        {finding.finding_metadata?.confirmation?.status === "confirmed" ? (
+                          <span className="fx-proof-tag fx-proof-tag--ok" title={finding.finding_metadata.confirmation.detail}>Confirmed · {finding.finding_metadata.confirmation.tool}</span>
+                        ) : finding.finding_metadata?.confirmation?.status === "not_reproduced" ? (
+                          <span className="fx-proof-tag fx-proof-tag--warn" title={finding.finding_metadata.confirmation.detail}>Not reproduced · likely false positive</span>
+                        ) : finding.finding_metadata?.confirmation?.status === "inconclusive" ? (
+                          <span className="fx-proof-tag" title={finding.finding_metadata.confirmation.detail}>Check inconclusive · {finding.finding_metadata.confirmation.tool}</span>
+                        ) : null}
+                        {(finding.finding_metadata?.sources || []).length > 1 ? (
+                          <span className="fx-proof-tag" title="Independent engines reported the same issue">
+                            {finding.finding_metadata.sources.length} engines agree
+                          </span>
+                        ) : null}
+                      </div>
+                    </td>
+                    <td>
+                      <Link to={`/findings?target=${encodeURIComponent(target.primary)}`} className="fx-target">{target.primary}</Link>
+                      {target.secondary ? <div className="fx-sub">{target.secondary}</div> : null}
+                    </td>
+                    <td className={finding.assigned_to ? "" : "fx-sub"}>
+                      {finding.assigned_to || "Unassigned"}
+                      {finding.team_name ? <div className="fx-sub">{finding.team_name}</div> : null}
+                    </td>
+                    <td><span className={`fx-status fx-status--${status}`}>{status.replace(/_/g, " ")}</span></td>
+                    <td className="fx-when">
+                      <span className="nw-mono">{detectedShort(finding)}</span>
+                      {lastScanned(finding) && lastScanned(finding) !== detectedShort(finding) ? <span className="fx-sub">Last scan {lastScanned(finding)}</span> : null}
+                    </td>
+                    <td className="fx-col-expand">
+                      <button
+                        type="button"
+                        className="fx-expand"
+                        aria-expanded={isOpen}
+                        aria-controls={detailId}
+                        aria-label={isOpen ? `Hide details for ${finding.title}` : `Show details for ${finding.title}`}
+                        onClick={() => toggleExpanded(finding.id)}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                          <path d="M3.5 5.25L7 8.75l3.5-3.5" stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" />
+                        </svg>
+                      </button>
+                    </td>
+                  </tr>,
+                  isOpen ? (
+                    <tr key={`${finding.id}-detail`} className="fx-detail-row" id={detailId}>
+                      <td colSpan={8}>
+                        <div className="fx-detail">
+                          <div className="fx-detail__body">
+                            {explanation ? (
+                              <section>
+                                <h3>What was found</h3>
+                                <p>{explanation}</p>
+                              </section>
+                            ) : null}
+                            {finding.finding_metadata?.confirmation ? (
+                              <section>
+                                <h3>Confirmation</h3>
+                                <p>
+                                  <strong>{finding.finding_metadata.confirmation.status === "confirmed" ? "Confirmed" : finding.finding_metadata.confirmation.status === "not_reproduced" ? "Not reproduced" : finding.finding_metadata.confirmation.status === "inconclusive" ? "Inconclusive" : "Not tested"}</strong>
+                                  {" "}by {finding.finding_metadata.confirmation.tool}: {finding.finding_metadata.confirmation.detail}
+                                </p>
+                              </section>
+                            ) : null}
+                            {(finding.finding_metadata?.sources || []).length > 1 ? (
+                              <section>
+                                <h3>Reported by</h3>
+                                <p>{finding.finding_metadata.sources.map(sourceLabel).join(", ")}</p>
+                              </section>
+                            ) : null}
+                            {proof ? (
+                              <section>
+                                <h3>Proof</h3>
+                                <pre className="fx-proof">{proof}</pre>
+                              </section>
+                            ) : null}
+                            {finding.finding_metadata?.possible_cves?.length ? (
+                              <section>
+                                <h3>Possible CVEs (unconfirmed)</h3>
+                                <p>
+                                  {finding.finding_metadata.possible_cves.map((cve, i) => (
+                                    <span key={cve}>{i ? ", " : ""}<a href={`https://nvd.nist.gov/vuln/detail/${cve}`} target="_blank" rel="noreferrer">{cve}</a></span>
+                                  ))}
+                                  {" — "}matched on the exposed port or service only. The version wasn't confirmed, so check whether this host is actually affected.
+                                </p>
+                              </section>
+                            ) : null}
+                            <section>
+                              <h3>How to fix</h3>
+                              <p>{finding.remediation || "No remediation guidance from the scanner."}</p>
+                            </section>
+                            <section>
+                              <Link className="nw-btn" to={`/findings/${finding.id}`}>Open fix workspace</Link>
+                              <p className="fx-sub">Exploitation status, EPSS, other affected targets and triage history for this issue.</p>
+                            </section>
                           </div>
-
-                          {/* 2. Target Proof & Technical Evidence Box */}
-                          {proof && (
-                            <div style={{
-                              marginTop: "2px",
-                              padding: "6px 8px",
-                              background: "#090d16",
-                              border: "1px solid #1e293b",
-                              borderRadius: "4px",
-                              fontSize: "0.74rem",
-                              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                              wordBreak: "break-word",
-                              whiteSpace: isExpanded ? "pre-wrap" : "nowrap",
-                              overflow: isExpanded ? "visible" : "hidden",
-                              textOverflow: isExpanded ? "clip" : "ellipsis",
-                              maxHeight: isExpanded ? "none" : "2.6em",
-                              lineHeight: "1.4",
-                            }}>
-                              <div style={{ color: "#64748b", fontSize: "0.66rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "2px" }}>
-                                🎯 Target Proof:
-                              </div>
-                              <span style={{ color: "#38bdf8" }}>
-                                {proof}
-                              </span>
+                          {canEdit ? (
+                          <form
+                            className="fx-triage"
+                            aria-label={`Triage ${finding.title}`}
+                            onSubmit={(event) => { event.preventDefault(); updateFinding(finding.id); }}
+                          >
+                            <h3>Triage</h3>
+                            <label>
+                              Owner
+                              <select className="scan-select" value={draft.assigned_to} onChange={(e) => setDraft({ assigned_to: e.target.value })}>
+                                <option value="">Unassigned</option>
+                                {draft.assigned_to && !ownerOptions.some((entry) => entry.username === draft.assigned_to) ? <option value={draft.assigned_to}>{draft.assigned_to}</option> : null}
+                                {ownerOptions.map((entry) => (
+                                  <option key={entry.username} value={entry.username}>{entry.full_name && entry.full_name !== entry.username ? `${entry.full_name} (${entry.username})` : entry.username}</option>
+                                ))}
+                              </select>
+                            </label>
+                            <label>
+                              Team
+                              <select className="scan-select" value={draft.team_name} onChange={(e) => setDraft({ team_name: e.target.value })}>
+                                <option value="">No team</option>
+                                {draft.team_name && !teamOptions.includes(draft.team_name) ? <option value={draft.team_name}>{draft.team_name}</option> : null}
+                                {teamOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+                              </select>
+                            </label>
+                            <label>
+                              Status
+                              <select
+                                className="scan-select"
+                                value={String(draft.status).toLowerCase()}
+                                onChange={(e) => {
+                                  const next = e.target.value;
+                                  let verification = draft.verification_state || "pending";
+                                  if (next === "resolved") verification = "verified";
+                                  else if (next === "in_progress" && verification === "pending") verification = "scheduled";
+                                  setDraft({ status: next, verification_state: verification });
+                                }}
+                              >
+                                <option value="open">Open</option>
+                                <option value="in_progress">In progress</option>
+                                <option value="resolved">Resolved</option>
+                                {String(draft.status).toLowerCase() === "false_positive" ? <option value="false_positive">False positive</option> : null}
+                              </select>
+                            </label>
+                            <label>
+                              Verification
+                              <select
+                                className="scan-select"
+                                value={draft.verification_state}
+                                onChange={(e) => {
+                                  const verification = e.target.value;
+                                  let next = draft.status || "open";
+                                  if (verification === "scheduled") next = "in_progress";
+                                  if (verification === "verified") next = "resolved";
+                                  setDraft({ verification_state: verification, status: next });
+                                }}
+                              >
+                                <option value="pending">Pending</option>
+                                <option value="unverified">Unverified</option>
+                                <option value="in_review">In review</option>
+                                <option value="scheduled">Scheduled</option>
+                                <option value="verified">Verified</option>
+                              </select>
+                            </label>
+                            <div className="fx-triage__actions">
+                              <button type="submit" className="nw-btn nw-btn--accent">Save</button>
+                              <button type="button" className="nw-btn" onClick={() => markFalsePositive(finding.id)}>Mark false positive</button>
+                              <button type="button" className="nw-btn fx-danger-text" onClick={() => deleteFinding(finding.id)}>Delete</button>
                             </div>
-                          )}
-
-                          {/* 3. See More / See Less Toggle */}
-                          {isLong && (
-                            <button
-                              type="button"
-                              onClick={() => setExpandedDetails((current) => ({ ...current, [finding.id]: !current[finding.id] }))}
-                              style={{
-                                background: "none",
-                                border: "none",
-                                color: "#38bdf8",
-                                cursor: "pointer",
-                                fontSize: "0.74rem",
-                                fontWeight: 600,
-                                padding: "2px 0 0 0",
-                                textAlign: "left",
-                                display: "inline-flex",
-                                alignItems: "center",
-                                gap: "4px",
-                              }}
-                            >
-                              {isExpanded ? "▲ See less" : "▼ See more (proof & logs)"}
-                            </button>
+                            {saveNotes[finding.id] ? (
+                              <p className={saveNotes[finding.id].ok ? "fx-note" : "fx-note fx-note--error"} role="status">
+                                {saveNotes[finding.id].text}
+                              </p>
+                            ) : null}
+                          </form>
+                          ) : (
+                            <aside className="fx-triage fx-triage--readonly">
+                              <h3>Triage</h3>
+                              <p>Owner: {finding.assigned_to || "Unassigned"}</p>
+                              <p>Verification: {String(finding.verification_state || "pending").replace(/_/g, " ")}</p>
+                              <p className="fx-sub">Read-only access. Ask an analyst or admin to change this finding.</p>
+                            </aside>
                           )}
                         </div>
-                      );
-                    })()}
-                  </td>
+                      </td>
+                    </tr>
+                  ) : null,
+                ];
+              })}
 
-
-
-                  {/* Target Asset Link */}
-                  <td data-label="Target Asset" style={{ padding: "12px" }}>
-                    <Link
-                      to={`/hosts?target=${encodeURIComponent(targetSum.primary)}`}
-                      style={{ color: "#f8fafc", fontWeight: 600, textDecoration: "none" }}
-                      title="View Asset details on Hosts page"
-                    >
-                      {targetSum.primary}
-                    </Link>
-                    <p style={{ margin: "2px 0 0 0", fontSize: "0.75rem", color: "#64748b" }}>
-                      {targetSum.secondary}
-                    </p>
-                  </td>
-
-                  {/* CVE */}
-                  <td data-label="CVE" style={{ padding: "12px" }}>
-                    {renderCveLinks(finding)}
-                  </td>
-
-                  {/* Count */}
-                  <td data-label="Count" style={{ padding: "12px", textAlign: "center" }}>
-                    {(() => {
-                      const count = finding.duplicate_count || finding.count || 1;
-                      return (
-                        <span style={{
-                          display: "inline-block",
-                          minWidth: "24px",
-                          padding: "2px 8px",
-                          borderRadius: "12px",
-                          background: count > 1 ? "rgba(56, 189, 248, 0.15)" : "rgba(148, 163, 184, 0.08)",
-                          color: count > 1 ? "#38bdf8" : "#94a3b8",
-                          fontWeight: count > 1 ? 700 : 500,
-                          fontSize: "0.82rem",
-                          border: count > 1 ? "1px solid rgba(56, 189, 248, 0.35)" : "1px solid rgba(148, 163, 184, 0.15)",
-                        }}>
-                          {count}
-                        </span>
-                      );
-                    })()}
-                  </td>
-
-
-                  {/* CVSS */}
-                  <td data-label="CVSS" style={{ padding: "12px", fontWeight: 700, color: (finding.cvss_score || 0) >= 7.0 ? "#ef4444" : "#eab308" }}>
-                    {finding.cvss_score != null ? finding.cvss_score.toFixed(1) : "n/a"}
-                  </td>
-
-                  {/* Owner / Group Assignment (IAM Integration) */}
-                  <td data-label="Owner / Group" style={{ padding: "12px" }}>
-                    <div className="finding-actions-cell" style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                      <select
-                        className="scan-select"
-                        value={draft.assigned_to}
-                        onChange={(event) => setAssignmentState((current) => ({ ...current, [finding.id]: { ...draft, assigned_to: event.target.value } }))}
-                        style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "4px 8px", borderRadius: "4px", fontSize: "0.8rem" }}
-                      >
-                        <option value="">-- Assign Owner --</option>
-                        {(users || []).map((entry) => (
-                          <option key={entry.id || entry.username} value={entry.username}>
-                            {entry.username} ({entry.role || "User"})
-                          </option>
-                        ))}
-                      </select>
-
-                      <select
-                        className="scan-select"
-                        value={draft.team_name}
-                        onChange={(event) => setAssignmentState((current) => ({ ...current, [finding.id]: { ...draft, team_name: event.target.value } }))}
-                        style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "4px 8px", borderRadius: "4px", fontSize: "0.8rem" }}
-                      >
-                        <option value="">-- Assign Group --</option>
-                        {(groups || []).map((group) => (
-                          <option key={group.id || group.name} value={group.name}>
-                            {group.name}
-                          </option>
-                        ))}
-                      </select>
-
-                      <div className="scan-actions" style={{ display: "flex", gap: "4px", marginTop: "2px" }}>
-                        <button
-                          type="button"
-                          className="scan-action scan-action--resume"
-                          onClick={() => updateFinding(finding.id)}
-                          style={{ background: "#0284c722", color: "#38bdf8", border: "1px solid #0284c744", padding: "2px 8px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem" }}
-                        >
-                          Save
-                        </button>
-                        <button
-                          type="button"
-                          className="scan-action scan-action--cancel"
-                          onClick={() => markFalsePositive(finding.id)}
-                          style={{ background: "#451a1a", color: "#fca5a5", border: "1px solid #7f1d1d", padding: "2px 8px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem" }}
-                        >
-                          False Positive
-                        </button>
-                        <button
-                          type="button"
-                          className="scan-action scan-action--delete"
-                          onClick={() => deleteFinding(finding.id)}
-                          style={{ background: "#7f1d1d22", color: "#f87171", border: "1px solid #7f1d1d66", padding: "2px 8px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem" }}
-                          title="Delete finding"
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                  </td>
-
-                  {/* Verification Status */}
-                  <td data-label="Verification" style={{ padding: "12px" }}>
-                    <select
-                      className="scan-select"
-                      value={draft.verification_state}
-                      onChange={(event) => {
-                        const verification_state = event.target.value;
-                        let nextStatus = draft.status || "open";
-                        if (verification_state === "scheduled") nextStatus = "in_progress";
-                        if (verification_state === "verified") nextStatus = "resolved";
-                        setAssignmentState((current) => ({ ...current, [finding.id]: { ...draft, verification_state, status: nextStatus } }));
-                      }}
-                      style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "4px 8px", borderRadius: "4px", fontSize: "0.8rem" }}
-                    >
-                      <option value="pending">Pending</option>
-                      <option value="unverified">Unverified</option>
-                      <option value="in_review">In Review</option>
-                      <option value="scheduled">Scheduled</option>
-                      <option value="verified">Verified</option>
-                    </select>
-                  </td>
-
-                  {/* AI Recommendation */}
-                  <td data-label="AI Recommendation" style={{ padding: "12px", fontSize: "0.85rem", color: "#cbd5e1" }}>
-                    <div className="recommendation-cell">
-                      <span>{recommendationPreview(finding)}</span>
-                      {(aiRecommendations[finding.id] || finding.ai_recommendation || "").length > 112 && (
-                        <button
-                          type="button"
-                          className="recommendation-cell__toggle"
-                          onClick={() => setExpandedRecommendations((current) => ({ ...current, [finding.id]: !current[finding.id] }))}
-                          style={{ background: "none", border: "none", color: "#38bdf8", cursor: "pointer", fontSize: "0.75rem", padding: 0, marginTop: "4px" }}
-                        >
-                          {expandedRecommendations[finding.id] ? "See less" : "See more"}
-                        </button>
-                      )}
-                    </div>
-                  </td>
-
-                  {/* Status */}
-                  <td data-label="Status" style={{ padding: "12px" }}>
-                    <select
-                      className="scan-select"
-                      value={draft.status}
-                      onChange={(event) => {
-                        const status = event.target.value;
-                        let nextVerification = draft.verification_state || "pending";
-                        if (status === "resolved" || status === "RESOLVED") nextVerification = "verified";
-                        else if ((status === "in_progress" || status === "IN_PROGRESS") && nextVerification === "pending") nextVerification = "scheduled";
-                        setAssignmentState((current) => ({ ...current, [finding.id]: { ...draft, status, verification_state: nextVerification } }));
-                      }}
-                      style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "4px 8px", borderRadius: "4px", fontSize: "0.8rem" }}
-                    >
-                      <option value="open">Open</option>
-                      <option value="in_progress">In Progress</option>
-                      <option value="resolved">Resolved</option>
-                    </select>
+              {!visibleFindings.length && (
+                <tr>
+                  <td colSpan={8} className="fx-empty">
+                    <strong>{emptyMessage}</strong>
+                    <span>Nothing matches the current filters.</span>
                   </td>
                 </tr>
-              );
-            })}
-
-            {/* Empty State - Absolute No Mock Data */}
-            {!visibleFindings.length && (
-              <tr>
-                <td colSpan="12" style={{ textAlign: "center", padding: "48px 16px", color: "#64748b" }}>
-                  <p style={{ fontSize: "1rem", fontWeight: 600, color: "#94a3b8", margin: 0 }}>
-                    {getEmptyStateMessage()}
-                  </p>
-                  <p style={{ fontSize: "0.85rem", margin: "4px 0 0 0" }}>
-                    No vulnerability findings matched your filter or search criteria.
-                  </p>
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Pagination Bar */}
-      <div className="pagination-bar" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "20px", color: "#94a3b8", fontSize: "0.875rem" }}>
-        <span>
-          Showing {visibleFindings.length ? pageIndex * pageSize + 1 : 0}-{Math.min((pageIndex + 1) * pageSize, filteredAndSortedFindings.length)} of {filteredAndSortedFindings.length} findings
-        </span>
-        <div className="scan-actions" style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-          <button
-            type="button"
-            className="scan-action"
-            disabled={pageIndex === 0}
-            onClick={() => setPageIndex((current) => Math.max(current - 1, 0))}
-            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "6px 12px", borderRadius: "6px", cursor: pageIndex === 0 ? "not-allowed" : "pointer" }}
-          >
-            Previous
-          </button>
-          <span className="pagination-page">
-            Page {pageIndex + 1} of {totalPages}
-          </span>
-          <button
-            type="button"
-            className="scan-action"
-            disabled={pageIndex >= totalPages - 1}
-            onClick={() => setPageIndex((current) => Math.min(current + 1, totalPages - 1))}
-            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "6px 12px", borderRadius: "6px", cursor: pageIndex >= totalPages - 1 ? "not-allowed" : "pointer" }}
-          >
-            Next
-          </button>
+              )}
+            </tbody>
+          </table>
         </div>
+
+        <div className="fx-pager">
+          <span>
+            {visibleFindings.length ? pageIndex * pageSize + 1 : 0}–{Math.min((pageIndex + 1) * pageSize, filteredAndSortedFindings.length)} of {filteredAndSortedFindings.length}
+          </span>
+          <div className="fx-pager__controls">
+            <label>
+              <span className="fx-sr">Rows per page</span>
+              <select className="scan-select" value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>
+                <option value={10}>10 rows</option>
+                <option value={25}>25 rows</option>
+                <option value={50}>50 rows</option>
+                <option value={100}>100 rows</option>
+              </select>
+            </label>
+            <button type="button" className="nw-btn" disabled={pageIndex === 0} onClick={() => setPageIndex((current) => Math.max(current - 1, 0))}>
+              Previous
+            </button>
+            <span className="nw-mono">{pageIndex + 1} / {totalPages}</span>
+            <button type="button" className="nw-btn" disabled={pageIndex >= totalPages - 1} onClick={() => setPageIndex((current) => Math.min(current + 1, totalPages - 1))}>
+              Next
+            </button>
+          </div>
+        </div>
+      </section>
       </div>
-    </section>
+    </div>
   );
 }

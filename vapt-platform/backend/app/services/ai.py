@@ -29,12 +29,31 @@ _RATE_LIMIT_WINDOW = 60
 _rate_limit_bucket: dict[str, deque[float]] = defaultdict(deque)
 
 
+DEFAULT_OLLAMA_MODEL = "qwen3:4b-instruct-2507-q4_K_M"
+
+
+def _provider() -> str:
+    """Which model backend to use: "ollama" (self-hosted open model), "nvidia-nim", or "" (none)."""
+    explicit = os.getenv("AI_PROVIDER", "").strip().lower()
+    if explicit in {"ollama", "nvidia-nim"}:
+        return explicit
+    if os.getenv("NVIDIA_NIM_API_KEY", "").strip():
+        return "nvidia-nim"
+    if os.getenv("OLLAMA_BASE_URL", "").strip():
+        return "ollama"
+    return ""
+
+
 def _model_name() -> str:
+    if _provider() == "ollama":
+        return os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
     return os.getenv("NVIDIA_NIM_MODEL", "nvidia/llama-3.3-nemotron-super-49b-v1.5")
 
 
 def _candidate_models() -> list[str]:
     configured = _model_name()
+    if _provider() == "ollama":
+        return [configured]
     fallbacks = [
         configured,
         "nvidia/llama-3.3-nemotron-super-49b-v1.5",
@@ -47,6 +66,34 @@ def _candidate_models() -> list[str]:
     return seen
 
 
+_ollama_state: dict[str, Any] = {"at": 0.0, "ready": False, "detail": ""}
+
+
+def _ollama_base() -> str:
+    return os.getenv("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
+
+
+def ollama_model_state() -> dict[str, Any]:
+    """Is the Ollama server up and the model downloaded? Cached 30 s."""
+    if time.time() - _ollama_state["at"] < 30:
+        return _ollama_state
+    model = _model_name()
+    try:
+        r = requests.get(f"{_ollama_base()}/api/tags", timeout=4)
+        r.raise_for_status()
+        names = {m.get("name") for m in r.json().get("models", [])} | {m.get("model") for m in r.json().get("models", [])}
+        ready = model in names or f"{model}:latest" in names
+        detail = "" if ready else f"Model {model} is not downloaded yet."
+    except requests.RequestException as exc:
+        ready, detail = False, f"Ollama is not reachable at {_ollama_base()} ({exc.__class__.__name__})."
+    _ollama_state.update({"at": time.time(), "ready": ready, "detail": detail})
+    return _ollama_state
+
+
+def provider_label() -> str:
+    return _provider() or "local-fallback"
+
+
 def _max_scan_details_length() -> int:
     return int(os.getenv("AI_SCAN_DETAILS_LIMIT", "4000"))
 
@@ -56,27 +103,44 @@ def _rate_limit_per_minute() -> int:
 
 
 def is_nim_configured() -> bool:
-    return bool(os.getenv("NVIDIA_NIM_API_KEY", "").strip())
+    """True when an AI model can answer right now (name kept for older callers)."""
+    provider = _provider()
+    if provider == "nvidia-nim":
+        return bool(os.getenv("NVIDIA_NIM_API_KEY", "").strip())
+    if provider == "ollama":
+        return bool(ollama_model_state()["ready"])
+    return False
 
 
 def ai_status() -> dict:
     configured = is_nim_configured()
+    provider = _provider()
+    pending = provider == "ollama" and not configured
     return {
-        "available": True,
-        "provider": "nvidia-nim" if configured else "local-fallback",
-        "model": _model_name() if configured else "deterministic-local-engine",
-        "status": "ready" if configured else "fallback_ready",
+        "available": configured,
+        "provider": provider if configured else "local-fallback",
+        "model": _model_name() if configured else "rule-based (no AI model)",
+        "status": "ready" if configured else ("model_unavailable" if pending else "not_configured"),
         "capabilities": [
             "risk prioritization",
             "vulnerability explanation",
             "remediation planning",
             "false positive analysis",
             "threat intelligence enrichment",
-            "finding recommendations",
-            "chat assistant",
-        ],
-        "setup_hint": None if configured else "Add NVIDIA_NIM_API_KEY to enable live NVIDIA NIM analysis. Secure local structured responses are active until then.",
+            "remediation plans",
+        ] if configured else ["rule-based remediation steps", "rule-based explanation"],
+        "setup_hint": None if configured else (
+            f"The local AI model isn't ready: {ollama_model_state()['detail']} "
+            f"Run: docker compose exec ollama ollama pull {_model_name()}"
+            if pending else
+            "No AI model is configured. Start the ollama service (self-hosted, open-source) or set NVIDIA_NIM_API_KEY. "
+            "Until then you get scanner guidance, CISA KEV / EPSS facts and rule-based steps, clearly labelled."
+        ),
     }
+
+
+# Analyses whose rule-based fallback would only be a guess (probabilities, exploitation claims, scores).
+MODEL_ONLY_ANALYSES = {"risk-score", "false-positive", "threat-intel"}
 
 
 def enforce_ai_rate_limit(actor: str, analysis_type: str) -> None:
@@ -91,11 +155,19 @@ def enforce_ai_rate_limit(actor: str, analysis_type: str) -> None:
     bucket.append(now)
 
 
-def _nim_request(messages: list[dict[str, str]], *, temperature: float = 0, max_tokens: int = 1200) -> tuple[str, dict[str, Any]]:
-    api_key = os.getenv("NVIDIA_NIM_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("NVIDIA NIM is not configured. Set NVIDIA_NIM_API_KEY in the backend environment.")
-    base_url = os.getenv("NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
+def _nim_request(messages: list[dict[str, str]], *, temperature: float = 0, max_tokens: int = 1200, json_mode: bool = False) -> tuple[str, dict[str, Any]]:
+    provider = _provider()
+    if provider == "ollama":
+        api_key = "ollama"  # Ollama ignores the key; the header keeps the OpenAI-compatible request valid.
+        base_url = f"{_ollama_base()}/v1"
+        timeout = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "240"))  # CPU inference is slow
+        max_tokens = min(max_tokens, int(os.getenv("OLLAMA_MAX_TOKENS", "450")))
+    else:
+        api_key = os.getenv("NVIDIA_NIM_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("No AI model is configured.")
+        base_url = os.getenv("NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
+        timeout = 60
     last_error = None
     for model in _candidate_models():
         url = f"{base_url}/chat/completions"
@@ -113,18 +185,28 @@ def _nim_request(messages: list[dict[str, str]], *, temperature: float = 0, max_
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                     "stream": False,
+                    # Ollama's JSON mode constrains output to valid JSON, so a malformed reply never
+                    # costs a second (slow, CPU-bound) attempt.
+                    **({"response_format": {"type": "json_object"}} if json_mode and provider == "ollama" else {}),
                 },
-                timeout=60,
+                timeout=timeout,
             )
             response.raise_for_status()
             return (model, response.json())
         except requests.RequestException as exc:
             last_error = exc
             continue
-    raise RuntimeError("NVIDIA NIM is temporarily unavailable.") from last_error
+    raise RuntimeError(f"The {provider or 'AI'} model is temporarily unavailable.") from last_error
+
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.S | re.I)
 
 
 def _nim_text(response: dict[str, Any]) -> str:
+    return _THINK_RE.sub("", _raw_text(response)).strip()
+
+
+def _raw_text(response: dict[str, Any]) -> str:
     choices = response.get("choices") or []
     if not choices:
         return ""
@@ -200,7 +282,7 @@ def _log_decision(
 
 def _lookup_cache(db: Session, analysis_type: str, payload: dict[str, Any]) -> AIAnalysisCache | None:
     cache = db.query(AIAnalysisCache).filter(AIAnalysisCache.cache_key == _cache_key(analysis_type, payload)).first()
-    if cache and is_nim_configured() and cache.provider != "nvidia-nim":
+    if cache and is_nim_configured() and cache.provider != provider_label():
         return None
     return cache
 
@@ -214,17 +296,22 @@ def _write_cache(
     payload: dict[str, Any],
     response_payload: dict[str, Any],
 ) -> AIAnalysisCache:
-    cache = AIAnalysisCache(
-        cache_key=_cache_key(analysis_type, payload),
-        analysis_type=analysis_type,
-        provider=provider,
-        model=model,
-        input_fingerprint=_fingerprint(analysis_type, payload),
-        request_payload=payload,
-        response_payload=response_payload,
-        hit_count=0,
-    )
-    db.add(cache)
+    key = _cache_key(analysis_type, payload)
+    cache = db.query(AIAnalysisCache).filter(AIAnalysisCache.cache_key == key).first()
+    if cache:  # replace an older answer (e.g. a rule-based one) instead of colliding on the unique key
+        cache.provider, cache.model, cache.response_payload = provider, model, response_payload
+    else:
+        cache = AIAnalysisCache(
+            cache_key=key,
+            analysis_type=analysis_type,
+            provider=provider,
+            model=model,
+            input_fingerprint=_fingerprint(analysis_type, payload),
+            request_payload=payload,
+            response_payload=response_payload,
+            hit_count=0,
+        )
+        db.add(cache)
     db.commit()
     db.refresh(cache)
     return cache
@@ -331,11 +418,12 @@ def _nim_json_analysis(analysis_type: str, payload: dict[str, Any], response_mod
             {"role": "user", "content": prompt},
         ],
         temperature=0,
+        json_mode=True,
     )
     try:
         parsed = _parse_json_response(_nim_text(response))
         validated = response_model.model_validate(parsed)
-        return ("nvidia-nim", model, validated.model_dump())
+        return (provider_label(), model, validated.model_dump())
     except Exception as exc:
         retry_prompt = _json_retry_prompt(analysis_type, payload, example)
         retry_model, retry_response = _nim_request(
@@ -344,13 +432,14 @@ def _nim_json_analysis(analysis_type: str, payload: dict[str, Any], response_mod
                 {"role": "user", "content": retry_prompt},
             ],
             temperature=0,
+            json_mode=True,
         )
         try:
             parsed = _parse_json_response(_nim_text(retry_response))
             validated = response_model.model_validate(parsed)
-            return ("nvidia-nim", retry_model, validated.model_dump())
+            return (provider_label(), retry_model, validated.model_dump())
         except Exception as retry_exc:
-            raise RuntimeError(f"NVIDIA NIM {analysis_type} analysis failed.") from retry_exc
+            raise RuntimeError(f"The AI model couldn't produce a valid {analysis_type} answer.") from retry_exc
 
 
 def _priority_from_score(score: int) -> str:
@@ -484,10 +573,15 @@ def run_structured_analysis(
         return (cache.provider, cache.model, True, response_payload)
 
     enforce_ai_rate_limit(actor, analysis_type)
+    model_failed = False
     if is_nim_configured():
         try:
             provider, model, response_payload = _nim_json_analysis(analysis_type, sanitized, schema_model)
-        except Exception:
+        except Exception as exc:
+            if analysis_type in MODEL_ONLY_ANALYSES:
+                # A rule-based answer here would only be a guess; report the failure instead.
+                raise RuntimeError(f"The AI model couldn't answer right now ({exc}). Try again in a minute.") from exc
+            model_failed = True
             provider = "local-fallback"
             model = "deterministic-local-engine"
             response_payload = schema_model.model_validate(local_handler(sanitized)).model_dump()
@@ -496,6 +590,9 @@ def run_structured_analysis(
         model = "deterministic-local-engine"
         response_payload = schema_model.model_validate(local_handler(sanitized)).model_dump()
 
+    if model_failed:
+        # Don't cache a fallback produced because the model was briefly unavailable.
+        return (provider, model, False, response_payload)
     cache = _write_cache(db, analysis_type=analysis_type, provider=provider, model=model, payload=sanitized, response_payload=response_payload)
     _log_decision(
         db,
@@ -603,7 +700,7 @@ def generate_finding_recommendations(findings: list[Finding], scan_map: dict[str
                     "recommendation": str(parsed.get("recommendation") or _recommendation_text(finding, scan)).strip(),
                 }
             )
-            providers_used.add("nvidia-nim")
+            providers_used.add(provider_label())
             models_used.append(model)
         except Exception:
             items.append(
@@ -614,7 +711,7 @@ def generate_finding_recommendations(findings: list[Finding], scan_map: dict[str
             )
             providers_used.add("local-fallback")
 
-    provider = "nvidia-nim" if providers_used == {"nvidia-nim"} else "mixed" if "nvidia-nim" in providers_used else "local-fallback"
+    provider = provider_label() if providers_used == {provider_label()} else "mixed" if provider_label() in providers_used else "local-fallback"
     model = models_used[0] if models_used else "deterministic-local-engine"
     return (provider, model, items)
 
@@ -656,7 +753,7 @@ def generate_ai_assistance(mode: str, prompt: str, findings: list[Finding], scan
             )
             content = _nim_text(response)
             if content:
-                return ("nvidia-nim", model, content)
+                return (provider_label(), model, content)
         except Exception:
             pass
     return ("local-fallback", "deterministic-local-engine", "\n".join(lines))

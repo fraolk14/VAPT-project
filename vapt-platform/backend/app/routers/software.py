@@ -10,9 +10,10 @@ from app.database import SessionLocal, get_db
 from app.models.agent import AgentDevice
 from app.models.asset import Asset
 from app.models.software import Software, SoftwareAsset, WhitelistSoftware
+from app.models.finding import AuditLog
+from app.services.security import get_current_user, require_analyst
 from app.services.software_discovery import process_software_governance, run_nmap_service_discovery, run_wmi_discovery
-
-from app.services.security import require_analyst
+from app.services.software_posture import approved_keys, build_software_posture, product_key
 
 router = APIRouter(prefix="/software", tags=["Software Governance"])
 
@@ -86,8 +87,8 @@ def list_software(
             status=sw.status,
             risk_score=sw.risk_score,
             cves=sw.cves or [],
-            ip_address=link.ip_address if (link and link.ip_address) else "127.0.0.1",
-            source=link.source if link else "Nmap -sV Subprocess",
+            ip_address=link.ip_address if link else None,
+            source=link.source if link else None,
             discovered_at=sw.discovered_at,
             updated_at=sw.updated_at,
         )
@@ -102,50 +103,49 @@ def list_whitelist(db: Session = Depends(get_db)):
     return db.query(WhitelistSoftware).order_by(WhitelistSoftware.created_at.desc()).all()
 
 
+@router.get("/posture")
+def software_posture(db: Session = Depends(get_db)):
+    """Installed software from endpoint agents, grouped by product, with approval and policy category."""
+    return build_software_posture(db)
+
+
 @router.post("/whitelist", response_model=WhitelistResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_analyst)])
-def add_to_whitelist(payload: WhitelistCreate, db: Session = Depends(get_db)):
-    """Add a software to the approved whitelist in PostgreSQL and update existing software status."""
-    existing = db.query(WhitelistSoftware).filter(WhitelistSoftware.name.ilike(payload.name.strip())).first()
-    if existing:
-        raise HTTPException(status_code=409, detail="Software is already present in the approved whitelist.")
-    
-    entry = WhitelistSoftware(
-        name=payload.name.strip(),
-        vendor=payload.vendor,
-        reason=payload.reason,
-    )
+def add_to_whitelist(payload: WhitelistCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Approve a product. Every version of it (same product name) counts as approved."""
+    name = payload.name.strip()
+    key = product_key(name)
+    if not name or key in approved_keys(db):
+        raise HTTPException(status_code=409, detail="That product is already approved.")
+
+    entry = WhitelistSoftware(name=name, vendor=payload.vendor, reason=(payload.reason or "").strip() or None)
     db.add(entry)
-    
-    # Update status of any existing matching software in PostgreSQL database
-    matching_sw = db.query(Software).filter(Software.name.ilike(payload.name.strip())).all()
-    for sw in matching_sw:
-        sw.status = "APPROVED"
-        sw.updated_at = datetime.now(timezone.utc)
-    
+    for sw in db.query(Software).all():
+        if product_key(sw.name) == key:
+            sw.status = "APPROVED"
+            sw.updated_at = datetime.now(timezone.utc)
+    db.flush()
+    db.add(AuditLog(actor=user.username, action="software.approve", resource_type="software_whitelist",
+                    resource_id=str(entry.id), details={"name": name, "reason": entry.reason}))
     db.commit()
     db.refresh(entry)
     return entry
 
 
 @router.delete("/whitelist/{whitelist_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_analyst)])
-def remove_from_whitelist(whitelist_id: int, db: Session = Depends(get_db)):
-    """Remove a software from the approved whitelist."""
+def remove_from_whitelist(whitelist_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Revoke a product's approval."""
     entry = db.get(WhitelistSoftware, whitelist_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Whitelist entry not found.")
-    
-    sw_name = entry.name
+
+    key = product_key(entry.name)
+    db.add(AuditLog(actor=user.username, action="software.revoke", resource_type="software_whitelist",
+                    resource_id=str(entry.id), details={"name": entry.name, "reason": entry.reason}))
     db.delete(entry)
-    
-    # Re-evaluate matching software status back to UNAUTHORIZED / VULNERABLE
-    matching_sw = db.query(Software).filter(Software.name.ilike(sw_name)).all()
-    for sw in matching_sw:
-        if sw.risk_score >= 7.0 or len(sw.cves or []) > 0:
-            sw.status = "VULNERABLE"
-        else:
-            sw.status = "UNAUTHORIZED"
-        sw.updated_at = datetime.now(timezone.utc)
-        
+    for sw in db.query(Software).all():
+        if product_key(sw.name) == key:
+            sw.status = "VULNERABLE" if sw.cves else "UNAUTHORIZED"
+            sw.updated_at = datetime.now(timezone.utc)
     db.commit()
     return None
 
@@ -201,67 +201,6 @@ def discover_software_on_target(payload: DiscoverRequest, db: Session = Depends(
         processed.append(sw)
         
     return processed
-
-
-@router.post("/bulk-whitelist", dependencies=[Depends(require_analyst)])
-def bulk_whitelist_software(db: Session = Depends(get_db)):
-    """Bulk approve all discovered software items across all managed endpoints and update whitelist baseline policy."""
-    from app.models.finding import Finding
-    all_sw = db.query(Software).all()
-    count = 0
-    for sw in all_sw:
-        sw.status = "APPROVED"
-        sw.updated_at = datetime.now(timezone.utc)
-        
-        existing = db.query(WhitelistSoftware).filter(WhitelistSoftware.name.ilike(sw.name.strip())).first()
-        if not existing:
-            wl_entry = WhitelistSoftware(
-                name=sw.name.strip(),
-                vendor=sw.vendor,
-                reason="Bulk Whitelisted across all endpoints",
-            )
-            db.add(wl_entry)
-        count += 1
-
-    db.query(Finding).filter(Finding.category == "Software Drift").update({Finding.status: "RESOLVED"}, synchronize_session=False)
-    db.commit()
-    return {"message": f"Successfully whitelisted {count} software applications across all managed endpoints.", "whitelisted_count": count}
-
-
-@router.post("/discover-subnet", dependencies=[Depends(require_analyst)])
-def discover_subnet_software(payload: dict[str, Any], db: Session = Depends(get_db)):
-    """Run real software discovery across a specified subnet range across all endpoints."""
-    subnet = payload.get("subnet", "").strip() or "192.168.10.0/24"
-    assets = db.query(Asset).all()
-    results = []
-    
-    for a in assets:
-        target = a.ip_address or a.hostname
-        if not target:
-            continue
-        try:
-            wmi_res = run_wmi_discovery(target)
-            nmap_res = run_nmap_service_discovery(target)
-            
-            for item in wmi_res + nmap_res:
-                sw = process_software_governance(
-                    db,
-                    software_name=item["name"],
-                    vendor=item.get("vendor"),
-                    version=item.get("version"),
-                    category=item.get("category", "Application"),
-                    asset_id=str(a.id),
-                    installed_path=item.get("installed_path"),
-                    ip_address=a.ip_address or "127.0.0.1",
-                    hostname=a.hostname,
-                    endpoint_name=a.asset_name or a.hostname,
-                    source="Subnet WMI/Nmap Discovery",
-                )
-                results.append(sw)
-        except Exception as e:
-            print(f"[SubnetDiscovery] Error discovering {target}: {e}")
-
-    return {"message": f"Discovered software across subnet {subnet}.", "total_items_found": len(results)}
 
 
 @router.get("/managed-devices")

@@ -13,6 +13,7 @@ from app.routers import asset as asset_router
 from app.routers import auth as auth_router
 from app.routers import dashboard as dashboard_router
 from app.routers import finding as finding_router
+from app.routers import hosts as hosts_router
 from app.routers import iam as iam_router
 from app.routers import integrations as integrations_router
 from app.routers import misconfiguration as misconfiguration_router
@@ -95,6 +96,7 @@ for _router in (
     alerts_router,
     platform_router,
     operations_router,
+    hosts_router,
 ):
     app.include_router(_router.router, dependencies=SIGNED_IN)
 

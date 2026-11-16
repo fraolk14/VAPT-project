@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.models.asset import Asset
 from app.models.finding import Finding
-from app.models.software import Software, SoftwareAsset, WhitelistSoftware
+from app.models.software import Software, SoftwareAsset
 
 logger = logging.getLogger(__name__)
 NVD_API_URL = os.getenv("NVD_API_URL", "https://services.nvd.nist.gov/rest/json/cves/2.0")
@@ -128,12 +128,12 @@ def run_nmap_service_discovery(host: str) -> list[dict]:
                     if len(parts) >= 3 and "open" in parts[1]:
                         port = parts[0]
                         svc_name = parts[2]
-                        version_info = " ".join(parts[3:]) if len(parts) > 3 else "1.0"
+                        version_info = " ".join(parts[3:]) if len(parts) > 3 else None
                         if svc_name and svc_name != "unknown":
                             discovered.append({
                                 "name": f"{svc_name.title()} Service ({port})",
                                 "vendor": svc_name.title(),
-                                "version": version_info or "1.0",
+                                "version": version_info,
                                 "category": "Network",
                             })
     except Exception as exc:
@@ -141,17 +141,18 @@ def run_nmap_service_discovery(host: str) -> list[dict]:
 
     # Socket Banner Probing fallback if nmap is unreachable or blocked
     if not discovered:
+        # Labels name the port's usual protocol only; the product is unknown unless the banner says so.
         common_ports = [
-            (80, "HTTP Web Server", "Web"),
-            (443, "HTTPS Web Server", "Web"),
-            (22, "SSH Server", "Network"),
-            (21, "FTP Server", "Network"),
-            (25, "SMTP Mail Server", "Network"),
-            (3306, "MySQL Database Server", "Database"),
-            (5432, "PostgreSQL Database Server", "Database"),
-            (6379, "Redis Server", "Database"),
-            (8000, "FastAPI Web Application", "Web"),
-            (8080, "Nginx / Web Proxy Server", "Web"),
+            (80, "HTTP", "Web"),
+            (443, "HTTPS", "Web"),
+            (22, "SSH", "Network"),
+            (21, "FTP", "Network"),
+            (25, "SMTP", "Network"),
+            (3306, "MySQL protocol", "Database"),
+            (5432, "PostgreSQL protocol", "Database"),
+            (6379, "Redis protocol", "Database"),
+            (8000, "HTTP (alt)", "Web"),
+            (8080, "HTTP (alt)", "Web"),
         ]
         for port, service_label, category in common_ports:
             try:
@@ -169,9 +170,9 @@ def run_nmap_service_discovery(host: str) -> list[dict]:
                         pass
                     s.close()
                     discovered.append({
-                        "name": f"{service_label} (Port {port})",
-                        "vendor": service_label.split()[0],
-                        "version": banner[:40] if banner else "Detected",
+                        "name": f"{service_label} service (Port {port})",
+                        "vendor": None,
+                        "version": banner[:40] if banner else None,
                         "category": category,
                     })
             except Exception:
@@ -195,11 +196,14 @@ def process_software_governance(
     commit: bool = True,
     query_nvd: bool = False,
 ) -> Software:
-    """Classify software status (APPROVED, VULNERABLE, UNAUTHORIZED) using whitelist table & fast CVE lookup."""
-    # 1. Check Whitelist table
-    whitelist_entry = db.query(WhitelistSoftware).filter(WhitelistSoftware.name.ilike(f"%{software_name}%")).first()
-    
-    # 2. Fast CVE lookup (cached or heuristic)
+    """Record a program and classify it APPROVED (on the approved list) or UNAUTHORIZED.
+
+    VULNERABLE is only set from real NVD results (query_nvd=True). Name-based guesses are not
+    turned into CVEs or risk scores.
+    """
+    from app.services.software_posture import approved_keys, product_key
+
+    approved = product_key(software_name) in approved_keys(db)
     cve_ids, risk_score = ([], 0.0)
     if query_nvd:
         cve_ids, risk_score = query_nvd_for_cves(software_name, version)
@@ -207,19 +211,10 @@ def process_software_governance(
         cache_key = f"{software_name}:{version or ''}".strip().lower()
         if cache_key in NVD_CACHE:
             cve_ids, risk_score = NVD_CACHE[cache_key]
-        else:
-            name_lower = software_name.lower()
-            if any(k in name_lower for k in ["anydesk", "teamviewer", "logmein", "vnc", "torrent", "utorrent", "bittorrent"]):
-                risk_score = 6.5
-            elif any(k in name_lower for k in ["wireshark", "nmap", "putty", "mimikatz", "denuvo"]):
-                risk_score = 5.0
-            elif any(k in name_lower for k in ["python 2.", "openssl 1.0", "apache 2.2"]):
-                risk_score = 7.5
-                cve_ids = ["CVE-2021-41773", "CVE-2022-22720"]
 
-    if whitelist_entry:
+    if approved:
         status = "APPROVED"
-    elif risk_score >= 7.0 or len(cve_ids) > 0:
+    elif cve_ids:
         status = "VULNERABLE"
     else:
         status = "UNAUTHORIZED"

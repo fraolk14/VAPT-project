@@ -1,10 +1,11 @@
 # VAP Windows Endpoint Agent - GPO / Intune / Manual Deployment Script
-$ErrorActionPreference = "Stop"
-
+# Note: param() must be the first statement in a PowerShell script.
 param(
     [string]$BackendUrl = "http://localhost:18080",
     [string]$EnrollmentToken = ""
 )
+
+$ErrorActionPreference = "Stop"
 
 if (-not $EnrollmentToken) {
     Write-Host "Usage: .\install-agent.ps1 -BackendUrl 'http://YOUR_SERVER_IP:18080' -EnrollmentToken 'vap_tok_...'" -ForegroundColor Yellow

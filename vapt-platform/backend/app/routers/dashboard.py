@@ -1,6 +1,6 @@
 from collections import Counter
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -14,6 +14,7 @@ from app.schemas.dashboard import (
     DashboardSummary,
     DashboardTargetSummary,
 )
+from app.services.analytics import build_analytics
 from app.services.risk_engine import summarize_risk
 
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
@@ -60,7 +61,7 @@ def _extract_owasp_category(finding: Finding) -> str | None:
     for category, terms in OWASP_CATEGORY_MAP:
         if any(term in haystack for term in terms):
             return category
-    if finding.source == "zap" and "OWASP Top 10" in compliance_map:
+    if finding.source in {"zap", "web", "nuclei", "testssl"} and "OWASP Top 10" in compliance_map:
         return "A05:2021 Security Misconfiguration"
     return None
 
@@ -213,3 +214,9 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         active_scans=active_scans_count,
         risk_score=risk["risk_score"],
     )
+
+
+@router.get("/analytics")
+def get_security_analytics(days: int = Query(90, ge=7, le=730), db: Session = Depends(get_db)):
+    """Trends and remediation performance computed from stored findings, scans and assets."""
+    return build_analytics(db, days=days)

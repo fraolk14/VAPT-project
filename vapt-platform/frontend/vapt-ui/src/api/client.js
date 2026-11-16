@@ -16,4 +16,18 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// When the server rejects our token (expired, revoked, user deactivated), drop it and tell the
+// app once, so it returns to the sign-in screen instead of polling with a dead session.
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const url = error?.config?.url || "";
+    if (error?.response?.status === 401 && !url.includes("/auth/login") && window.localStorage.getItem("vapt_token")) {
+      window.localStorage.removeItem("vapt_token");
+      window.dispatchEvent(new CustomEvent("vapt:session-ended"));
+    }
+    return Promise.reject(error);
+  },
+);
+
 export default api;

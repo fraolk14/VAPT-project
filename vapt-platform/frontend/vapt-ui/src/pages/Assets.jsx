@@ -1,34 +1,18 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import {
-  FiServer,
-  FiPlus,
-  FiEdit,
-  FiTrash2,
-  FiFilter,
-  FiRefreshCw,
-  FiSearch,
-  FiShield,
-  FiAlertTriangle,
-  FiCheckCircle,
-  FiXCircle,
-  FiGlobe,
-  FiCpu,
-  FiHardDrive,
-  FiX,
-  FiLayers,
-  FiUser,
-  FiActivity,
-  FiExternalLink,
-  FiZap,
-} from "react-icons/fi";
-import api from "../api/client";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 
-const emptyAssetForm = {
+import api from "../api/client";
+import AssetConstellation from "../components/cc/AssetConstellation";
+import { isExternal, isManaged, normalizeCrit, normalizeEnv } from "../components/cc/ccConstants";
+import "../commandcenter.css";
+import "../targets.css";
+
+const CRITS = ["critical", "high", "medium", "low"];
+const EMPTY_FORM = {
   hostname: "",
   ip_address: "",
   url: "",
-  os_type: "Ubuntu 22.04",
+  os_type: "",
   owner: "",
   environment: "Production",
   criticality: "Medium",
@@ -37,816 +21,560 @@ const emptyAssetForm = {
   asset_type: "OS",
   is_active: true,
 };
+const TYPE_OPTIONS = [
+  { value: "OS", label: "Server / host" },
+  { value: "Website", label: "Website / web app" },
+  { value: "Network", label: "Network device" },
+  { value: "Endpoint", label: "Endpoint" },
+];
 
-export default function Assets({ assets: propAssets = [], onAssetCreated }) {
-  const [assets, setAssets] = useState(propAssets);
-  const [loading, setLoading] = useState(!propAssets || propAssets.length === 0);
-  const [search, setSearch] = useState("");
+const titleCase = (v) => String(v || "").replace(/(^|[\s_-])(\w)/g, (_, sep, c) => `${sep === "_" ? " " : sep}${c.toUpperCase()}`);
+const errorText = (err, fallback) => {
+  if (err?.response?.status === 403) return "You don't have permission to do that. Ask an analyst or admin.";
+  const detail = err?.response?.data?.detail;
+  if (Array.isArray(detail)) return detail.map((d) => d.msg).join("; ");
+  return typeof detail === "string" ? detail : fallback;
+};
+const riskBand = (score) => (score >= 70 ? "high" : score >= 40 ? "medium" : "low");
+const targetOf = (asset) => asset.hostname || asset.asset_name || asset.ip_address || asset.url || "unknown";
 
-  useEffect(() => {
-    if (propAssets && propAssets.length > 0) {
-      setAssets(propAssets);
-      setLoading(false);
-    }
-  }, [propAssets]);
+// ---------- detail drawer ----------
 
-  // Filters
-  const [classificationFilter, setClassificationFilter] = useState("all");
-  const [typeFilter, setTypeFilter] = useState("all");
-  const [envFilter, setEnvFilter] = useState("all");
-  const [criticalityFilter, setCriticalityFilter] = useState("all");
-  const [riskFilter, setRiskFilter] = useState("all");
-  const [managedFilter, setManagedFilter] = useState("all");
-
-  // Modals & Drawers
-  const [modalState, setModalState] = useState(null); // null | "create" | "edit"
-  const [selectedAsset, setSelectedAsset] = useState(null);
-  const [detailDrawerAsset, setDetailDrawerAsset] = useState(null);
-  const [assetMisconfigs, setAssetMisconfigs] = useState([]);
-  const [loadingMisconfigs, setLoadingMisconfigs] = useState(false);
-
-  const [form, setForm] = useState(emptyAssetForm);
-  const [submitting, setSubmitting] = useState(false);
-  const [feedback, setFeedback] = useState({ message: "", tone: "" });
-
-  const fetchAssets = async () => {
-    setLoading(true);
-    try {
-      const response = await api.get("/assets/");
-      setAssets(response.data || []);
-    } catch (err) {
-      console.error("Failed to load assets:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
+function DetailDrawer({ asset, canOperate, onClose, onEdit, onDelete }) {
+  const [details, setDetails] = useState(null);
+  const [error, setError] = useState("");
+  const [tab, setTab] = useState("findings");
+  const closeRef = useRef(null);
 
   useEffect(() => {
-    if (!propAssets || propAssets.length === 0) {
-      fetchAssets();
-    }
-  }, []);
+    let ignore = false;
+    api.get(`/assets/${asset.id}/details`)
+      .then((res) => { if (!ignore) setDetails(res.data); })
+      .catch(() => { if (!ignore) setError("Couldn't load details for this target."); });
+    closeRef.current?.focus();
+    const onKey = (event) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      ignore = true;
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [asset.id, onClose]);
 
-  const [assetDetails, setAssetDetails] = useState(null);
-
-  const fetchAssetMisconfigurations = async (asset) => {
-    setDetailDrawerAsset(asset);
-    setLoadingMisconfigs(true);
-    try {
-      const res = await api.get(`/assets/${asset.id}/details`);
-      setAssetDetails(res.data);
-      setAssetMisconfigs(res.data.misconfigurations || []);
-    } catch (err) {
-      console.error("Failed to load asset details:", err);
-      try {
-        const legacyRes = await api.get(`/assets/${asset.id}/misconfigurations`);
-        setAssetMisconfigs(legacyRes.data || []);
-      } catch (e) {
-        setAssetMisconfigs([]);
-      }
-    } finally {
-      setLoadingMisconfigs(false);
-    }
-  };
-
-  const handleCreateSubmit = async (e) => {
-    e.preventDefault();
-    setSubmitting(true);
-    setFeedback({ message: "", tone: "" });
-    try {
-      const res = await api.post("/assets/", form);
-      setAssets((prev) => [res.data, ...prev]);
-      onAssetCreated?.(res.data);
-      setModalState(null);
-      setForm(emptyAssetForm);
-      setFeedback({
-        message: `Asset "${res.data.hostname || res.data.ip_address}" created. Automatic background discovery scan launched!`,
-        tone: "success",
-      });
-    } catch (err) {
-      setFeedback({
-        message: err?.response?.data?.detail || "Failed to create asset.",
-        tone: "error",
-      });
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleEditSubmit = async (e) => {
-    e.preventDefault();
-    if (!selectedAsset) return;
-    setSubmitting(true);
-    try {
-      const res = await api.put(`/assets/${selectedAsset.id}`, form);
-      setAssets((prev) => prev.map((a) => (a.id === selectedAsset.id ? res.data : a)));
-      setModalState(null);
-      setFeedback({ message: "Asset updated successfully.", tone: "success" });
-    } catch (err) {
-      setFeedback({ message: err?.response?.data?.detail || "Failed to update asset.", tone: "error" });
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleDelete = async (asset) => {
-    if (!window.confirm(`Delete asset "${asset.hostname || asset.ip_address}"?`)) return;
-    try {
-      await api.delete(`/assets/${asset.id}`);
-      setAssets((prev) => prev.filter((a) => a.id !== asset.id));
-      if (detailDrawerAsset?.id === asset.id) setDetailDrawerAsset(null);
-      setFeedback({ message: "Asset deleted.", tone: "success" });
-    } catch (err) {
-      setFeedback({ message: err?.response?.data?.detail || "Failed to delete asset.", tone: "error" });
-    }
-  };
-
-  const filteredAssets = useMemo(() => {
-    return assets.filter((a) => {
-      const isManaged = (a.tags || []).some((t) => t.includes("managed") || t.includes("agent")) || (a.asset_type || "").toLowerCase().includes("endpoint");
-      const matchesManaged = managedFilter === "all" || (managedFilter === "managed" ? isManaged : !isManaged);
-
-      const matchesClassification =
-        classificationFilter === "all" ||
-        (a.classification || "").toLowerCase() === classificationFilter.toLowerCase() ||
-        (a.exposure || "").toLowerCase() === classificationFilter.toLowerCase();
-
-      const matchesType = typeFilter === "all" || (a.asset_type || "").toLowerCase() === typeFilter.toLowerCase();
-      const matchesEnv = envFilter === "all" || (a.environment || "").toLowerCase() === envFilter.toLowerCase();
-      const matchesCriticality = criticalityFilter === "all" || (a.criticality || "").toLowerCase() === criticalityFilter.toLowerCase();
-      const matchesRisk = riskFilter === "all" || (a.risk_level || "").toLowerCase() === riskFilter.toLowerCase();
-
-      const searchBlob = `${a.hostname || ""} ${a.ip_address || ""} ${a.url || ""} ${a.owner || ""} ${a.os_type || ""} ${a.os || ""}`.toLowerCase();
-      const matchesSearch = !search || searchBlob.includes(search.toLowerCase());
-
-      return matchesManaged && matchesClassification && matchesType && matchesEnv && matchesCriticality && matchesRisk && matchesSearch;
-    });
-  }, [assets, managedFilter, classificationFilter, typeFilter, envFilter, criticalityFilter, riskFilter, search]);
-
-  const summary = useMemo(() => {
-    const total = assets.length;
-    const managedCount = assets.filter((a) => (a.tags || []).some((t) => t.includes("managed") || t.includes("agent")) || (a.asset_type || "").toLowerCase().includes("endpoint")).length;
-    const internal = assets.filter((a) => (a.classification || a.exposure || "").toLowerCase().includes("internal")).length;
-    const external = total - internal;
-    const criticalCount = assets.filter((a) => (a.criticality || "").toLowerCase() === "critical").length;
-    return { total, managedCount, internal, external, criticalCount };
-  }, [assets]);
+  const findings = [...(details?.other_findings || []), ...(details?.shadow_it || [])];
+  const misconfigs = details?.misconfigurations || [];
+  const software = details?.installed_software || [];
+  const unauthorized = details?.unauthorized_software || [];
+  const agent = details?.agent_device;
+  const tabs = [
+    { key: "findings", label: "Findings", count: findings.length },
+    { key: "misconfig", label: "Misconfigurations", count: misconfigs.length },
+    { key: "software", label: "Software", count: software.length + unauthorized.length },
+    { key: "agent", label: "Agent", count: agent ? 1 : 0 },
+  ];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "24px", padding: "8px 0" }}>
-      {/* Top Banner Header */}
-      <div
-        className="panel"
-        style={{
-          background: "linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.85))",
-          border: "1px solid rgba(148, 163, 184, 0.15)",
-          borderRadius: "16px",
-          padding: "20px 24px",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          flexWrap: "wrap",
-          gap: "16px",
-        }}
+    <div className="ti-drawer-backdrop" onClick={onClose}>
+      <aside
+        className="ti-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ti-drawer-title"
+        onClick={(event) => event.stopPropagation()}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
-          <div style={{ background: "rgba(56, 189, 248, 0.1)", padding: "12px", borderRadius: "12px", border: "1px solid rgba(56, 189, 248, 0.2)" }}>
-            <FiServer style={{ color: "#38bdf8", fontSize: "24px" }} />
-          </div>
+        <header className="ti-drawer__head">
           <div>
-            <h1 style={{ fontSize: "1.5rem", fontWeight: "700", color: "#f8fafc", margin: 0 }}>
-              Asset Inventory & Scope Engine
-            </h1>
-            <p style={{ color: "#94a3b8", fontSize: "0.88rem", margin: 0 }}>
-              Real-time database asset telemetry, classification, misconfiguration correlation, and immediate discovery scanning.
-            </p>
+            <span className={`ti-crit ti-crit--${normalizeCrit(asset.criticality)}`}>{normalizeCrit(asset.criticality)}</span>
+            <h2 id="ti-drawer-title">{targetOf(asset)}</h2>
+            <p className="cc-mono cc-muted">{[asset.ip_address, asset.url].filter(Boolean).join(" · ")}</p>
           </div>
+          <button ref={closeRef} type="button" className="cc-icon" aria-label="Close details" onClick={onClose}>×</button>
+        </header>
+
+        <dl className="ti-facts">
+          <div><dt>Type</dt><dd>{titleCase(asset.asset_type)}</dd></div>
+          <div><dt>Environment</dt><dd>{titleCase(normalizeEnv(asset.environment))}</dd></div>
+          <div><dt>Exposure</dt><dd>{isExternal(asset) ? "External" : "Internal"}</dd></div>
+          <div><dt>Risk score</dt><dd className="cc-mono">{Number(asset.risk_score || 0).toFixed(1)}</dd></div>
+          <div><dt>Operating system</dt><dd>{asset.os_type || asset.os || "—"}</dd></div>
+          <div><dt>Owner</dt><dd>{asset.owner || "Unassigned"}</dd></div>
+        </dl>
+
+        <div className="ti-drawer__actions">
+          <Link className="cc-btn" to={`/findings?target=${encodeURIComponent(asset.url || asset.ip_address || asset.hostname)}`}>Open in Findings</Link>
+          {canOperate && <button type="button" className="cc-btn" onClick={() => onEdit(asset)}>Edit</button>}
+          {canOperate && <button type="button" className="cc-btn so-danger" onClick={() => onDelete(asset)}>Delete</button>}
         </div>
 
-        <div style={{ display: "flex", gap: "12px" }}>
-          <a
-            href="/agent-management"
-            className="btn btn--secondary"
-            style={{ height: "38px", padding: "0 14px", display: "flex", alignItems: "center", gap: "6px", borderColor: "#4fd1c5", color: "#4fd1c5", textDecoration: "none" }}
-          >
-            📡 Deploy Agent (.exe)
-          </a>
-
-          <button
-            onClick={() => {
-              setForm(emptyAssetForm);
-              setModalState("create");
-            }}
-            className="btn btn--primary"
-            style={{ height: "38px", padding: "0 16px", display: "flex", alignItems: "center", gap: "6px" }}
-          >
-            <FiPlus /> Add Asset
-          </button>
-
-          <button
-            onClick={fetchAssets}
-            className="btn btn--secondary"
-            style={{ height: "38px", padding: "0 14px", display: "flex", alignItems: "center", gap: "6px" }}
-          >
-            <FiRefreshCw className={loading ? "spin" : ""} /> Refresh
-          </button>
+        <div className="cc-range ti-tabs" role="tablist" aria-label="Target details">
+          {tabs.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              role="tab"
+              aria-selected={tab === t.key}
+              aria-pressed={tab === t.key}
+              onClick={() => setTab(t.key)}
+            >
+              {t.label} <span className="cc-muted">{t.count}</span>
+            </button>
+          ))}
         </div>
+
+        <div className="ti-drawer__body" role="tabpanel">
+          {error && <p className="so-error">{error}</p>}
+          {!details && !error && <p className="cc-empty">Loading…</p>}
+
+          {details && tab === "findings" && (
+            findings.length ? (
+              <ul className="ti-items">
+                {findings.map((f) => (
+                  <li key={f.id}>
+                    <span className={`nw-sev nw-sev--${String(f.severity || "info").toLowerCase()}`}>{f.severity || "info"}</span>
+                    <div>
+                      <Link to={`/findings/${f.id}`} className="ti-item__title">{f.title}</Link>
+                      <div className="cc-muted">{f.source}{f.cve_id ? ` · ${f.cve_id}` : ""}{f.status ? ` · ${String(f.status).replace(/_/g, " ")}` : ""}</div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="cc-empty">No findings recorded for this target.</p>
+          )}
+
+          {details && tab === "misconfig" && (
+            misconfigs.length ? (
+              <ul className="ti-items">
+                {misconfigs.map((m) => (
+                  <li key={m.id}>
+                    <span className={`nw-sev nw-sev--${String(m.severity || "info").toLowerCase()}`}>{m.severity}</span>
+                    <div>
+                      <span className="ti-item__title">{m.issue}</span>
+                      <div className="cc-muted">{m.detected_by}{m.cve ? ` · ${m.cve}` : ""} · {m.status}</div>
+                      {m.remediation && <p className="ti-item__fix">{m.remediation}</p>}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="cc-empty">No misconfigurations recorded.</p>
+          )}
+
+          {details && tab === "software" && (
+            software.length || unauthorized.length ? (
+              <ul className="ti-items">
+                {unauthorized.map((s) => (
+                  <li key={`u-${s.id}`}>
+                    <span className="nw-sev nw-sev--high">Unauth.</span>
+                    <div><span className="ti-item__title">{s.name}</span><div className="cc-muted">{[s.vendor, s.version].filter(Boolean).join(" · ")}</div></div>
+                  </li>
+                ))}
+                {software.map((s) => (
+                  <li key={`s-${s.id}`}>
+                    <span className="nw-sev nw-sev--info">{s.status || "seen"}</span>
+                    <div><span className="ti-item__title">{s.name}</span><div className="cc-muted">{[s.vendor, s.version].filter(Boolean).join(" · ")}</div></div>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="cc-empty">No software inventory. Install the endpoint agent to collect it.</p>
+          )}
+
+          {details && tab === "agent" && (
+            agent ? (
+              <dl className="ti-facts">
+                <div><dt>Device</dt><dd className="cc-mono">{agent.device_id}</dd></div>
+                <div><dt>Status</dt><dd>{agent.status}</dd></div>
+                <div><dt>IP</dt><dd className="cc-mono">{agent.ip_address || "—"}</dd></div>
+                <div><dt>OS</dt><dd>{agent.os_info || "—"}</dd></div>
+                <div><dt>Last check-in</dt><dd>{agent.last_seen ? new Date(agent.last_seen).toLocaleString() : "—"}</dd></div>
+              </dl>
+            ) : <p className="cc-empty">No endpoint agent on this target. <Link to="/agent-management">Deploy one</Link> to collect software and configuration data.</p>
+          )}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+// ---------- create / edit form ----------
+
+function TargetForm({ initial, mode, onCancel, onSaved }) {
+  const [form, setForm] = useState(initial);
+  const [authorized, setAuthorized] = useState(mode === "edit");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const set = (key) => (event) => setForm((f) => ({ ...f, [key]: event.target.type === "checkbox" ? event.target.checked : event.target.value }));
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      const res = mode === "edit" ? await api.put(`/assets/${initial.id}`, form) : await api.post("/assets/", form);
+      onSaved(res.data, mode);
+    } catch (err) {
+      setError(errorText(err, mode === "edit" ? "Couldn't save the target." : "Couldn't add the target."));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="ti-drawer-backdrop" onClick={onCancel}>
+      <form
+        className="ti-drawer ti-form"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ti-form-title"
+        onClick={(event) => event.stopPropagation()}
+        onSubmit={submit}
+      >
+        <header className="ti-drawer__head">
+          <h2 id="ti-form-title">{mode === "edit" ? "Edit target" : "Add a target"}</h2>
+          <button type="button" className="cc-icon" aria-label="Close" onClick={onCancel}>×</button>
+        </header>
+
+        <div className="ti-form__grid">
+          <label className="so-field">Hostname or name<input className="so-input" value={form.hostname} onChange={set("hostname")} required /></label>
+          <label className="so-field">IP address<input className="so-input cc-mono" value={form.ip_address} onChange={set("ip_address")} placeholder="10.0.0.12" /></label>
+          <label className="so-field ti-span">URL (web targets)<input className="so-input cc-mono" value={form.url || ""} onChange={set("url")} placeholder="https://app.example.com" /></label>
+          <label className="so-field">Type
+            <select className="so-input" value={form.asset_type} onChange={set("asset_type")}>
+              {TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </label>
+          <label className="so-field">Environment
+            <select className="so-input" value={form.environment} onChange={set("environment")}>
+              {["Production", "Staging", "Development", "Test"].map((v) => <option key={v}>{v}</option>)}
+            </select>
+          </label>
+          <label className="so-field">Exposure
+            <select className="so-input" value={form.classification} onChange={set("classification")}>
+              <option value="Internal">Internal</option>
+              <option value="External">External (internet-facing)</option>
+            </select>
+          </label>
+          <label className="so-field">Business criticality
+            <select className="so-input" value={form.criticality} onChange={set("criticality")}>
+              {["Critical", "High", "Medium", "Low"].map((v) => <option key={v}>{v}</option>)}
+            </select>
+          </label>
+          <label className="so-field">Operating system<input className="so-input" value={form.os_type || ""} onChange={set("os_type")} placeholder="Ubuntu 22.04" /></label>
+          <label className="so-field">Owner (email)<input className="so-input" type="email" value={form.owner || ""} onChange={set("owner")} placeholder="owner@example.com" /></label>
+        </div>
+
+        {mode === "create" && (
+          <label className="cc-check so-consent ti-consent">
+            <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} />
+            Adding a target starts a discovery scan against it right away. I'm authorized to test it.
+          </label>
+        )}
+        {error && <p className="so-error" role="alert">{error}</p>}
+
+        <div className="ti-drawer__actions">
+          <button type="submit" className="so-launch-btn" disabled={saving || !authorized}>
+            {saving ? "Saving…" : mode === "edit" ? "Save changes" : "Add target and scan"}
+          </button>
+          <button type="button" className="cc-btn" onClick={onCancel}>Cancel</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ---------- page ----------
+
+export default function Assets({ assets: propAssets = [], canOperate = true }) {
+  const [assets, setAssets] = useState(propAssets);
+  const [query, setQuery] = useState("");
+  const [exposure, setExposure] = useState("all");
+  const [type, setType] = useState("all");
+  const [crit, setCrit] = useState("all");
+  const [managedOnly, setManagedOnly] = useState(false);
+  const [sort, setSort] = useState({ key: "risk", dir: "desc" });
+  const [limit, setLimit] = useState(25);
+  const [selected, setSelected] = useState(null);
+  const [formState, setFormState] = useState(null);
+  const [notice, setNotice] = useState(null);
+  const closeDetails = useCallback(() => setSelected(null), []);
+
+  useEffect(() => {
+    if (propAssets.length) setAssets(propAssets);
+  }, [propAssets]);
+
+  const refresh = async () => {
+    try {
+      const res = await api.get("/assets/");
+      setAssets(res.data || []);
+    } catch {
+      setNotice({ ok: false, text: "Couldn't refresh targets." });
+    }
+  };
+
+  useEffect(() => {
+    if (!propAssets.length) refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const stats = useMemo(() => ({
+    total: assets.length,
+    external: assets.filter(isExternal).length,
+    managed: assets.filter(isManaged).length,
+    critical: assets.filter((a) => normalizeCrit(a.criticality) === "critical").length,
+    highRisk: assets.filter((a) => Number(a.risk_score || 0) >= 70).length,
+  }), [assets]);
+
+  const matrix = useMemo(() => {
+    const cells = {};
+    CRITS.forEach((c) => { cells[c] = { external: 0, internal: 0 }; });
+    assets.forEach((a) => { cells[normalizeCrit(a.criticality)][isExternal(a) ? "external" : "internal"] += 1; });
+    return cells;
+  }, [assets]);
+
+  const types = useMemo(() => [...new Set(assets.map((a) => a.asset_type).filter(Boolean))].sort(), [assets]);
+
+  const rows = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const filtered = assets.filter((a) => {
+      if (exposure !== "all" && (exposure === "external") !== isExternal(a)) return false;
+      if (type !== "all" && a.asset_type !== type) return false;
+      if (crit !== "all" && normalizeCrit(a.criticality) !== crit) return false;
+      if (managedOnly && !isManaged(a)) return false;
+      if (!needle) return true;
+      return `${a.hostname} ${a.asset_name} ${a.ip_address} ${a.url} ${a.owner} ${a.os_type} ${a.os}`.toLowerCase().includes(needle);
+    });
+    const critRank = { critical: 0, high: 1, medium: 2, low: 3 };
+    const value = (a) => {
+      if (sort.key === "risk") return Number(a.risk_score || 0);
+      if (sort.key === "crit") return -critRank[normalizeCrit(a.criticality)];
+      if (sort.key === "name") return targetOf(a).toLowerCase();
+      if (sort.key === "env") return normalizeEnv(a.environment);
+      return 0;
+    };
+    return filtered.sort((x, y) => {
+      const a = value(x);
+      const b = value(y);
+      const cmp = a < b ? -1 : a > b ? 1 : 0;
+      return sort.dir === "asc" ? cmp : -cmp;
+    });
+  }, [assets, query, exposure, type, crit, managedOnly, sort]);
+
+  const toggleSort = (key) => setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: key === "name" || key === "env" ? "asc" : "desc" }));
+  const ariaSort = (key) => (sort.key === key ? (sort.dir === "asc" ? "ascending" : "descending") : "none");
+  const sortBtn = (label, key) => (
+    <button type="button" className="fx-sort" onClick={() => toggleSort(key)}>
+      {label}<span aria-hidden="true">{sort.key === key ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span>
+    </button>
+  );
+
+  const handleDelete = async (asset) => {
+    if (!window.confirm(`Delete target "${targetOf(asset)}"? Its scan history stays, but it leaves the inventory.`)) return;
+    try {
+      await api.delete(`/assets/${asset.id}`);
+      setAssets((list) => list.filter((a) => a.id !== asset.id));
+      setSelected(null);
+      setNotice({ ok: true, text: `Deleted ${targetOf(asset)}.` });
+    } catch (err) {
+      setNotice({ ok: false, text: errorText(err, "Couldn't delete the target.") });
+    }
+  };
+
+  const handleSaved = (saved, mode) => {
+    setAssets((list) => (mode === "edit" ? list.map((a) => (a.id === saved.id ? saved : a)) : [saved, ...list]));
+    setFormState(null);
+    setSelected(mode === "edit" ? saved : null);
+    setNotice({ ok: true, text: mode === "edit" ? `Saved ${targetOf(saved)}.` : `Added ${targetOf(saved)}. A discovery scan has started — follow it on the Scans page.` });
+  };
+
+  return (
+    <div className="cc ti">
+      <header className="cc-top">
+        <div className="cc-top__title">
+          <span className="cc-live-dot" aria-hidden="true" />
+          <h1>Target Inventory</h1>
+        </div>
+        <div className="cc-top__tools">
+          <button type="button" className="cc-btn" onClick={refresh}>Refresh</button>
+          {canOperate && (
+            <button type="button" className="cc-btn cc-btn--primary" onClick={() => setFormState({ mode: "create", initial: EMPTY_FORM })}>
+              + Add target
+            </button>
+          )}
+        </div>
+      </header>
+
+      <div className="cc-kpis">
+        <div className="cc-kpi"><span>Targets</span><strong>{stats.total}</strong></div>
+        <div className="cc-kpi cc-kpi--hot"><span>Internet-facing</span><strong>{stats.external}</strong></div>
+        <div className="cc-kpi cc-kpi--live"><span>Agent-managed</span><strong>{stats.managed}</strong></div>
+        <div className="cc-kpi"><span>Business-critical</span><strong>{stats.critical}</strong></div>
+        <div className="cc-kpi cc-kpi--hot"><span>Risk score ≥ 70</span><strong>{stats.highRisk}</strong></div>
       </div>
 
-      {feedback.message && (
-        <div
-          style={{
-            padding: "12px 16px",
-            borderRadius: "8px",
-            background: feedback.tone === "success" ? "rgba(16, 185, 129, 0.12)" : "rgba(239, 68, 68, 0.12)",
-            border: feedback.tone === "success" ? "1px solid rgba(16, 185, 129, 0.3)" : "1px solid rgba(239, 68, 68, 0.3)",
-            color: feedback.tone === "success" ? "#34d399" : "#f87171",
-            fontSize: "0.88rem",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <span>{feedback.message}</span>
-          <button onClick={() => setFeedback({ message: "", tone: "" })} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer" }}>
-            <FiX />
-          </button>
+      {notice && (
+        <div className={`so-notice${notice.ok ? "" : " so-notice--error"}`} role="status">
+          <span>{notice.text}</span>
+          <button type="button" className="cc-icon" aria-label="Dismiss" onClick={() => setNotice(null)}>×</button>
         </div>
       )}
 
-      {/* Summary KPI Cards */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "16px" }}>
-        <div
-          className="panel"
-          onClick={() => setManagedFilter("all")}
-          style={{
-            padding: "16px 20px",
-            cursor: "pointer",
-            border: managedFilter === "all" ? "1px solid #38bdf8" : "1px solid rgba(148, 163, 184, 0.15)",
-            transition: "all 0.2s ease",
-          }}
-          title="Click to view all assets"
-        >
-          <span style={{ color: "#94a3b8", fontSize: "0.78rem" }}>Total Discovered Assets</span>
-          <strong style={{ display: "block", fontSize: "1.6rem", color: "#38bdf8", marginTop: "4px" }}>{summary.total}</strong>
-        </div>
-        <div
-          className="panel"
-          onClick={() => setManagedFilter("managed")}
-          style={{
-            padding: "16px 20px",
-            cursor: "pointer",
-            border: managedFilter === "managed" ? "2px solid #4fd1c5" : "1px solid rgba(79, 209, 197, 0.4)",
-            background: managedFilter === "managed" ? "rgba(79, 209, 197, 0.15)" : "rgba(79, 209, 197, 0.05)",
-            boxShadow: managedFilter === "managed" ? "0 0 12px rgba(79, 209, 197, 0.3)" : "none",
-            transition: "all 0.2s ease",
-          }}
-          title="Click to filter table for Managed Agent Devices only"
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span style={{ color: "#4fd1c5", fontSize: "0.78rem", fontWeight: "600" }}>Managed Devices (VAP Agent)</span>
-            <span style={{ fontSize: "0.7rem", background: "#4fd1c5", color: "#0f172a", padding: "2px 6px", borderRadius: "10px", fontWeight: "bold" }}>FILTER</span>
+      <div className="cc-grid">
+        <section className="cc-panel cc-col--center" aria-label="Target constellation">
+          <header className="cc-panel__head">
+            <h2>Target constellation</h2>
+            <span className="cc-muted">rings by environment · size by risk · raised = internet-facing</span>
+          </header>
+          <div className="ti-constellation-wrap">
+            <AssetConstellation assets={assets} />
+            <ul className="cc-legend">
+              {CRITS.map((c) => <li key={c}><span className={`cc-swatch cc-swatch--${c}`} />{c}</li>)}
+            </ul>
           </div>
-          <strong style={{ display: "block", fontSize: "1.6rem", color: "#4fd1c5", marginTop: "4px" }}>{summary.managedCount}</strong>
-        </div>
-        <div className="panel" style={{ padding: "16px 20px" }}>
-          <span style={{ color: "#94a3b8", fontSize: "0.78rem" }}>Internal Footprint</span>
-          <strong style={{ display: "block", fontSize: "1.6rem", color: "#34d399", marginTop: "4px" }}>{summary.internal}</strong>
-        </div>
-        <div className="panel" style={{ padding: "16px 20px" }}>
-          <span style={{ color: "#94a3b8", fontSize: "0.78rem" }}>External Surface</span>
-          <strong style={{ display: "block", fontSize: "1.6rem", color: "#f59e0b", marginTop: "4px" }}>{summary.external}</strong>
-        </div>
-        <div className="panel" style={{ padding: "16px 20px" }}>
-          <span style={{ color: "#94a3b8", fontSize: "0.78rem" }}>Critical Tier Assets</span>
-          <strong style={{ display: "block", fontSize: "1.6rem", color: "#f87171", marginTop: "4px" }}>{summary.criticalCount}</strong>
-        </div>
+        </section>
+
+        <section className="cc-panel cc-col--side" aria-label="Risk matrix">
+          <header className="cc-panel__head">
+            <h2>Risk matrix</h2>
+            <span className="cc-muted">click a cell to filter</span>
+          </header>
+          <table className="ti-matrix">
+            <thead>
+              <tr><th scope="col"><span className="cc-sr">Criticality</span></th><th scope="col">Internet-facing</th><th scope="col">Internal</th></tr>
+            </thead>
+            <tbody>
+              {CRITS.map((c) => (
+                <tr key={c}>
+                  <th scope="row"><span className={`ti-crit ti-crit--${c}`}>{c}</span></th>
+                  {["external", "internal"].map((side) => {
+                    const n = matrix[c][side];
+                    const heat = c === "critical" || c === "high" ? (side === "external" ? 3 : 2) : side === "external" ? 2 : 1;
+                    const active = crit === c && exposure === side;
+                    return (
+                      <td key={side}>
+                        <button
+                          type="button"
+                          className={`ti-cell ti-cell--h${n ? heat : 0}${active ? " is-active" : ""}`}
+                          aria-pressed={active}
+                          aria-label={`${n} ${c} ${side === "external" ? "internet-facing" : "internal"} targets`}
+                          onClick={() => {
+                            if (active) { setCrit("all"); setExposure("all"); } else { setCrit(c); setExposure(side); }
+                          }}
+                        >
+                          {n}
+                        </button>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="cc-muted ti-matrix__note">Top-left is where an attacker looks first: business-critical and reachable from the internet.</p>
+        </section>
       </div>
 
-      {/* Filter Toolbar */}
-      <div className="panel" style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: "14px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
-          <div style={{ position: "relative", flex: 1, minWidth: "220px" }}>
-            <FiSearch style={{ position: "absolute", left: "12px", top: "11px", color: "#64748b" }} />
-            <input
-              className="scan-input"
-              placeholder="Search by IP, Hostname, URL, Owner, OS..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              style={{ paddingLeft: "36px", width: "100%", height: "38px" }}
-            />
+      <section className="cc-panel ti-inventory" aria-label="Inventory">
+        <header className="cc-panel__head">
+          <h2>Inventory</h2>
+          <span className="cc-muted">{rows.length} of {assets.length}</span>
+        </header>
+
+        <div className="so-filters">
+          <label className="so-search">
+            <span className="cc-sr">Search targets</span>
+            <input type="search" placeholder="Search name, IP, URL, owner or OS" value={query} onChange={(e) => setQuery(e.target.value)} />
+          </label>
+          <div className="cc-range" role="group" aria-label="Exposure">
+            {["all", "external", "internal"].map((k) => (
+              <button key={k} type="button" aria-pressed={exposure === k} onClick={() => setExposure(k)}>
+                {k === "all" ? "All" : k === "external" ? "Internet-facing" : "Internal"}
+              </button>
+            ))}
           </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-            <select className="scan-select" value={managedFilter} onChange={(e) => setManagedFilter(e.target.value)} style={{ borderColor: "#4fd1c5", color: "#4fd1c5" }}>
-              <option value="all">All Agent Statuses</option>
-              <option value="managed">Managed Devices (VAP Agent)</option>
-              <option value="unmanaged">Unmanaged Assets</option>
+          <label>
+            <span className="cc-sr">Type</span>
+            <select className="so-input ti-select" value={type} onChange={(e) => setType(e.target.value)}>
+              <option value="all">Any type</option>
+              {types.map((t) => <option key={t} value={t}>{titleCase(t)}</option>)}
             </select>
-
-            <select className="scan-select" value={classificationFilter} onChange={(e) => setClassificationFilter(e.target.value)}>
-              <option value="all">All Classifications</option>
-              <option value="internal">Internal</option>
-              <option value="external">External</option>
+          </label>
+          <label>
+            <span className="cc-sr">Criticality</span>
+            <select className="so-input ti-select" value={crit} onChange={(e) => setCrit(e.target.value)}>
+              <option value="all">Any criticality</option>
+              {CRITS.map((c) => <option key={c} value={c}>{titleCase(c)}</option>)}
             </select>
-
-            <select className="scan-select" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
-              <option value="all">All Asset Types</option>
-              <option value="OS">OS</option>
-              <option value="Network">Network</option>
-              <option value="Website">Website</option>
-              <option value="Endpoint">Endpoint</option>
-            </select>
-
-            <select className="scan-select" value={envFilter} onChange={(e) => setEnvFilter(e.target.value)}>
-              <option value="all">All Environments</option>
-              <option value="Production">Production</option>
-              <option value="Staging">Staging</option>
-              <option value="Development">Development</option>
-              <option value="Test">Test</option>
-            </select>
-
-            <select className="scan-select" value={criticalityFilter} onChange={(e) => setCriticalityFilter(e.target.value)}>
-              <option value="all">All Criticalities</option>
-              <option value="Critical">Critical</option>
-              <option value="High">High</option>
-              <option value="Medium">Medium</option>
-              <option value="Low">Low</option>
-            </select>
-
-            <select className="scan-select" value={riskFilter} onChange={(e) => setRiskFilter(e.target.value)}>
-              <option value="all">All Risk Levels</option>
-              <option value="High">High Risk</option>
-              <option value="Medium">Medium Risk</option>
-              <option value="Low">Low Risk</option>
-            </select>
-          </div>
+          </label>
+          <label className="cc-check">
+            <input type="checkbox" checked={managedOnly} onChange={(e) => setManagedOnly(e.target.checked)} />
+            Agent-managed only
+          </label>
         </div>
-      </div>
 
-      {/* Asset Inventory Table */}
-      <div className="panel" style={{ padding: "0" }}>
-        <div className="table-wrap">
-          <table className="table table--dense">
+        <div className="so-table-wrap">
+          <table className="so-table">
             <thead>
               <tr>
-                <th>Hostname / Target</th>
-                <th>IP Address / URL</th>
-                <th>Classification</th>
-                <th>Asset Type</th>
-                <th>OS Type</th>
-                <th>Owner</th>
-                <th>Environment</th>
-                <th>Criticality</th>
-                <th>Risk Level</th>
-                <th>Status</th>
-                <th>Misconfigs</th>
-                <th>Actions</th>
+                <th scope="col" aria-sort={ariaSort("name")}>{sortBtn("Target", "name")}</th>
+                <th scope="col">Type</th>
+                <th scope="col" aria-sort={ariaSort("env")}>{sortBtn("Environment", "env")}</th>
+                <th scope="col">Exposure</th>
+                <th scope="col" aria-sort={ariaSort("crit")}>{sortBtn("Criticality", "crit")}</th>
+                <th scope="col" aria-sort={ariaSort("risk")}>{sortBtn("Risk", "risk")}</th>
+                <th scope="col">Owner</th>
+                <th scope="col"><span className="cc-sr">Details</span></th>
               </tr>
             </thead>
             <tbody>
-              {filteredAssets.map((a) => (
-                <tr key={a.id}>
-                  <td data-label="Hostname">
-                    <strong style={{ color: "#f8fafc", cursor: "pointer" }} onClick={() => fetchAssetMisconfigurations(a)}>
-                      {a.hostname || a.asset_name || "Unassigned"}
-                    </strong>
-                  </td>
-                  <td data-label="Address">
-                    <span style={{ fontFamily: "monospace", color: "#38bdf8", fontSize: "0.82rem" }}>
-                      {a.ip_address}
-                    </span>
-                    {a.url && (
-                      <p style={{ margin: 0, fontSize: "0.75rem", color: "#94a3b8" }}>{a.url}</p>
-                    )}
-                  </td>
-                  <td data-label="Classification">
-                    <span
-                      className={`pill pill--${(a.classification || a.exposure || "").toLowerCase() === "external" ? "critical" : "low"}`}
-                    >
-                      {a.classification || (a.exposure ? a.exposure.toUpperCase() : "Internal")}
-                    </span>
-                  </td>
-                  <td data-label="Asset Type">
-                    <span style={{ padding: "2px 8px", borderRadius: "4px", background: "rgba(148, 163, 184, 0.12)", color: "#cbd5e1", fontSize: "0.75rem" }}>
-                      {a.asset_type || "OS"}
-                    </span>
-                  </td>
-                  <td data-label="OS Type">
-                    <span style={{ color: "#cbd5e1", fontSize: "0.82rem" }}>{a.os_type || a.os || "n/a"}</span>
-                  </td>
-                  <td data-label="Owner">
-                    <span style={{ color: "#94a3b8", fontSize: "0.82rem" }}>{a.owner || "Unassigned"}</span>
-                  </td>
-                  <td data-label="Environment">
-                    <span style={{ color: "#94a3b8", fontSize: "0.82rem" }}>{a.environment || "Production"}</span>
-                  </td>
-                  <td data-label="Criticality">
-                    <span className={`pill pill--${(a.criticality || "").toLowerCase()}`}>
-                      {a.criticality || "Medium"}
-                    </span>
-                  </td>
-                  <td data-label="Risk Level">
-                    <span className={`pill pill--${(a.risk_level || "").toLowerCase() === "high" ? "critical" : (a.risk_level || "").toLowerCase() === "medium" ? "medium" : "low"}`}>
-                      {a.risk_level || "Medium"}
-                    </span>
-                  </td>
-                  <td data-label="Status">
-                    <span style={{ color: a.is_active !== false ? "#10b981" : "#ef4444", fontSize: "0.82rem", fontWeight: "600", display: "inline-flex", alignItems: "center", gap: "4px" }}>
-                      {a.is_active !== false ? <FiCheckCircle /> : <FiXCircle />}
-                      {a.is_active !== false ? "Active" : "Inactive"}
-                    </span>
-                  </td>
-                  <td data-label="Misconfigs">
-                    <button
-                      onClick={() => fetchAssetMisconfigurations(a)}
-                      className={`pill pill--${(a.misconfigurations_count || 0) > 0 ? "medium" : "low"}`}
-                      style={{ cursor: "pointer" }}
-                    >
-                      {a.misconfigurations_count || 0} Issue{a.misconfigurations_count === 1 ? "" : "s"}
-                    </button>
-                  </td>
-                  <td data-label="Actions">
-                    <div style={{ display: "flex", gap: "8px" }}>
-                      <button
-                        onClick={() => fetchAssetMisconfigurations(a)}
-                        style={{ background: "none", border: "none", color: "#38bdf8", cursor: "pointer" }}
-                        title="View Asset Details & Misconfigurations"
-                      >
-                        <FiLayers />
-                      </button>
-                      <button
-                        onClick={() => {
-                          setSelectedAsset(a);
-                          setForm({
-                            hostname: a.hostname || "",
-                            ip_address: a.ip_address || "",
-                            url: a.url || "",
-                            os_type: a.os_type || a.os || "Ubuntu 22.04",
-                            owner: a.owner || "",
-                            environment: a.environment || "Production",
-                            criticality: a.criticality || "Medium",
-                            risk_level: a.risk_level || "Medium",
-                            classification: a.classification || "Internal",
-                            asset_type: a.asset_type || "OS",
-                            is_active: a.is_active !== false,
-                          });
-                          setModalState("edit");
-                        }}
-                        style={{ background: "none", border: "none", color: "#38bdf8", cursor: "pointer" }}
-                        title="Edit Asset Attributes"
-                      >
-                        <FiEdit />
-                      </button>
-                      <button
-                        onClick={() => handleDelete(a)}
-                        style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer" }}
-                        title="Delete Asset"
-                      >
-                        <FiTrash2 />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-
-              {filteredAssets.length === 0 && (
-                <tr>
-                  <td colSpan="12" style={{ textAlign: "center", padding: "60px", color: "#64748b" }}>
-                    <FiServer style={{ fontSize: "36px", color: "#38bdf8", marginBottom: "12px" }} />
-                    <p style={{ margin: 0, fontWeight: "600", fontSize: "1rem", color: "#f8fafc" }}>No assets found</p>
-                    <small>No real asset telemetry records match your current filter parameters.</small>
-                  </td>
-                </tr>
+              {rows.slice(0, limit).map((a) => {
+                const score = Math.max(0, Math.min(100, Number(a.risk_score || 0)));
+                return (
+                  <tr key={a.id}>
+                    <td>
+                      <button type="button" className="ti-name" onClick={() => setSelected(a)}>{targetOf(a)}</button>
+                      <div className="cc-mono so-sub">{[a.ip_address, a.url].filter(Boolean).join(" · ")}</div>
+                      {isManaged(a) && <span className="ti-badge">agent</span>}
+                    </td>
+                    <td>{titleCase(a.asset_type)}</td>
+                    <td>{titleCase(normalizeEnv(a.environment))}</td>
+                    <td>{isExternal(a) ? <span className="ti-ext">Internet-facing</span> : <span className="cc-muted">Internal</span>}</td>
+                    <td><span className={`ti-crit ti-crit--${normalizeCrit(a.criticality)}`}>{normalizeCrit(a.criticality)}</span></td>
+                    <td>
+                      <div className="ti-risk">
+                        <div className="ti-risk__track" aria-hidden="true"><span className={`ti-risk__fill ti-risk__fill--${riskBand(score)}`} style={{ width: `${score}%` }} /></div>
+                        <span className="cc-mono">{score.toFixed(0)}</span>
+                      </div>
+                    </td>
+                    <td className="so-sub">{a.owner || "Unassigned"}</td>
+                    <td className="so-actions"><button type="button" className="cc-btn" aria-label={`Details for ${targetOf(a)}`} onClick={() => setSelected(a)}>Details</button></td>
+                  </tr>
+                );
+              })}
+              {!rows.length && (
+                <tr><td colSpan={8} className="cc-empty so-empty">{assets.length ? "No targets match these filters." : "No targets yet. Add one, or run a scan to discover them."}</td></tr>
               )}
             </tbody>
           </table>
         </div>
-      </div>
-
-      {/* CREATE & EDIT ASSET MODALS */}
-      <AnimatePresence>
-        {(modalState === "create" || modalState === "edit") && (
-          <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.75)", zIndex: 9999, display: "flex", justifyContent: "center", alignItems: "center" }} onClick={() => setModalState(null)}>
-            <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} exit={{ scale: 0.9 }} onClick={(e) => e.stopPropagation()} style={{ width: "500px", background: "#0f172a", border: "1px solid rgba(148, 163, 184, 0.2)", borderRadius: "16px", padding: "24px", maxHeight: "90vh", overflowY: "auto" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "16px" }}>
-                <h3 style={{ color: "#f8fafc", margin: 0 }}>{modalState === "create" ? "Register Target Asset" : "Edit Asset Profile"}</h3>
-                <button onClick={() => setModalState(null)} style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer" }}><FiX /></button>
-              </div>
-
-              <form onSubmit={modalState === "create" ? handleCreateSubmit : handleEditSubmit} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                <div>
-                  <label style={{ fontSize: "0.78rem", color: "#94a3b8" }}>Hostname</label>
-                  <input
-                    required
-                    className="scan-input"
-                    value={form.hostname}
-                    onChange={(e) => setForm({ ...form, hostname: e.target.value })}
-                    placeholder="e.g. edge-gw.internal.acme"
-                    style={{ width: "100%" }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ fontSize: "0.78rem", color: "#94a3b8" }}>IP Address</label>
-                  <input
-                    required
-                    className="scan-input"
-                    value={form.ip_address}
-                    onChange={(e) => setForm({ ...form, ip_address: e.target.value })}
-                    placeholder="e.g. 192.168.10.15"
-                    style={{ width: "100%" }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ fontSize: "0.78rem", color: "#94a3b8" }}>Host URL (Optional)</label>
-                  <input
-                    className="scan-input"
-                    value={form.url}
-                    onChange={(e) => setForm({ ...form, url: e.target.value })}
-                    placeholder="https://app.acme.com"
-                    style={{ width: "100%" }}
-                  />
-                </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-                  <div>
-                    <label style={{ fontSize: "0.78rem", color: "#94a3b8" }}>Classification</label>
-                    <select className="scan-select" value={form.classification} onChange={(e) => setForm({ ...form, classification: e.target.value })} style={{ width: "100%" }}>
-                      <option value="Internal">Internal</option>
-                      <option value="External">External</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label style={{ fontSize: "0.78rem", color: "#94a3b8" }}>Asset Type</label>
-                    <select className="scan-select" value={form.asset_type} onChange={(e) => setForm({ ...form, asset_type: e.target.value })} style={{ width: "100%" }}>
-                      <option value="OS">OS</option>
-                      <option value="Network">Network</option>
-                      <option value="Website">Website</option>
-                      <option value="Endpoint">Endpoint</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-                  <div>
-                    <label style={{ fontSize: "0.78rem", color: "#94a3b8" }}>OS Type</label>
-                    <input
-                      className="scan-input"
-                      value={form.os_type}
-                      onChange={(e) => setForm({ ...form, os_type: e.target.value })}
-                      placeholder="e.g. Ubuntu 22.04"
-                      style={{ width: "100%" }}
-                    />
-                  </div>
-
-                  <div>
-                    <label style={{ fontSize: "0.78rem", color: "#94a3b8" }}>Owner (Email)</label>
-                    <input
-                      type="email"
-                      className="scan-input"
-                      value={form.owner}
-                      onChange={(e) => setForm({ ...form, owner: e.target.value })}
-                      placeholder="secops@company.com"
-                      style={{ width: "100%" }}
-                    />
-                  </div>
-                </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px" }}>
-                  <div>
-                    <label style={{ fontSize: "0.78rem", color: "#94a3b8" }}>Environment</label>
-                    <select className="scan-select" value={form.environment} onChange={(e) => setForm({ ...form, environment: e.target.value })} style={{ width: "100%" }}>
-                      <option value="Production">Production</option>
-                      <option value="Staging">Staging</option>
-                      <option value="Development">Development</option>
-                      <option value="Test">Test</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label style={{ fontSize: "0.78rem", color: "#94a3b8" }}>Criticality</label>
-                    <select className="scan-select" value={form.criticality} onChange={(e) => setForm({ ...form, criticality: e.target.value })} style={{ width: "100%" }}>
-                      <option value="Critical">Critical</option>
-                      <option value="High">High</option>
-                      <option value="Medium">Medium</option>
-                      <option value="Low">Low</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label style={{ fontSize: "0.78rem", color: "#94a3b8" }}>Risk Level</label>
-                    <select className="scan-select" value={form.risk_level} onChange={(e) => setForm({ ...form, risk_level: e.target.value })} style={{ width: "100%" }}>
-                      <option value="High">High</option>
-                      <option value="Medium">Medium</option>
-                      <option value="Low">Low</option>
-                    </select>
-                  </div>
-                </div>
-
-                <label style={{ fontSize: "0.85rem", color: "#cbd5e1", display: "flex", alignItems: "center", gap: "8px", marginTop: "4px" }}>
-                  <input type="checkbox" checked={form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} /> Active Status
-                </label>
-
-                {modalState === "create" && (
-                  <p style={{ margin: 0, fontSize: "0.78rem", color: "#38bdf8", background: "rgba(56, 189, 248, 0.1)", padding: "8px 12px", borderRadius: "6px", border: "1px solid rgba(56, 189, 248, 0.2)" }}>
-                    <FiZap style={{ display: "inline", marginRight: "4px" }} /> Registering this asset automatically triggers an immediate background discovery scan!
-                  </p>
-                )}
-
-                <button type="submit" disabled={submitting} className="btn btn--primary" style={{ marginTop: "12px" }}>
-                  {submitting ? "Saving..." : modalState === "create" ? "Register & Scan Asset" : "Save Changes"}
-                </button>
-              </form>
-            </motion.div>
-          </div>
+        {rows.length > limit && (
+          <button type="button" className="cc-btn so-showmore" onClick={() => setLimit((n) => n + 50)}>Show more ({rows.length - limit} remaining)</button>
         )}
-      </AnimatePresence>
+      </section>
 
-      {/* ASSET DETAIL & MISCONFIGURATIONS DRAWER */}
-      <AnimatePresence>
-        {detailDrawerAsset && (
-          <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.6)", zIndex: 9998, display: "flex", justifyContent: "flex-end" }} onClick={() => setDetailDrawerAsset(null)}>
-            <motion.div initial={{ x: "100%" }} animate={{ x: 0 }} exit={{ x: "100%" }} transition={{ type: "spring", damping: 25 }} onClick={(e) => e.stopPropagation()} style={{ width: "520px", maxWidth: "100%", background: "#0f172a", borderLeft: "1px solid rgba(148, 163, 184, 0.2)", padding: "28px", height: "100vh", overflowY: "auto" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px", borderBottom: "1px solid rgba(148, 163, 184, 0.15)", paddingBottom: "16px" }}>
-                <div>
-                  <p className="eyebrow" style={{ color: "#38bdf8", margin: 0 }}>Asset Profile</p>
-                  <h2 style={{ color: "#f8fafc", margin: "4px 0 0 0", fontSize: "1.3rem" }}>{detailDrawerAsset.hostname || detailDrawerAsset.ip_address}</h2>
-                </div>
-                <button onClick={() => setDetailDrawerAsset(null)} style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: "20px" }}><FiX /></button>
-              </div>
-
-              {/* Metadata Attributes */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px", background: "rgba(30, 41, 59, 0.5)", padding: "16px", borderRadius: "12px", marginBottom: "24px", border: "1px solid rgba(148, 163, 184, 0.12)" }}>
-                <div>
-                  <span style={{ fontSize: "0.75rem", color: "#94a3b8" }}>IP Address</span>
-                  <p style={{ margin: 0, color: "#f8fafc", fontWeight: "600", fontFamily: "monospace" }}>{detailDrawerAsset.ip_address}</p>
-                </div>
-                <div>
-                  <span style={{ fontSize: "0.75rem", color: "#94a3b8" }}>Classification</span>
-                  <p style={{ margin: 0, color: detailDrawerAsset.classification === "External" ? "#f87171" : "#34d399", fontWeight: "600" }}>{detailDrawerAsset.classification}</p>
-                </div>
-                <div>
-                  <span style={{ fontSize: "0.75rem", color: "#94a3b8" }}>Asset Type</span>
-                  <p style={{ margin: 0, color: "#f8fafc", fontWeight: "500" }}>{detailDrawerAsset.asset_type}</p>
-                </div>
-                <div>
-                  <span style={{ fontSize: "0.75rem", color: "#94a3b8" }}>OS Type</span>
-                  <p style={{ margin: 0, color: "#f8fafc", fontWeight: "500" }}>{detailDrawerAsset.os_type || detailDrawerAsset.os || "n/a"}</p>
-                </div>
-                <div>
-                  <span style={{ fontSize: "0.75rem", color: "#94a3b8" }}>Environment</span>
-                  <p style={{ margin: 0, color: "#f8fafc", fontWeight: "500" }}>{detailDrawerAsset.environment}</p>
-                </div>
-                <div>
-                  <span style={{ fontSize: "0.75rem", color: "#94a3b8" }}>Criticality</span>
-                  <p style={{ margin: 0, color: "#fbbf24", fontWeight: "600" }}>{detailDrawerAsset.criticality}</p>
-                </div>
-                <div>
-                  <span style={{ fontSize: "0.75rem", color: "#94a3b8" }}>Owner</span>
-                  <p style={{ margin: 0, color: "#f8fafc", fontSize: "0.85rem" }}>{detailDrawerAsset.owner || "Unassigned"}</p>
-                </div>
-                <div>
-                  <span style={{ fontSize: "0.75rem", color: "#94a3b8" }}>Risk Score</span>
-                  <p style={{ margin: 0, color: "#38bdf8", fontWeight: "700" }}>{detailDrawerAsset.risk_score}</p>
-                </div>
-              </div>
-
-              {/* Agent Device Registered Info Banner */}
-              {assetDetails?.agent_device && (
-                <div style={{ background: "rgba(79, 209, 197, 0.08)", border: "1px solid rgba(79, 209, 197, 0.3)", padding: "14px", borderRadius: "10px", marginBottom: "20px" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span style={{ color: "#4fd1c5", fontSize: "0.85rem", fontWeight: "bold" }}>📡 Active VAP Endpoint Agent</span>
-                    <span style={{ fontSize: "0.72rem", background: "#4fd1c5", color: "#0f172a", padding: "2px 8px", borderRadius: "10px", fontWeight: "bold" }}>{assetDetails.agent_device.status.toUpperCase()}</span>
-                  </div>
-                  <p style={{ margin: "4px 0 0 0", color: "#cbd5e1", fontSize: "0.8rem" }}>Device ID: <code style={{ color: "#38bdf8" }}>{assetDetails.agent_device.device_id}</code></p>
-                  <p style={{ margin: "2px 0 0 0", color: "#94a3b8", fontSize: "0.78rem" }}>OS Build: {assetDetails.agent_device.os_info || "Windows Endpoint"}</p>
-                </div>
-              )}
-
-              {/* 1. Associated Misconfigurations */}
-              <div style={{ marginBottom: "24px" }}>
-                <h3 style={{ color: "#f8fafc", fontSize: "1.05rem", marginBottom: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
-                  <FiAlertTriangle style={{ color: "#fbbf24" }} /> CIS Misconfigurations ({assetMisconfigs.length})
-                </h3>
-
-                {loadingMisconfigs ? (
-                  <p style={{ color: "#94a3b8", fontSize: "0.85rem" }}>Loading misconfigurations from database...</p>
-                ) : assetMisconfigs.length > 0 ? (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                    {assetMisconfigs.map((m) => (
-                      <div key={m.id || m.title} style={{ background: "rgba(30, 41, 59, 0.6)", padding: "14px", borderRadius: "10px", border: "1px solid rgba(148, 163, 184, 0.15)" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
-                          <span className={`pill pill--${(m.severity || "medium").toLowerCase()}`}>{m.severity || "Medium"}</span>
-                          <span style={{ fontSize: "0.75rem", color: "#94a3b8" }}>Source: {m.source || m.detected_by || "endpoint-agent"}</span>
-                        </div>
-                        <h4 style={{ color: "#f8fafc", margin: "4px 0", fontSize: "0.92rem" }}>{m.title || m.issue}</h4>
-                        {m.cve_id && <p style={{ margin: 0, fontSize: "0.78rem", color: "#ef4444", fontFamily: "monospace" }}>CVE / Control: {m.cve_id}</p>}
-                        {(m.remediation || m.evidence) && <p style={{ margin: "6px 0 0 0", fontSize: "0.8rem", color: "#94a3b8" }}>{m.remediation || m.evidence}</p>}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div style={{ padding: "20px", textAlign: "center", background: "rgba(30, 41, 59, 0.3)", borderRadius: "10px", border: "1px dashed rgba(148, 163, 184, 0.2)" }}>
-                    <FiCheckCircle style={{ fontSize: "24px", color: "#34d399", marginBottom: "6px" }} />
-                    <p style={{ margin: 0, color: "#f8fafc", fontWeight: "600", fontSize: "0.88rem" }}>No misconfigurations detected</p>
-                    <small style={{ color: "#64748b" }}>Live database audit found 0 misconfiguration findings for this host.</small>
-                  </div>
-                )}
-              </div>
-
-              {/* 2. Discovered Shadow IT */}
-              <div style={{ marginBottom: "24px" }}>
-                <h3 style={{ color: "#f8fafc", fontSize: "1.05rem", marginBottom: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
-                  <FiLayers style={{ color: "#f59e0b" }} /> Shadow IT Telemetry ({assetDetails?.shadow_it?.length || 0})
-                </h3>
-
-                {assetDetails?.shadow_it?.length > 0 ? (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                    {assetDetails.shadow_it.map((s) => (
-                      <div key={s.id || s.title} style={{ background: "rgba(30, 41, 59, 0.6)", padding: "14px", borderRadius: "10px", border: "1px solid rgba(245, 158, 11, 0.3)" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
-                          <span className={`pill pill--${(s.severity || "high").toLowerCase()}`}>{s.severity || "High"}</span>
-                          <span style={{ fontSize: "0.75rem", color: "#f59e0b" }}>{s.category || "Shadow IT"}</span>
-                        </div>
-                        <h4 style={{ color: "#f8fafc", margin: "4px 0", fontSize: "0.92rem" }}>{s.title}</h4>
-                        {s.evidence && <p style={{ margin: "4px 0 0 0", fontSize: "0.8rem", color: "#cbd5e1", whiteSpace: "pre-wrap" }}>{s.evidence}</p>}
-                        {s.remediation && <p style={{ margin: "6px 0 0 0", fontSize: "0.78rem", color: "#94a3b8" }}>{s.remediation}</p>}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div style={{ padding: "20px", textAlign: "center", background: "rgba(30, 41, 59, 0.3)", borderRadius: "10px", border: "1px dashed rgba(148, 163, 184, 0.2)" }}>
-                    <FiCheckCircle style={{ fontSize: "24px", color: "#34d399", marginBottom: "6px" }} />
-                    <p style={{ margin: 0, color: "#f8fafc", fontWeight: "600", fontSize: "0.88rem" }}>No Shadow IT tools detected</p>
-                    <small style={{ color: "#64748b" }}>Zero unapproved remote desktop, cloud storage, or USBSTOR devices found.</small>
-                  </div>
-                )}
-              </div>
-
-              {/* 3. Unauthorized Software & Software Drift */}
-              <div style={{ marginBottom: "24px" }}>
-                <h3 style={{ color: "#f8fafc", fontSize: "1.05rem", marginBottom: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
-                  <FiShield style={{ color: "#f87171" }} /> Unauthorized Software & Drift ({assetDetails?.unauthorized_software?.length || 0})
-                </h3>
-
-                {assetDetails?.unauthorized_software?.length > 0 ? (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                    {assetDetails.unauthorized_software.map((sw) => (
-                      <div key={sw.id || sw.title} style={{ background: "rgba(30, 41, 59, 0.6)", padding: "14px", borderRadius: "10px", border: "1px solid rgba(239, 68, 68, 0.3)" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
-                          <span className={`pill pill--${(sw.severity || "medium").toLowerCase()}`}>{sw.severity || "Medium"}</span>
-                          <span style={{ fontSize: "0.75rem", color: "#f87171" }}>Unapproved Software</span>
-                        </div>
-                        <h4 style={{ color: "#f8fafc", margin: "4px 0", fontSize: "0.92rem" }}>{sw.title}</h4>
-                        {sw.evidence && <p style={{ margin: "4px 0 0 0", fontSize: "0.8rem", color: "#cbd5e1" }}>{sw.evidence}</p>}
-                        {sw.remediation && <p style={{ margin: "6px 0 0 0", fontSize: "0.78rem", color: "#94a3b8" }}>{sw.remediation}</p>}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div style={{ padding: "20px", textAlign: "center", background: "rgba(30, 41, 59, 0.3)", borderRadius: "10px", border: "1px dashed rgba(148, 163, 184, 0.2)" }}>
-                    <FiCheckCircle style={{ fontSize: "24px", color: "#34d399", marginBottom: "6px" }} />
-                    <p style={{ margin: 0, color: "#f8fafc", fontWeight: "600", fontSize: "0.88rem" }}>Software Allowlist compliant</p>
-                    <small style={{ color: "#64748b" }}>All installed applications match corporate Software Allowlist policy.</small>
-                  </div>
-                )}
-              </div>
-
-              {/* 4. Complete Installed Software Inventory */}
-              <div>
-                <h3 style={{ color: "#f8fafc", fontSize: "1.05rem", marginBottom: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
-                  <FiLayers style={{ color: "#38bdf8" }} /> Full Software Inventory ({assetDetails?.installed_software?.length || 0})
-                </h3>
-
-                {assetDetails?.installed_software?.length > 0 ? (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "320px", overflowY: "auto" }}>
-                    {assetDetails.installed_software.map((item) => (
-                      <div key={item.id} style={{ background: "rgba(30, 41, 59, 0.5)", padding: "10px 14px", borderRadius: "8px", border: "1px solid rgba(148, 163, 184, 0.12)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <div>
-                          <strong style={{ color: "#f8fafc", fontSize: "0.85rem", display: "block" }}>{item.name}</strong>
-                          <span style={{ fontSize: "0.75rem", color: "#94a3b8" }}>
-                            {item.vendor || "Unknown Vendor"} {item.version ? `(v${item.version})` : ""}
-                          </span>
-                        </div>
-                        <span className={`pill pill--${item.status === "APPROVED" ? "low" : item.status === "VULNERABLE" ? "critical" : "high"}`} style={{ fontSize: "0.7rem" }}>
-                          {item.status}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div style={{ padding: "20px", textAlign: "center", background: "rgba(30, 41, 59, 0.3)", borderRadius: "10px", border: "1px dashed rgba(148, 163, 184, 0.2)" }}>
-                    <p style={{ margin: 0, color: "#94a3b8", fontSize: "0.85rem" }}>No installed software ingested yet for this device.</p>
-                  </div>
-                )}
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      {selected && !formState && (
+        <DetailDrawer
+          asset={selected}
+          canOperate={canOperate}
+          onClose={closeDetails}
+          onEdit={(asset) => setFormState({ mode: "edit", initial: { ...EMPTY_FORM, ...asset } })}
+          onDelete={handleDelete}
+        />
+      )}
+      {formState && (
+        <TargetForm
+          mode={formState.mode}
+          initial={formState.initial}
+          onCancel={() => setFormState(null)}
+          onSaved={handleSaved}
+        />
+      )}
     </div>
   );
 }

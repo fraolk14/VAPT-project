@@ -5,7 +5,7 @@ export function targetOf(finding) {
 
 export function humanSource(source) {
   if (source === "network-db" || source === "openvas") return "Network";
-  if (source === "zap") return "Web";
+  if (["zap", "web", "nuclei", "testssl"].includes(source)) return "Web";
   if (source === "mobsf") return "Mobile";
   return source || "Unknown";
 }

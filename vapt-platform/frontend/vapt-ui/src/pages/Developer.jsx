@@ -5,7 +5,7 @@ import Card from "../components/Card";
 
 function sourceLabel(source) {
   if (source === "openvas") return "Network Engine";
-  if (source === "zap") return "Web Engine";
+  if (["zap", "web", "nuclei", "testssl"].includes(source)) return "Web Engine";
   if (source === "mobsf") return "Mobile Engine";
   return source;
 }

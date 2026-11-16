@@ -1,477 +1,321 @@
-import React, { useState, useMemo } from "react";
-import { useForm } from "react-hook-form";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
+
 import api from "../api/client";
-import { motion, AnimatePresence } from "framer-motion";
-import {
-  FiShield,
-  FiSearch,
-  FiAlertTriangle,
-  FiPlay,
-  FiCheckCircle,
-  FiClock,
-  FiFilter,
-  FiChevronRight,
-  FiX,
-  FiServer,
-  FiGlobe,
-  FiTerminal,
-  FiCpu,
-  FiInfo,
-  FiRefreshCw,
-} from "react-icons/fi";
+import BarField3D from "../components/cc/BarField3D";
+import { FamilyRadar } from "../components/cc/anCharts";
+import { useAnimatedNumber } from "../components/cc/ccHooks";
+import "../commandcenter.css";
+import "../scans.css";
+import "../analytics.css";
+import "../misconfig.css";
 
-const fetchMisconfigs = async () => {
-  const res = await api.get("/misconfig/list");
-  return res.data;
+const FAMILY_COLORS = {
+  "os-hardening": 0xa78bfa,
+  auth: 0xff6b6b,
+  "cors-cookies": 0xf5d76e,
+  headers: 0x5ce1ff,
+  transport: 0x3ddc97,
+  "exposed-services": 0xff9f5a,
+  disclosure: 0x2e7bff,
 };
+const SEVS = ["critical", "high", "medium", "low"];
+const REFRESH_MS = 60_000;
 
-const triggerScanApi = async ({ scope, organization_name }) => {
-  const res = await api.post("/misconfig/scan", {
-    scope,
-    organization_name: organization_name || "Acme Security Org",
-  });
-  return res.data;
-};
+const isUrl = (value) => /^https?:\/\//i.test(value.trim());
+const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString([], { day: "2-digit", month: "short", year: "numeric" }) : "—");
+const hex = (n) => `#${n.toString(16).padStart(6, "0")}`;
 
-export default function Misconfigurations({ findings = [], assets = [] }) {
-  const [scopeInput, setScopeInput] = useState("");
-  const [selectedIssue, setSelectedIssue] = useState(null);
-  const [searchFilter, setSearchFilter] = useState("");
-  const [severityFilter, setSeverityFilter] = useState("all");
-  const [assetTypeFilter, setAssetTypeFilter] = useState("all");
-  const [scannerFilter, setScannerFilter] = useState("all");
+function Kpi({ label, value, tone, hint }) {
+  const shown = useAnimatedNumber(value ?? 0);
+  return (
+    <div className={`cc-kpi${tone ? ` cc-kpi--${tone}` : ""}`}>
+      <span>{label}</span>
+      <strong>{value == null ? "—" : shown}</strong>
+      {hint ? <small className="an-kpi-hint">{hint}</small> : null}
+    </div>
+  );
+}
 
-  const queryClient = useQueryClient();
+function CheckTarget({ onQueued }) {
+  const [target, setTarget] = useState("");
+  const [authorized, setAuthorized] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState(null);
+  const web = isUrl(target);
 
-  const { register, handleSubmit, reset } = useForm({
-    defaultValues: { scope: "", organization_name: "Acme Security Org" },
-  });
-
-  const { data: apiList = [], isLoading, isError, refetch, isFetching } = useQuery({
-    queryKey: ["misconfig-list"],
-    queryFn: fetchMisconfigs,
-    staleTime: 15000,
-  });
-
-  const scanMutation = useMutation({
-    mutationFn: triggerScanApi,
-    onSuccess: (data) => {
-      reset();
-      queryClient.invalidateQueries(["misconfig-list"]);
-    },
-  });
-
-  const onSubmit = (formData) => {
-    if (formData.scope?.trim()) {
-      scanMutation.mutate({
-        scope: formData.scope.trim(),
-        organization_name: formData.organization_name,
-      });
+  const submit = async (event) => {
+    event.preventDefault();
+    const t = target.trim();
+    if (!t) return setNotice({ ok: false, text: "Enter a URL, host, IP or CIDR range." });
+    if (!authorized) return setNotice({ ok: false, text: "Confirm you are authorized to test this target." });
+    setBusy(true);
+    setNotice(null);
+    try {
+      await api.post(web ? "/scans/web" : "/scans/network", { target: t, label: "Configuration check" });
+      setNotice({ ok: true, text: `${web ? "Web" : "Network"} check of ${t} queued. Configuration issues it finds appear here when it finishes — follow progress on the Scans page.` });
+      setTarget("");
+      setAuthorized(false);
+      onQueued?.();
+    } catch (err) {
+      setNotice({ ok: false, text: err?.response?.data?.detail ? String(err.response.data.detail) : "Couldn't start the check." });
+    } finally {
+      setBusy(false);
     }
   };
 
-  // Combine real API misconfigurations with findings prop (if any) without mock data
-  const combinedMisconfigs = useMemo(() => {
-    const list = [...apiList];
+  return (
+    <form className="mc-check" onSubmit={submit} aria-label="Check a target for misconfigurations">
+      <label className="mc-check__field">
+        <span>Target</span>
+        <input className="so-input" value={target} onChange={(e) => setTarget(e.target.value)} placeholder="https://app.example.com  ·  10.0.0.5  ·  10.0.0.0/24" autoComplete="off" />
+      </label>
+      <p className="mc-check__engine cc-muted">
+        {target.trim() ? (web ? "Runs the web engine: headers, TLS, cookies, CORS, exposed files and admin pages." : "Runs the network engine: exposed services, cleartext protocols, unauthenticated databases.") : "URLs use the web engine; IPs, hosts and ranges use the network engine."}
+      </p>
+      <label className="cc-check so-consent">
+        <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} />
+        I'm authorized to test this target.
+      </label>
+      <button type="submit" className="cc-btn cc-btn--primary" disabled={busy || !authorized}>{busy ? "Starting…" : "Run check"}</button>
+      {notice && <p className={notice.ok ? "mc-ok" : "so-error"} role={notice.ok ? "status" : "alert"}>{notice.text} {notice.ok ? <Link to="/scans">Open Scans</Link> : null}</p>}
+    </form>
+  );
+}
 
-    // Also include findings from prop if category is network/web or has hardening recommendations
-    findings.forEach((f) => {
-      const metadata = f.finding_metadata || {};
-      const cat = String(f.category || "").toLowerCase();
-      if (metadata.cis_benchmark || metadata.hardening_recommendation || cat === "network" || cat === "web") {
-        const target = metadata.url || metadata.host || f.source || "Target";
-        list.push({
-          id: f.id,
-          target: target,
-          ip: metadata.host || target,
-          hostname: target,
-          asset_type: cat === "web" ? "Website" : "OS",
-          os_type: metadata.os_family || "Linux",
-          issue: f.title,
-          severity: (f.severity || "medium").toLowerCase(),
-          cve: f.cve_id,
-          detected_by: f.source || "Scanner",
-          remediation: metadata.hardening_recommendation || f.remediation || "Apply vendor hardening guidance.",
-          status: f.status || "OPEN",
-          discovered_at: f.detected_at || f.last_seen || new Date().toISOString(),
-        });
-      }
-    });
+export default function Misconfigurations({ canOperate = false }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+  const [showCheck, setShowCheck] = useState(false);
+  const [family, setFamily] = useState("all");
+  const [severity, setSeverity] = useState("all");
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(null);
 
-    return list;
-  }, [apiList, findings]);
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get("/misconfig/posture");
+      setData(res.data);
+      setError("");
+    } catch {
+      setError("Couldn't load configuration posture. Check that the API is running.");
+    }
+  }, []);
 
-  const filteredItems = useMemo(() => {
-    return combinedMisconfigs.filter((item) => {
-      const matchesSearch =
-        !searchFilter ||
-        item.issue?.toLowerCase().includes(searchFilter.toLowerCase()) ||
-        item.target?.toLowerCase().includes(searchFilter.toLowerCase()) ||
-        item.cve?.toLowerCase().includes(searchFilter.toLowerCase()) ||
-        item.detected_by?.toLowerCase().includes(searchFilter.toLowerCase());
+  useEffect(() => {
+    const first = window.setTimeout(load, 0);
+    const timer = window.setInterval(() => { if (!document.hidden) load(); }, REFRESH_MS);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(timer);
+    };
+  }, [load]);
 
-      const matchesSeverity =
-        severityFilter === "all" || item.severity?.toLowerCase() === severityFilter.toLowerCase();
+  const families = useMemo(() => data?.families || [], [data]);
+  const issues = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return (data?.issues || []).filter((i) =>
+      (family === "all" || i.family === family) &&
+      (severity === "all" || i.severity === severity) &&
+      (!q || i.title.toLowerCase().includes(q) || i.targets.some((t) => t.toLowerCase().includes(q)) || (i.control || "").toLowerCase().includes(q)));
+  }, [data, family, severity, query]);
 
-      const matchesAssetType =
-        assetTypeFilter === "all" || item.asset_type?.toLowerCase() === assetTypeFilter.toLowerCase();
-
-      const matchesScanner =
-        scannerFilter === "all" || item.detected_by?.toLowerCase() === scannerFilter.toLowerCase();
-
-      return matchesSearch && matchesSeverity && matchesAssetType && matchesScanner;
-    });
-  }, [combinedMisconfigs, searchFilter, severityFilter, assetTypeFilter, scannerFilter]);
-
-  const summary = useMemo(() => {
-    const total = combinedMisconfigs.length;
-    const critical = combinedMisconfigs.filter((i) => i.severity?.toLowerCase() === "critical").length;
-    const high = combinedMisconfigs.filter((i) => i.severity?.toLowerCase() === "high").length;
-    const medium = combinedMisconfigs.filter((i) => i.severity?.toLowerCase() === "medium").length;
-    const low = combinedMisconfigs.filter((i) => i.severity?.toLowerCase() === "low").length;
-    return { total, critical, high, medium, low };
-  }, [combinedMisconfigs]);
+  const k = data?.kpis;
+  const matrixRows = (data?.matrix?.rows || []).map((r) => ({ ...r, color: FAMILY_COLORS[r.key] }));
+  const maxTarget = Math.max(1, ...(data?.targets || []).map((t) => t.open));
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "24px", padding: "8px 0" }}>
-      {/* Header & Launch Scope Scanner Panel */}
-      <div
-        className="panel"
-        style={{
-          background: "linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.85))",
-          border: "1px solid rgba(148, 163, 184, 0.15)",
-          borderRadius: "16px",
-          padding: "24px",
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "16px" }}>
-          <div>
-            <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "6px" }}>
-              <FiShield style={{ color: "#38bdf8", fontSize: "24px" }} />
-              <h1 style={{ fontSize: "1.6rem", fontWeight: "700", color: "#f8fafc", margin: 0 }}>
-                Production Misconfiguration Engine
-              </h1>
-            </div>
-            <p style={{ color: "#94a3b8", fontSize: "0.9rem", margin: 0 }}>
-              Live scope discovery & scanner integration across Lynis, Nmap, SecurityHeaders, SSL Labs, Nuclei, and ZAP.
-            </p>
-          </div>
-
-          {/* Trigger Scan Form */}
-          <form onSubmit={handleSubmit(onSubmit)} style={{ display: "flex", gap: "10px", alignItems: "center", minWidth: "360px" }}>
-            <div style={{ position: "relative", flex: 1 }}>
-              <FiSearch style={{ position: "absolute", left: "14px", top: "50%", transform: "translateY(-50%)", color: "#64748b" }} />
-              <input
-                {...register("scope")}
-                className="scan-input"
-                placeholder="Enter IP, Domain, CIDR (192.168.1.0/24), Range, ASN, URL..."
-                style={{
-                  width: "100%",
-                  paddingLeft: "38px",
-                  paddingRight: "14px",
-                  height: "42px",
-                  borderRadius: "10px",
-                  border: "1px solid rgba(148, 163, 184, 0.2)",
-                  background: "rgba(15, 23, 42, 0.8)",
-                  color: "#fff",
-                }}
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={scanMutation.isPending}
-              className="btn btn--primary"
-              style={{
-                height: "42px",
-                padding: "0 20px",
-                borderRadius: "10px",
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-                whiteSpace: "nowrap",
-              }}
-            >
-              <FiPlay className={scanMutation.isPending ? "spin" : ""} />
-              {scanMutation.isPending ? "Launching..." : "Scan Scope"}
-            </button>
-          </form>
+    <div className="cc mc-page">
+      <header className="cc-top">
+        <div className="cc-top__title">
+          <span className="cc-live-dot" aria-hidden="true" />
+          <h1>Misconfigurations</h1>
         </div>
-
-        {/* Quick Presets */}
-        <div style={{ display: "flex", gap: "10px", marginTop: "16px", alignItems: "center", flexWrap: "wrap" }}>
-          <span style={{ fontSize: "0.8rem", color: "#64748b" }}>Quick scopes:</span>
-          {["192.168.1.0/24", "acmecorp.com", "https://acmecorp.com/api/v1", "AS15169", "192.168.1.1-192.168.1.50"].map((preset) => (
-            <button
-              key={preset}
-              onClick={() => {
-                onSubmit({ scope: preset, organization_name: "Acme Security Org" });
-              }}
-              style={{
-                background: "rgba(30, 41, 59, 0.6)",
-                border: "1px solid rgba(148, 163, 184, 0.15)",
-                color: "#94a3b8",
-                padding: "4px 10px",
-                borderRadius: "6px",
-                fontSize: "0.78rem",
-                cursor: "pointer",
-              }}
-            >
-              {preset}
+        <div className="cc-top__tools">
+          {data ? <time className="cc-clock" dateTime={data.generated_at}>Updated {new Date(data.generated_at).toLocaleTimeString([], { hour12: false })}</time> : null}
+          <button type="button" className="cc-btn" onClick={load}>Refresh</button>
+          {canOperate ? (
+            <button type="button" className="cc-btn cc-btn--primary" aria-expanded={showCheck} aria-controls="mc-check" onClick={() => setShowCheck((v) => !v)}>
+              {showCheck ? "Close" : "Check a target"}
             </button>
-          ))}
+          ) : null}
         </div>
+      </header>
+
+      {showCheck && canOperate ? (
+        <section id="mc-check" className="cc-panel mc-check-panel" aria-label="Check a target">
+          <header className="cc-panel__head"><h2>Check a target</h2></header>
+          <CheckTarget onQueued={load} />
+        </section>
+      ) : null}
+
+      {error && <p className="so-error" role="alert">{error}</p>}
+
+      <div className="cc-kpis">
+        <Kpi label="Open misconfigurations" value={k?.open} hint={k ? `${k.issue_types} distinct issues` : undefined} />
+        <Kpi label="Critical + high" value={k?.urgent} tone="hot" />
+        <Kpi label="Targets affected" value={k?.targets} />
+        <Kpi label="Control families failing" value={k?.families_failing} hint="of 7" />
+        <Kpi label="CIS checks failing" value={k?.cis_failing} hint="on agent endpoints" />
+        <Kpi label="Fixed · 30 d" value={k?.fixed_30d} tone="live" />
       </div>
 
-      {/* Metric Cards */}
-      <div className="metrics-grid">
-        <article className="metric-card" style={{ borderLeft: "4px solid #38bdf8" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>Total Misconfigurations</span>
-            <FiShield style={{ color: "#38bdf8" }} />
-          </div>
-          <strong>{summary.total}</strong>
-          <small>Audited across active scanners</small>
-        </article>
+      <div className="an-grid">
+        <section className="cc-panel an-w an-w--wide" aria-label="Misconfiguration matrix">
+          <header className="cc-panel__head"><h2>Misconfiguration matrix · family × target</h2></header>
+          {data?.matrix?.cols?.length ? (
+            <BarField3D
+              rows={matrixRows}
+              cols={data.matrix.cols}
+              values={data.matrix.values}
+              caption="Open configuration issues per control family and target"
+              describe={(row, col, value) => <><strong>{value}</strong> {row.label.toLowerCase()} issue{value === 1 ? "" : "s"} on <span className="cc-mono">{col}</span></>}
+              footer={<div className="an-terrain__axis cc-mono"><span>Most exposed</span><span>← top {data.matrix.cols.length} targets →</span><span>Less exposed</span></div>}
+            />
+          ) : <p className="cc-empty">{data ? "No configuration issues open." : "Loading…"}</p>}
+        </section>
 
-        <article className="metric-card" style={{ borderLeft: "4px solid #ef4444" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>Critical Issues</span>
-            <FiAlertTriangle style={{ color: "#ef4444" }} />
-          </div>
-          <strong>{summary.critical}</strong>
-          <small>Require immediate patch</small>
-        </article>
+        <section className="cc-panel an-w" aria-label="Control families">
+          <header className="cc-panel__head"><h2>Control families</h2></header>
+          {families.length ? (
+            <>
+              <FamilyRadar families={families} />
+              <ul className="mc-families">
+                {families.map((f) => (
+                  <li key={f.key}>
+                    <button type="button" className={`mc-family${family === f.key ? " is-active" : ""}`} aria-pressed={family === f.key} onClick={() => setFamily(family === f.key ? "all" : f.key)}>
+                      <span className="cc-swatch" style={{ background: hex(FAMILY_COLORS[f.key]) }} />
+                      <span className="mc-family__name">{f.label}</span>
+                      <span className="cc-mono">{f.open}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : <p className="cc-empty">{data ? "Nothing to show." : "Loading…"}</p>}
+        </section>
 
-        <article className="metric-card" style={{ borderLeft: "4px solid #f59e0b" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>High Severity</span>
-            <FiAlertTriangle style={{ color: "#f59e0b" }} />
-          </div>
-          <strong>{summary.high}</strong>
-          <small>Privilege escalation / exposure</small>
-        </article>
+        <section className="cc-panel an-w" aria-label="Most misconfigured targets">
+          <header className="cc-panel__head"><h2>Most misconfigured targets</h2></header>
+          {data?.targets?.length ? (
+            <>
+              <ol className="cc-bars">
+                {data.targets.map((t) => (
+                  <li key={t.target}>
+                    <Link to={`/findings?target=${encodeURIComponent(t.target)}`} className="cc-bars__name" title={`${t.target} — ${Object.entries(t.families).map(([n, c]) => `${n}: ${c}`).join(", ")}`}>{t.target}</Link>
+                    <div className="cc-bars__track" aria-hidden="true">
+                      {SEVS.filter((s) => t[s]).map((s) => <span key={s} className={`cc-fill cc-fill--${s}`} style={{ width: `${(t[s] / maxTarget) * 100}%` }} />)}
+                    </div>
+                    <span className="cc-bars__value">{t.open}</span>
+                  </li>
+                ))}
+              </ol>
+              <ul className="cc-legend an-legend">{SEVS.map((s) => <li key={s}><span className={`cc-swatch cc-swatch--${s}`} />{s}</li>)}</ul>
+            </>
+          ) : <p className="cc-empty">{data ? "No targets affected." : "Loading…"}</p>}
+        </section>
 
-        <article className="metric-card" style={{ borderLeft: "4px solid #06b6d4" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>Medium Severity</span>
-            <FiInfo style={{ color: "#06b6d4" }} />
-          </div>
-          <strong>{summary.medium}</strong>
-          <small>Missing hardening policy</small>
-        </article>
-
-        <article className="metric-card" style={{ borderLeft: "4px solid #10b981" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>Low Severity</span>
-            <FiCheckCircle style={{ color: "#10b981" }} />
-          </div>
-          <strong>{summary.low}</strong>
-          <small>Informational hardening</small>
-        </article>
+        <section className="cc-panel an-w" aria-label="CIS hardening checks failing">
+          <header className="cc-panel__head"><h2>CIS hardening checks failing</h2></header>
+          {data?.cis?.length ? (
+            <ul className="cc-list">
+              {data.cis.map((c) => (
+                <li key={c.title} className="an-overdue">
+                  <span className={`cc-dot cc-dot--${c.severity}`} aria-hidden="true" />
+                  <span className="an-overdue__main">
+                    <span>{c.title}</span>
+                    <span className="so-sub cc-mono">{c.control !== "—" ? c.control : "No CIS reference"} · {c.endpoints.slice(0, 3).join(", ")}{c.endpoints.length > 3 ? "…" : ""}</span>
+                  </span>
+                  <span className="cc-mono">{c.endpoint_count} endpoint{c.endpoint_count === 1 ? "" : "s"}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="cc-empty">{data ? <>No failing checks. CIS results come from the endpoint agent — <Link to="/agent-management">deploy it</Link> to Windows hosts to audit them.</> : "Loading…"}</p>
+          )}
+        </section>
       </div>
 
-      {/* Main Table Panel */}
-      <div className="panel">
-        <div className="panel__header" style={{ flexWrap: "wrap", gap: "14px" }}>
-          <div>
-            <p className="eyebrow">Audited Inventory</p>
-            <h2>Verified Misconfigurations ({filteredItems.length})</h2>
-          </div>
-
-          {/* Filter Controls */}
-          <div className="table-controls">
-            <div style={{ position: "relative" }}>
-              <FiFilter style={{ position: "absolute", left: "12px", top: "50%", transform: "translateY(-50%)", color: "#64748b" }} />
-              <input
-                className="scan-input"
-                placeholder="Filter by issue, target, CVE..."
-                value={searchFilter}
-                onChange={(e) => setSearchFilter(e.target.value)}
-                style={{ paddingLeft: "34px", width: "200px" }}
-              />
-            </div>
-
-            <select className="scan-select" value={severityFilter} onChange={(e) => setSeverityFilter(e.target.value)} style={{ width: "130px" }}>
-              <option value="all">All Severities</option>
-              <option value="critical">Critical</option>
-              <option value="high">High</option>
-              <option value="medium">Medium</option>
-              <option value="low">Low</option>
-            </select>
-
-            <select className="scan-select" value={assetTypeFilter} onChange={(e) => setAssetTypeFilter(e.target.value)} style={{ width: "130px" }}>
-              <option value="all">All Asset Types</option>
-              <option value="os">OS</option>
-              <option value="network">Network</option>
-              <option value="website">Website</option>
-              <option value="endpoint">Endpoint</option>
-            </select>
-
-            <select className="scan-select" value={scannerFilter} onChange={(e) => setScannerFilter(e.target.value)} style={{ width: "140px" }}>
-              <option value="all">All Scanners</option>
-              <option value="lynis">Lynis</option>
-              <option value="nmap">Nmap</option>
-              <option value="securityheaders">SecurityHeaders</option>
-              <option value="ssllabs">SSL Labs</option>
-              <option value="nuclei">Nuclei</option>
-              <option value="zap">ZAP</option>
-            </select>
-          </div>
+      <section className="cc-panel mc-issues" aria-label="Configuration issues">
+        <header className="cc-panel__head">
+          <h2>Configuration issues ({issues.length})</h2>
+        </header>
+        <div className="mc-filters">
+          <input className="so-input mc-search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search issue, target or CIS control" aria-label="Search configuration issues" />
+          <select className="so-input" value={family} onChange={(e) => setFamily(e.target.value)} aria-label="Control family">
+            <option value="all">All families</option>
+            {families.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+          </select>
+          <select className="so-input" value={severity} onChange={(e) => setSeverity(e.target.value)} aria-label="Severity">
+            <option value="all">All severities</option>
+            {SEVS.map((s) => <option key={s} value={s}>{s[0].toUpperCase() + s.slice(1)}</option>)}
+          </select>
         </div>
-
-        <div className="table-wrap">
-          <table className="table table--dense">
+        <div className="so-table-wrap">
+          <table className="so-table mc-table">
             <thead>
               <tr>
-                <th>Target</th>
-                <th>Misconfiguration Issue</th>
-                <th>Asset Type</th>
-                <th>OS / Device</th>
-                <th>Detected By</th>
-                <th>Severity</th>
-                <th>Actions</th>
+                <th scope="col">Issue</th>
+                <th scope="col">Family</th>
+                <th scope="col">Severity</th>
+                <th scope="col">Targets</th>
+                <th scope="col">Last seen</th>
               </tr>
             </thead>
             <tbody>
-              {filteredItems.map((item, idx) => {
-                const sev = item.severity?.toLowerCase();
-                const isCrit = sev === "critical";
-                const isHigh = sev === "high";
-
+              {issues.map((i) => {
+                const expanded = open === i.key;
                 return (
-                  <tr
-                    key={item.id || idx}
-                    onClick={() => setSelectedIssue(item)}
-                    style={{ cursor: "pointer", background: selectedIssue?.id === item.id ? "rgba(56, 189, 248, 0.08)" : "transparent" }}
-                  >
-                    <td data-label="Target">
-                      <strong>{item.target}</strong>
-                      {item.ip && <p style={{ margin: 0, fontSize: "0.78rem", color: "#64748b" }}>{item.ip}</p>}
-                    </td>
-                    <td data-label="Misconfiguration Issue">
-                      <strong style={{ color: "#f8fafc" }}>{item.issue}</strong>
-                      {item.cve && <p style={{ margin: 0, fontSize: "0.78rem", color: "#ef4444" }}>{item.cve}</p>}
-                    </td>
-                    <td data-label="Asset Type">
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
-                        {item.asset_type === "Website" ? <FiGlobe style={{ color: "#38bdf8" }} /> : item.asset_type === "Endpoint" ? <FiCpu style={{ color: "#a855f7" }} /> : <FiServer style={{ color: "#10b981" }} />}
-                        {item.asset_type}
-                      </span>
-                    </td>
-                    <td data-label="OS / Device">{item.os_type || "Linux"}</td>
-                    <td data-label="Detected By">
-                      <span style={{ padding: "2px 8px", borderRadius: "4px", background: "rgba(148, 163, 184, 0.12)", color: "#cbd5e1", fontSize: "0.78rem" }}>
-                        {item.detected_by}
-                      </span>
-                    </td>
-                    <td data-label="Severity">
-                      <span className={`pill pill--${isCrit ? "critical" : isHigh ? "high" : sev === "medium" ? "medium" : "low"}`}>
-                        {item.severity}
-                      </span>
-                    </td>
-                    <td data-label="Actions">
-                      <button className="btn btn--secondary" style={{ padding: "4px 10px", fontSize: "0.78rem", display: "inline-flex", alignItems: "center", gap: "4px" }}>
-                        Remediation <FiChevronRight />
-                      </button>
-                    </td>
-                  </tr>
+                  <Fragment key={i.key}>
+                    <tr className={expanded ? "is-open" : ""}>
+                      <td>
+                        <button type="button" className="mc-issue" aria-expanded={expanded} aria-controls={`mc-d-${i.key}`} onClick={() => setOpen(expanded ? null : i.key)}>
+                          <span aria-hidden="true" className="mc-caret">{expanded ? "▾" : "▸"}</span>
+                          <span>{i.title}{i.control ? <span className="so-sub cc-mono"> · {i.control}</span> : null}</span>
+                        </button>
+                      </td>
+                      <td><span className="mc-fam-tag" style={{ "--fam": hex(FAMILY_COLORS[i.family]) }}>{i.family_label}</span></td>
+                      <td><span className={`mc-sev mc-sev--${i.severity}`}>{i.severity}</span></td>
+                      <td className="cc-mono">{i.target_count}</td>
+                      <td className="cc-mono cc-muted">{fmtDate(i.last_seen)}</td>
+                    </tr>
+                    {expanded ? (
+                      <tr className="mc-detail-row" id={`mc-d-${i.key}`}>
+                        <td colSpan={5}>
+                          <div className="mc-detail">
+                            <section>
+                              <h3>How to fix</h3>
+                              <p>{i.remediation || "The scanner gave no remediation guidance for this issue."}</p>
+                            </section>
+                            {i.evidence ? (
+                              <section>
+                                <h3>Evidence</h3>
+                                <pre className="fx-proof">{i.evidence}</pre>
+                              </section>
+                            ) : null}
+                            <section>
+                              <h3>Affected targets ({i.target_count})</h3>
+                              <ul className="mc-targets">
+                                {i.targets.slice(0, 24).map((t) => <li key={t}><Link className="cc-mono" to={`/findings?target=${encodeURIComponent(t)}`}>{t}</Link></li>)}
+                              </ul>
+                              <p className="so-sub">{i.count} finding{i.count === 1 ? "" : "s"} · reported by {i.sources.join(", ")} · first seen {fmtDate(i.first_seen)}</p>
+                              <Link className="cc-btn" to={`/findings?search=${encodeURIComponent(i.title)}`}>Open in Findings</Link>
+                            </section>
+                          </div>
+                        </td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
                 );
               })}
-
-              {filteredItems.length === 0 && (
-                <tr>
-                  <td colSpan="7" style={{ textAlign: "center", padding: "40px", color: "#64748b" }}>
-                    <FiShield style={{ fontSize: "32px", color: "#38bdf8", marginBottom: "8px" }} />
-                    <p style={{ margin: 0, fontWeight: "500" }}>No misconfigurations detected</p>
-                    <small>All active systems are verified against CIS benchmarks and scanner rules.</small>
-                  </td>
-                </tr>
-              )}
+              {!issues.length && <tr><td colSpan={5} className="cc-empty so-empty">{data ? "No issues match these filters." : "Loading…"}</td></tr>}
             </tbody>
           </table>
         </div>
-      </div>
-
-      {/* Selected Issue Drawer / Modal */}
-      <AnimatePresence>
-        {selectedIssue && (
-          <div
-            style={{
-              position: "fixed",
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              background: "rgba(0, 0, 0, 0.7)",
-              backdropFilter: "blur(4px)",
-              zIndex: 9999,
-              display: "flex",
-              justifyContent: "flex-end",
-            }}
-            onClick={() => setSelectedIssue(null)}
-          >
-            <motion.div
-              initial={{ x: 450 }}
-              animate={{ x: 0 }}
-              exit={{ x: 450 }}
-              transition={{ type: "spring", damping: 25 }}
-              onClick={(e) => e.stopPropagation()}
-              style={{
-                width: "500px",
-                maxWidth: "92vw",
-                height: "100%",
-                background: "#0f172a",
-                borderLeft: "1px solid rgba(148, 163, 184, 0.2)",
-                padding: "24px",
-                overflowY: "auto",
-                display: "flex",
-                flexDirection: "column",
-                gap: "20px",
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                  <FiAlertTriangle style={{ color: "#ef4444", fontSize: "22px" }} />
-                  <h3 style={{ margin: 0, color: "#f8fafc", fontSize: "1.1rem" }}>{selectedIssue.issue}</h3>
-                </div>
-                <button onClick={() => setSelectedIssue(null)} style={{ background: "none", border: "none", color: "#94a3b8", fontSize: "20px", cursor: "pointer" }}>
-                  <FiX />
-                </button>
-              </div>
-
-              <div style={{ background: "rgba(30, 41, 59, 0.6)", padding: "16px", borderRadius: "10px", border: "1px solid rgba(148, 163, 184, 0.1)" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
-                  <span style={{ color: "#94a3b8", fontSize: "0.85rem" }}>Target</span>
-                  <strong style={{ color: "#38bdf8", fontSize: "0.85rem" }}>{selectedIssue.target}</strong>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
-                  <span style={{ color: "#94a3b8", fontSize: "0.85rem" }}>Asset Type / OS</span>
-                  <strong style={{ color: "#f1f5f9", fontSize: "0.85rem" }}>{selectedIssue.asset_type} ({selectedIssue.os_type || "Linux"})</strong>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
-                  <span style={{ color: "#94a3b8", fontSize: "0.85rem" }}>Detected By</span>
-                  <span style={{ color: "#cbd5e1", fontSize: "0.85rem" }}>{selectedIssue.detected_by}</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ color: "#94a3b8", fontSize: "0.85rem" }}>Severity</span>
-                  <span className={`pill pill--${selectedIssue.severity?.toLowerCase()}`}>{selectedIssue.severity}</span>
-                </div>
-              </div>
-
-              {/* Remediation */}
-              <div>
-                <h4 style={{ color: "#f8fafc", fontSize: "0.95rem", marginBottom: "8px", display: "flex", alignItems: "center", gap: "6px" }}>
-                  <FiShield style={{ color: "#10b981" }} /> Remediation Guidance & CIS Benchmark
-                </h4>
-                <div style={{ background: "rgba(16, 185, 129, 0.08)", border: "1px solid rgba(16, 185, 129, 0.2)", padding: "14px", borderRadius: "8px", color: "#a7f3d0", fontSize: "0.88rem", lineHeight: "1.5" }}>
-                  {selectedIssue.remediation || "Apply vendor security hardening patch."}
-                </div>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+        <p className="an-note">
+          Built from network, web and endpoint-agent findings that describe a configuration problem. Software vulnerabilities, injection flaws and Shadow IT have their own pages. Triage and assign individual findings in <Link to="/findings">Findings</Link>.
+        </p>
+      </section>
     </div>
   );
 }

@@ -282,7 +282,7 @@ def run_web_assessment(
             findings.append({
                 "title": "Missing Content-Security-Policy (CSP) Header",
                 "category": "web",
-                "source": "zap",
+                "source": "web",
                 "port": port,
                 "protocol": "https" if base_url.startswith("https") else "http",
                 "service": "http",
@@ -301,7 +301,7 @@ def run_web_assessment(
             findings.append({
                 "title": "Missing HTTP Strict Transport Security (HSTS) Header",
                 "category": "web",
-                "source": "zap",
+                "source": "web",
                 "port": 443,
                 "protocol": "https",
                 "service": "https",
@@ -320,7 +320,7 @@ def run_web_assessment(
             findings.append({
                 "title": "Clickjacking Vulnerability - Missing X-Frame-Options",
                 "category": "web",
-                "source": "zap",
+                "source": "web",
                 "port": port,
                 "protocol": "https" if base_url.startswith("https") else "http",
                 "service": "http",
@@ -339,7 +339,7 @@ def run_web_assessment(
             findings.append({
                 "title": "Missing X-Content-Type-Options Header",
                 "category": "web",
-                "source": "zap",
+                "source": "web",
                 "port": port,
                 "protocol": "https" if base_url.startswith("https") else "http",
                 "service": "http",
@@ -359,7 +359,7 @@ def run_web_assessment(
             findings.append({
                 "title": f"Web Server Technology Information Disclosure ({server_banner})",
                 "category": "web",
-                "source": "zap",
+                "source": "web",
                 "port": port,
                 "protocol": "https" if base_url.startswith("https") else "http",
                 "service": "http",
@@ -379,7 +379,7 @@ def run_web_assessment(
                 findings.append({
                     "title": f"Insecure Session Cookie Missing Security Flags ({cookie.name})",
                     "category": "web",
-                    "source": "zap",
+                    "source": "web",
                     "port": port,
                     "protocol": "https" if base_url.startswith("https") else "http",
                     "service": "http",
@@ -405,7 +405,7 @@ def run_web_assessment(
             findings.append({
                 "title": "Overly Permissive Cross-Origin Resource Sharing (CORS) Policy",
                 "category": "web",
-                "source": "zap",
+                "source": "web",
                 "port": port,
                 "protocol": "https" if base_url.startswith("https") else "http",
                 "service": "http",
@@ -479,7 +479,7 @@ def run_web_assessment(
                     findings.append({
                         "title": "Subresource Integrity (SRI) Attribute Missing",
                         "category": "web",
-                        "source": "zap",
+                        "source": "web",
                         "port": port,
                         "protocol": "https" if base_url.startswith("https") else "http",
                         "service": "http",
@@ -500,7 +500,7 @@ def run_web_assessment(
                     findings.append({
                         "title": f"Exposed Sensitive Document / Advisory File ({p_path})",
                         "category": "web",
-                        "source": "zap",
+                        "source": "web",
                         "port": port,
                         "protocol": "https" if base_url.startswith("https") else "http",
                         "service": "http",
@@ -577,7 +577,7 @@ def run_web_assessment(
                 return {
                     "title": title,
                     "category": "web",
-                    "source": "zap",
+                    "source": "web",
                     "port": port,
                     "protocol": "https" if base_url.startswith("https") else "http",
                     "service": "http",
@@ -640,7 +640,7 @@ def run_web_assessment(
                         findings.append({
                             "title": title,
                             "category": "web",
-                            "source": "zap",
+                            "source": "web",
                             "port": port,
                             "protocol": "https" if base_url.startswith("https") else "http",
                             "service": "http",
@@ -687,7 +687,7 @@ def run_web_assessment(
                 findings.append({
                     "title": "Reflected Cross-Site Scripting (XSS) in Parameter Input",
                     "category": "web",
-                    "source": "zap",
+                    "source": "web",
                     "port": port,
                     "protocol": "https" if base_url.startswith("https") else "http",
                     "service": "http",
@@ -749,7 +749,7 @@ def run_web_assessment(
             findings.append({
                 "title": f"SQL Injection in '{param}' parameter",
                 "category": "web",
-                "source": "zap",
+                "source": "web",
                 "port": port,
                 "protocol": "https" if base_url.startswith("https") else "http",
                 "service": "http",
@@ -786,7 +786,7 @@ def run_web_assessment(
                 findings.append({
                     "title": "SQL Injection Authentication Bypass in Login Endpoint",
                     "category": "web",
-                    "source": "zap",
+                    "source": "web",
                     "port": port,
                     "protocol": "https" if base_url.startswith("https") else "http",
                     "service": "http",
@@ -824,7 +824,7 @@ def run_web_assessment(
                     findings.append({
                         "title": "Directory Traversal / Arbitrary File Disclosure Vulnerability",
                         "category": "web",
-                        "source": "zap",
+                        "source": "web",
                         "port": port,
                         "protocol": "https" if base_url.startswith("https") else "http",
                         "service": "http",
@@ -861,7 +861,7 @@ def run_web_assessment(
                     findings.append({
                         "title": "Open URL Redirection Vulnerability",
                         "category": "web",
-                        "source": "zap",
+                        "source": "web",
                         "port": port,
                         "protocol": "https" if base_url.startswith("https") else "http",
                         "service": "http",
@@ -888,7 +888,7 @@ def run_web_assessment(
             findings.append({
                 "title": "Insecure HTTP TRACE Method Enabled (Cross-Site Tracing)",
                 "category": "web",
-                "source": "zap",
+                "source": "web",
                 "port": port,
                 "protocol": "https" if base_url.startswith("https") else "http",
                 "service": "http",
@@ -916,7 +916,7 @@ def run_web_assessment(
                 findings.append({
                     "title": f"Unrestricted GraphQL Introspection Query Enabled ({gql_path})",
                     "category": "web",
-                    "source": "zap",
+                    "source": "web",
                     "port": port,
                     "protocol": "https" if base_url.startswith("https") else "http",
                     "service": "http",

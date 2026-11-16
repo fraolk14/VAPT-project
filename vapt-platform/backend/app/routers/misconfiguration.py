@@ -1,13 +1,11 @@
-import threading
-from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.misconfiguration import MisconfigAsset, Misconfiguration, Organization, ScanJob
-from app.services.misconfig_scanner import parse_scope_type, run_misconfiguration_scan_job
-
+from app.models.misconfiguration import MisconfigAsset, Misconfiguration, ScanJob
+from app.services.misconfig_posture import build_posture
+from app.services.misconfig_scanner import fabricated_filter
 from app.services.security import require_analyst
 
 router = APIRouter(prefix="/misconfig", tags=["Misconfigurations Engine"])
@@ -15,51 +13,25 @@ router = APIRouter(prefix="/misconfig", tags=["Misconfigurations Engine"])
 
 class ScanJobCreate(BaseModel):
     scope: str
-    organization_name: str | None = "Acme Security Org"
+    organization_name: str | None = None
 
 
 @router.post("/scan", dependencies=[Depends(require_analyst)])
 @router.post("/v1/scan", dependencies=[Depends(require_analyst)])
-def trigger_misconfig_scan(
-    payload: ScanJobCreate,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
-):
-    scope_str = payload.scope.strip()
-    if not scope_str:
-        raise HTTPException(status_code=400, detail="Scope cannot be empty")
-
-    org_name = payload.organization_name or "Acme Security Org"
-    org = db.query(Organization).filter(Organization.name == org_name).first()
-    if not org:
-        org = Organization(name=org_name)
-        db.add(org)
-        db.commit()
-        db.refresh(org)
-
-    scope_type = parse_scope_type(scope_str)
-
-    job = ScanJob(
-        organization_id=org.id,
-        scope=scope_str,
-        scope_type=scope_type,
-        status="PENDING"
+def trigger_misconfig_scan(payload: ScanJobCreate):
+    # The old engine here wrote a fixed list of issues for every target without probing it.
+    # Configuration checks now come from the real network and web engines.
+    raise HTTPException(
+        status_code=410,
+        detail="This endpoint has been retired. Start a real check with POST /scans/network (IP, host or CIDR) or POST /scans/web (URL); configuration issues they find appear in GET /misconfig/posture.",
     )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
 
-    # Launch scanning worker in background thread
-    threading.Thread(target=run_misconfiguration_scan_job, args=(job.id,), daemon=True).start()
 
-    return {
-        "job_id": job.id,
-        "organization": org.name,
-        "scope": job.scope,
-        "scope_type": job.scope_type,
-        "status": job.status,
-        "message": f"Scan job launched asynchronously for {job.scope} ({job.scope_type})."
-    }
+@router.get("/posture")
+@router.get("/v1/posture")
+def misconfiguration_posture(db: Session = Depends(get_db)):
+    """Configuration issues found by the network, web and endpoint-agent engines, grouped by control family."""
+    return build_posture(db)
 
 
 @router.get("/scan/{job_id}")
@@ -71,7 +43,10 @@ def get_scan_job_status(job_id: int, db: Session = Depends(get_db)):
 
     assets = db.query(MisconfigAsset).filter(MisconfigAsset.scan_job_id == job.id).all()
     asset_ids = [a.id for a in assets]
-    misconfigs = db.query(Misconfiguration).filter(Misconfiguration.asset_id.in_(asset_ids)).all() if asset_ids else []
+    misconfigs = (
+        db.query(Misconfiguration).filter(Misconfiguration.asset_id.in_(asset_ids), fabricated_filter(Misconfiguration)).all()
+        if asset_ids else []
+    )
 
     return {
         "id": job.id,
@@ -112,25 +87,31 @@ def get_scan_job_status(job_id: int, db: Session = Depends(get_db)):
                 "discovered_at": m.discovered_at.isoformat() if m.discovered_at else None,
             }
             for m in misconfigs
-        ]
+        ],
     }
 
 
 @router.get("/list")
 @router.get("/v1/list")
 def list_misconfigurations(db: Session = Depends(get_db)):
-    misconfigs = db.query(Misconfiguration).order_by(Misconfiguration.discovered_at.desc()).limit(200).all()
+    misconfigs = (
+        db.query(Misconfiguration)
+        .filter(fabricated_filter(Misconfiguration))
+        .order_by(Misconfiguration.discovered_at.desc())
+        .limit(200)
+        .all()
+    )
     results = []
     for m in misconfigs:
         asset = db.get(MisconfigAsset, m.asset_id)
         results.append({
             "id": m.id,
             "asset_id": m.asset_id,
-            "target": asset.hostname or asset.ip if asset else "Unknown",
+            "target": (asset.hostname or asset.ip) if asset else "Unknown",
             "ip": asset.ip if asset else None,
             "hostname": asset.hostname if asset else None,
-            "asset_type": asset.asset_type if asset else "OS",
-            "os_type": asset.os_type if asset else "Linux",
+            "asset_type": asset.asset_type if asset else None,
+            "os_type": asset.os_type if asset else None,
             "issue": m.issue,
             "severity": m.severity.lower(),
             "cve": m.cve,

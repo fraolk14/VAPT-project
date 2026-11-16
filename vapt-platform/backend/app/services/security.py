@@ -91,6 +91,27 @@ def verify_captcha_token(captcha_token: str | None) -> None:
         raise HTTPException(status_code=400, detail="Captcha validation failed")
 
 
+# The "captcha" is a shared sign-in access code (CAPTCHA_BYPASS_TOKEN). The built-in default is
+# public knowledge, so the policy switch only takes effect once a private code is configured.
+_DEFAULT_ACCESS_CODE = "vapt-human"
+
+
+def access_code_configured() -> bool:
+    return bool(CAPTCHA_BYPASS_TOKEN.strip()) and CAPTCHA_BYPASS_TOKEN != _DEFAULT_ACCESS_CODE
+
+
+def access_code_required(policy: "AuthPolicy | None") -> bool:
+    """True when sign-in must present the shared access code."""
+    return LOGIN_CAPTCHA_ENABLED or bool(policy and policy.captcha_enabled and access_code_configured())
+
+
+def verify_access_code(policy: "AuthPolicy | None", code: str | None) -> None:
+    import hmac
+
+    if access_code_required(policy) and not hmac.compare_digest((code or "").strip(), CAPTCHA_BYPASS_TOKEN):
+        raise HTTPException(status_code=400, detail="The access code is missing or incorrect.")
+
+
 def get_auth_policy(db: Session) -> AuthPolicy | None:
     return db.query(AuthPolicy).filter(AuthPolicy.policy_name == "default").first()
 

@@ -1,0 +1,317 @@
+/* Threat Intelligence page */
+
+.ti-page .ti-layout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.ti-exposure,
+.ti-kev {
+  flex: 999 1 640px;
+  min-width: 0;
+}
+
+.ti-lookup,
+.ti-sources {
+  flex: 1 1 360px;
+  min-width: 0;
+}
+
+.ti-explain {
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+
+.ti-table td {
+  vertical-align: middle;
+}
+
+.ti-cve {
+  color: #cfe9ff;
+  font-weight: 600;
+}
+
+.ti-cve:hover {
+  color: #ffffff;
+  text-decoration: underline;
+}
+
+.ti-cvetitle {
+  max-width: 340px;
+  word-break: normal;
+}
+
+.ti-kevcell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.ti-badge-kev,
+.ti-badge-ransom,
+.ti-badge-env,
+.ti-badge-unconfirmed {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.ti-badge-kev {
+  background: rgba(255, 107, 107, 0.18);
+  border: 1px solid rgba(255, 107, 107, 0.6);
+  color: #ffb4b4;
+}
+
+.ti-badge-ransom {
+  background: rgba(192, 132, 252, 0.18);
+  border: 1px solid rgba(192, 132, 252, 0.6);
+  color: #e3c7ff;
+}
+
+.ti-badge-unconfirmed {
+  background: transparent;
+  border: 1px dashed rgba(245, 215, 110, 0.7);
+  color: #f5d76e;
+  margin-bottom: 4px;
+}
+
+.ti-badge-env {
+  background: rgba(92, 225, 255, 0.15);
+  border: 1px solid var(--cc-cyan);
+  color: var(--cc-cyan);
+}
+
+.ti-epss {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 140px;
+}
+
+.ti-epss__track {
+  flex: 1;
+  height: 6px;
+  background: rgba(46, 123, 255, 0.15);
+  overflow: hidden;
+}
+
+.ti-epss__fill {
+  display: block;
+  height: 100%;
+}
+
+.ti-epss__fill--ok { background: #3ddc97; }
+.ti-epss__fill--warn { background: #f5d76e; }
+.ti-epss__fill--bad { background: #ff6b6b; box-shadow: 0 0 8px rgba(255, 107, 107, 0.6); }
+
+/* ---------- Lookup ---------- */
+
+.ti-lookup__form {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.ti-lookup__form .so-search {
+  flex: 1;
+  max-width: none;
+}
+
+.ti-lookup__go {
+  min-height: 44px;
+  padding: 0 18px;
+}
+
+.ti-result {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ti-verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  border: 1px solid var(--cc-line-hi);
+}
+
+.ti-verdict span {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--cc-muted);
+}
+
+.ti-verdict strong {
+  font-size: 18px;
+}
+
+.ti-verdict--bad { border-color: rgba(255, 107, 107, 0.7); background: rgba(255, 107, 107, 0.1); }
+.ti-verdict--bad strong { color: #ffb4b4; }
+.ti-verdict--warn { border-color: rgba(245, 215, 110, 0.7); background: rgba(245, 215, 110, 0.08); }
+.ti-verdict--warn strong { color: #f5d76e; }
+.ti-verdict--good { border-color: rgba(61, 220, 151, 0.6); background: rgba(61, 220, 151, 0.08); }
+.ti-verdict--good strong { color: #9ff0c9; }
+
+.ti-reasons {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ti-reason {
+  position: relative;
+  padding-left: 18px;
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: #d4e2f0;
+}
+
+.ti-reason::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--cc-muted);
+}
+
+.ti-reason--bad::before { background: #ff6b6b; }
+.ti-reason--warn::before { background: #f5d76e; }
+.ti-reason--good::before { background: #3ddc97; }
+
+.ti-block h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--cc-cyan);
+}
+
+.ti-block p {
+  margin: 0 0 4px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: #d4e2f0;
+}
+
+.ti-block a {
+  color: var(--cc-cyan);
+}
+
+.ti-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.ti-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--cc-line-hi);
+  font-family: var(--nw-mono, monospace);
+  font-size: 12px;
+  color: #bfe9ff;
+}
+
+.ti-chip--risky {
+  border-color: rgba(255, 159, 90, 0.7);
+  color: #ffc4a1;
+}
+
+.ti-cvelist {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+
+.ti-cvelist li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.ti-cvelist a {
+  color: #cfe9ff;
+}
+
+/* ---------- KEV list ---------- */
+
+.ti-kev__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.ti-kevlist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 560px;
+  overflow-y: auto;
+}
+
+.ti-kevlist li {
+  padding: 12px 4px;
+  border-bottom: 1px dashed rgba(31, 79, 143, 0.5);
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: #d4e2f0;
+}
+
+.ti-kevlist li.is-env {
+  background: rgba(92, 225, 255, 0.06);
+  border-left: 2px solid var(--cc-cyan);
+  padding-left: 10px;
+}
+
+.ti-kevlist__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-bottom: 4px;
+}
+
+.ti-kevlist p {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+}
+
+/* ---------- Today ---------- */
+
+.ti-today {
+  margin-bottom: 16px;
+}
+
+.ti-today__tabs {
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.ti-today .ti-kevlist {
+  max-height: 460px;
+}
+
+.ti-today .an-subhead {
+  margin: 16px 0 4px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cc-muted);
+}

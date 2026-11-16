@@ -137,6 +137,9 @@ def create_web_scan(
     return scan
 
 
+MAX_MOBILE_UPLOAD_BYTES = 200 * 1024 * 1024  # keep in step with client_max_body_size in frontend/vapt-ui/nginx.conf
+
+
 @router.post("/mobile", response_model=ScanResponse, dependencies=[Depends(require_analyst)])
 async def create_mobile_scan(
     background_tasks: BackgroundTasks,
@@ -150,6 +153,13 @@ async def create_mobile_scan(
         raise HTTPException(status_code=400, detail="Mobile scans require an APK, IPA, or AAB file.")
 
     content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    if len(content) > MAX_MOBILE_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"The app package is {len(content) // (1024 * 1024)} MB; the limit is {MAX_MOBILE_UPLOAD_BYTES // (1024 * 1024)} MB.")
+    if not content.startswith(b"PK"):
+        # APK, AAB and IPA files are all ZIP archives.
+        raise HTTPException(status_code=400, detail="That file isn't a valid app package. APK, AAB and IPA files are ZIP archives; check that the upload isn't corrupted or renamed.")
     upload_metadata = persist_mobile_upload(filename, content)
     scan = Scan(
         scan_name=label or f"Mobile Assessment {filename}",
