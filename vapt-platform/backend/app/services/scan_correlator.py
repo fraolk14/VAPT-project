@@ -44,50 +44,114 @@ def _merge_cves(*cve_fields: str | None) -> str | None:
     return ", ".join(sorted(seen)) if seen else None
 
 
-# Real, authoritative NVD / MITRE CVE mapping based on detected software products and versions
-_REAL_CVE_MAP: list[tuple[re.Pattern, str, str, float]] = [
+# CVEs attached only when the scanner saw the product AND a vulnerable version (or, for the two
+# "service enabled" CVEs, the exact condition the CVE describes).
+_VERSION_CVE_MAP: list[tuple[re.Pattern, str, str, float]] = [
     (re.compile(r"\bvsftpd\s*2\.3\.4\b", re.I), "CVE-2011-2523", "critical", 9.8),
-    (re.compile(r"\b(telnet|23/tcp)\b", re.I), "CVE-1999-0619", "high", 8.1),
-    (re.compile(r"\b(smb|445/tcp|netbios|eternalblue)\b", re.I), "CVE-2017-0144", "critical", 9.8),
-    (re.compile(r"\bopenssh\s*7\.[0-4]\b", re.I), "CVE-2018-15473, CVE-2018-15919", "high", 7.5),
-    (re.compile(r"\bopenssh\s*[1-8]\.\d\b", re.I), "CVE-2021-41617", "medium", 7.0),
-    (re.compile(r"\bapache\s*2\.4\.[0-9]\b", re.I), "CVE-2017-7679, CVE-2017-9788", "high", 7.5),
-    (re.compile(r"\b(redis|6379/tcp)\b", re.I), "CVE-2022-0543, CVE-2015-1427", "critical", 9.8),
-    (re.compile(r"\b(mongodb|27017/tcp)\b", re.I), "CVE-2019-2386", "high", 7.5),
-    (re.compile(r"\b(elasticsearch|9200/tcp)\b", re.I), "CVE-2015-1427, CVE-2014-3120", "high", 7.5),
-    (re.compile(r"\b(rdp|3389/tcp|bluekeep)\b", re.I), "CVE-2019-0708", "critical", 9.8),
-    (re.compile(r"\b(docker|2375/tcp|2376/tcp)\b", re.I), "CVE-2019-5736", "critical", 9.8),
-    (re.compile(r"\b(actuator|spring)\b", re.I), "CVE-2022-22965", "critical", 9.8),
-    (re.compile(r"\b(rpcbind|111/tcp)\b", re.I), "CVE-2017-8779", "high", 7.5),
-    (re.compile(r"\banonymous\s*ftp\b", re.I), "CVE-1999-0497", "high", 7.5),
+    (re.compile(r"\bopenssh[_\s]*7\.[0-4](?!\d)", re.I), "CVE-2018-15473, CVE-2018-15919", "high", 7.5),
+    (re.compile(r"\bopenssh[_\s]*(?:[1-7]\.\d|8\.[0-7])(?!\d)", re.I), "CVE-2021-41617", "medium", 7.0),
+    (re.compile(r"\bapache(?:\s+httpd)?[/\s]*2\.4\.[0-9]\b", re.I), "CVE-2017-7679, CVE-2017-9788", "high", 7.5),
+    (re.compile(r"\b(telnet|23/tcp)\b", re.I), "CVE-1999-0619", "high", 8.1),  # CVE-1999-0619 = "telnet service is running"
+    (re.compile(r"\banonymous\s*ftp\b", re.I), "CVE-1999-0497", "high", 7.5),  # anonymous FTP enabled
 ]
 
+# Exposed services that match a well-known exploited vulnerability class. The port or service
+# name alone does NOT prove the host is vulnerable, so these are recorded as possible CVEs in
+# metadata for an analyst to verify — never in cve_id, and they never raise severity.
+_SERVICE_HINTS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(smb|445/tcp|netbios|eternalblue)\b", re.I), "CVE-2017-0144"),
+    (re.compile(r"\b(redis|6379/tcp)\b", re.I), "CVE-2022-0543"),
+    (re.compile(r"\b(mongodb|27017/tcp)\b", re.I), "CVE-2019-2386"),
+    (re.compile(r"\b(elasticsearch|9200/tcp)\b", re.I), "CVE-2015-1427, CVE-2014-3120"),
+    (re.compile(r"\b(rdp|3389/tcp|bluekeep)\b", re.I), "CVE-2019-0708"),
+    (re.compile(r"\b(docker|2375/tcp|2376/tcp)\b", re.I), "CVE-2019-5736"),
+    (re.compile(r"\b(actuator|spring)\b", re.I), "CVE-2022-22965"),
+    (re.compile(r"\b(rpcbind|111/tcp)\b", re.I), "CVE-2017-8779"),
+]
+HINT_CVES = {c.strip().upper() for _, ids in _SERVICE_HINTS for c in ids.split(",")}
+POSSIBLE_CVE_NOTE = "Service exposure matches a known vulnerability; the version was not confirmed, so this host may not be affected."
 
-def _enrich_cves_for_finding(finding: dict[str, Any]) -> dict[str, Any]:
-    """Enrich Nmap and socket scanner findings with real NVD CVE mappings based on service detection."""
-    text_corpus = " ".join(filter(None, [
+
+# CVEs that older releases attached from a port or service name alone (the service hints above
+# plus the static per-service fallbacks once in cve_lookup). Used to clean up stored findings.
+LEGACY_GUESSED_CVES = HINT_CVES | {
+    "CVE-2023-44487", "CVE-2022-1552", "CVE-2023-25690", "CVE-2023-0286",
+    "CVE-2022-0543", "CVE-2015-1427", "CVE-2021-44228",
+}
+_CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.I)
+
+
+def split_guessed_cves(cve_text: str | None, evidence_text: str) -> tuple[str | None, list[str]]:
+    """Separate guessed CVEs from a stored cve_id value.
+
+    A CVE stays when the scanner text confirms it: a version match, the CVE id quoted in the
+    evidence, or an NSE "VULNERABLE" verdict. Non-CVE identifiers (e.g. CIS rule numbers) are kept.
+    Returns (new cve_id value or None, guessed CVEs moved out).
+    """
+    if not cve_text:
+        return cve_text, []
+    parts = [p.strip() for p in str(cve_text).split(",") if p.strip()]
+    confirmed, _, _, _ = classify_cves(evidence_text)
+    upper_evidence = evidence_text.upper()
+    nse_vulnerable = "VULNERABLE" in upper_evidence and "NOT VULNERABLE" not in upper_evidence
+    kept, moved = [], []
+    for part in parts:
+        cve = part.upper()
+        guessed = (
+            _CVE_RE.fullmatch(cve)
+            and cve in LEGACY_GUESSED_CVES
+            and cve not in confirmed
+            and cve not in upper_evidence
+            and not nse_vulnerable
+        )
+        (moved if guessed else kept).append(cve if _CVE_RE.fullmatch(cve) else part)
+    return (", ".join(kept) or None), sorted(set(moved))
+
+
+def _finding_text(finding: dict[str, Any]) -> str:
+    meta = finding.get("metadata") or {}
+    return " ".join(filter(None, [
         str(finding.get("title") or ""),
         str(finding.get("service") or ""),
         str(finding.get("evidence") or ""),
-        str(finding.get("metadata", {}).get("nmap_product") or ""),
-        str(finding.get("metadata", {}).get("nmap_version") or ""),
+        str(meta.get("nmap_product") or ""),
+        str(meta.get("nmap_version") or ""),
         f"{finding.get('port')}/tcp",
     ]))
 
-    existing_cve = str(finding.get("cve_id") or "")
-    cve_set = set(re.findall(r"CVE-\d{4}-\d{4,7}", existing_cve, re.IGNORECASE))
 
-    for pattern, cve_id, severity, cvss in _REAL_CVE_MAP:
-        if pattern.search(text_corpus):
-            for cve in cve_id.split(","):
-                cve_set.add(cve.strip().upper())
-            if cvss > float(finding.get("cvss_score") or 0):
-                finding["cvss_score"] = cvss
-                finding["severity"] = severity
+def classify_cves(text: str) -> tuple[set[str], set[str], float, str | None]:
+    """Return (confirmed CVEs, possible CVEs, max CVSS, severity) for the scanner text."""
+    confirmed: set[str] = set()
+    possible: set[str] = set()
+    best_cvss, best_sev = 0.0, None
+    for pattern, cve_ids, severity, cvss in _VERSION_CVE_MAP:
+        if pattern.search(text):
+            confirmed |= {c.strip().upper() for c in cve_ids.split(",")}
+            if cvss > best_cvss:
+                best_cvss, best_sev = cvss, severity
+    for pattern, cve_ids in _SERVICE_HINTS:
+        if pattern.search(text):
+            possible |= {c.strip().upper() for c in cve_ids.split(",")}
+    return confirmed, possible - confirmed, best_cvss, best_sev
 
+
+def _enrich_cves_for_finding(finding: dict[str, Any]) -> dict[str, Any]:
+    """Attach version-confirmed CVEs; record service-only matches as possible CVEs in metadata."""
+    existing = {c.upper() for c in re.findall(r"CVE-\d{4}-\d{4,7}", str(finding.get("cve_id") or ""), re.IGNORECASE)}
+    confirmed, possible, cvss, severity = classify_cves(_finding_text(finding))
+    cve_set = existing | confirmed
+    if cvss > float(finding.get("cvss_score") or 0) and severity:
+        finding["cvss_score"] = cvss
+        finding["severity"] = severity
     if cve_set:
         finding["cve_id"] = ", ".join(sorted(cve_set))
-
+    possible -= cve_set
+    if possible:
+        meta = dict(finding.get("metadata") or {})
+        meta["possible_cves"] = sorted(set(meta.get("possible_cves") or []) | possible)
+        meta["possible_cve_note"] = POSSIBLE_CVE_NOTE
+        finding["metadata"] = meta
     return finding
 
 

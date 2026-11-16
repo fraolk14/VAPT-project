@@ -82,33 +82,11 @@ def _search_nvd_for_service(service_name: str) -> tuple[str | None, float | None
 
 
 def lookup_cve_for_service(service_name: str):
+    """Service names alone don't identify a vulnerability, so no CVE is attached here.
+
+    Earlier versions returned the first NVD keyword match or a static per-service CVE (e.g. any
+    "http" service got CVE-2023-44487), which labelled hosts with CVEs they may not have.
+    Version-confirmed CVEs are attached by scan_correlator; service-only matches are recorded
+    there as possible CVEs for an analyst to verify.
     """
-    Return a live CVE enrichment payload when NVD is reachable and fall back to a
-    conservative static list when the network lookup is unavailable.
-    """
-    normalized = _normalize_service_name(service_name)
-    if not normalized:
-        return {"cve_id": None, "cvss_score": None, "severity": None}
-
-    cve_id, cvss_score, severity = _search_nvd_for_service(normalized)
-    if cve_id:
-        return {
-            "cve_id": cve_id,
-            "cvss_score": cvss_score,
-            "severity": severity,
-        }
-
-    fallback = DEFAULT_CVE_FALLBACKS.get(normalized)
-    if fallback:
-        cve_id, cvss_score, severity = fallback
-        return {
-            "cve_id": cve_id,
-            "cvss_score": cvss_score,
-            "severity": severity,
-        }
-
-    return {
-        "cve_id": None,
-        "cvss_score": None,
-        "severity": None,
-    }
+    return {"cve_id": None, "cvss_score": None, "severity": None}

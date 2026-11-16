@@ -115,7 +115,7 @@ def _service_severity(port: int, service_name: str, state: str) -> tuple[str, fl
         return "high", 7.5
     if port in {3389, 5900}:            # RDP, VNC
         return "high", 7.5
-    if port in {3306, 5432, 1433, 1521, 27017, 6379, 9200, 5984, 9042}:
+    if port in {3306, 5432, 1433, 1521, 27017, 6379, 9200, 5984, 9042, 139, 445, 111}:  # databases, SMB, rpcbind
         return "medium", 6.5
     return "low", 3.8
 

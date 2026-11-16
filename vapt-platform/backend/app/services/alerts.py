@@ -82,6 +82,33 @@ def deliver_alert_event(db: Session, event: AlertEvent) -> AlertEvent:
     return event
 
 
+def send_test_alert(db: Session, rule: AlertRule, actor: str) -> AlertEvent:
+    """Deliver a clearly labelled test notification through the rule's channel.
+
+    No finding or scan is created, so tests never show up in findings, metrics or reports.
+    """
+    event = AlertEvent(
+        rule_name=rule.name,
+        channel=rule.channel,
+        destination=rule.destination,
+        finding_id=None,
+        status="queued",
+        payload={
+            "message": f"TEST from the VAPT platform: alert rule '{rule.name}' can reach this destination. No action needed.",
+            "finding_title": "Test notification (not a real finding)",
+            "severity": rule.min_severity,
+            "source": "alert-rule-test",
+            "assigned_to": actor,
+            "test": True,
+        },
+        response_message=f"Test queued for {rule.channel} delivery",
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    return deliver_alert_event(db, event)
+
+
 def queue_alert_events(db: Session, finding: Finding, rules: Iterable[AlertRule]) -> list[AlertEvent]:
     events: list[AlertEvent] = []
     for rule in rules:

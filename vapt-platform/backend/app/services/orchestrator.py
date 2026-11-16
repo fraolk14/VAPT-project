@@ -286,7 +286,8 @@ def _store_findings(db: Session, scan: Scan, normalized_findings: list[dict[str,
         for rule in rules:
             title_match = rule.title_pattern.lower() in item["title"].lower()
             cve_match = not rule.cve_id or rule.cve_id == item.get("cve_id")
-            source_match = not rule.source or rule.source == item["source"]
+            source_match = (not rule.source or rule.source == item["source"]
+                            or (rule.source == "zap" and item["source"] in {"web", "nuclei", "testssl"}))
             if title_match and cve_match and source_match:
                 status = "false_positive"
                 metadata = {
@@ -587,6 +588,70 @@ def run_direct_network_scan(db: Session, scan: Scan) -> Scan:
         return scan
 
 
+def _augment_web_findings(db: Session, scan: Scan, target: str, findings: list[dict[str, Any]], zap_client: Any | None) -> list[dict[str, Any]]:
+    """Run the extra web engines and the false-positive controls on a web scan's results."""
+    from app.services import web_pipeline as wp
+
+    warnings: list[str] = []
+    stages: dict[str, Any] = {}
+
+    def status(progress: int, text: str) -> None:
+        scan.progress = str(progress)
+        scan.error_message = text
+        db.commit()
+
+    crawled = list((scan.engine_metadata or {}).get("crawled_urls") or [])
+    if not crawled:
+        status(91, "Katana: discovering JavaScript endpoints and sitemap URLs...")
+        crawled, w = wp.katana_crawl(target)
+        warnings += w
+    stages["katana_urls"] = len(crawled)
+
+    status(92, "Waiting for the target to respond normally again before the next engines...")
+    ready, waited = wp.wait_for_target(target)
+    stages["target_recovery_seconds"] = waited
+    if not ready:
+        warnings.append(f"The target was still slow {int(waited)}s after the active scan; later engine results may be incomplete.")
+
+    status(92, "Nuclei: checking known CVEs, exposed files and misconfigurations...")
+    nuclei, w = wp.run_nuclei(target, crawled)
+    warnings += w
+    stages["nuclei_findings"] = len(nuclei)
+
+    status(95, "testssl.sh: checking TLS protocols, ciphers and certificate...")
+    tls, w = wp.run_testssl(target)
+    warnings += w
+    stages["testssl_findings"] = len(tls)
+
+    combined = findings + nuclei + tls
+    if zap_client is not None:
+        wp.wait_for_target(target)
+        status(97, "Confirming XSS with Dalfox and SQL injection with sqlmap (detection only)...")
+        warnings += wp.confirm_injections(combined, zap_client)
+    if any((f.get("metadata") or {}).get("time_based") for f in combined):
+        status(97, "Re-checking timing-based hits on a quiet target to rule out slow-response false positives...")
+        wp.wait_for_target(target)
+        warnings += wp.reverify_time_based(combined)
+    confirmations = [((f.get("metadata") or {}).get("confirmation") or {}).get("status") for f in combined]
+    stages["confirmed"] = confirmations.count("confirmed")
+    stages["not_reproduced"] = confirmations.count("not_reproduced")
+    stages["inconclusive"] = confirmations.count("inconclusive")
+
+    status(98, "Merging the same issue reported by several engines...")
+    merged = wp.merge_findings(combined)
+    stages["before_merge"] = len(combined)
+    stages["after_merge"] = len(merged)
+    stages["corroborated"] = sum(1 for f in merged if (f.get("metadata") or {}).get("corroborated"))
+
+    scan.engine_metadata = {
+        **(scan.engine_metadata or {}),
+        "pipeline": stages,
+        "scan_warnings": list((scan.engine_metadata or {}).get("scan_warnings") or []) + warnings,
+    }
+    db.commit()
+    return merged
+
+
 def run_direct_web_scan(db: Session, scan: Scan) -> Scan:
     from app.services.web_assessment import run_web_assessment
     try:
@@ -614,7 +679,8 @@ def run_direct_web_scan(db: Session, scan: Scan) -> Scan:
             db.refresh(scan)
 
         normalized_findings = run_web_assessment(scan.target, progress_callback=_progress_callback)
-        scan.progress = "90"
+        normalized_findings = _augment_web_findings(db, scan, scan.target, normalized_findings, zap_client=None)
+        scan.progress = "99"
         scan.error_message = "Direct assessment completed. Storing findings..."
         db.commit()
         db.refresh(scan)
@@ -644,7 +710,16 @@ def launch_zap_scan(db: Session, scan: Scan) -> Scan:
     try:
         metadata = client.launch_scan(scan.target, scan.profile)
     except Exception as exc:
-        print(f"[ZAP] Launch failed ({exc}), falling back seamlessly to direct deep web assessment.")
+        print(f"[ZAP] Launch failed ({exc}), falling back to direct deep web assessment.")
+        # Say so on the scan: without ZAP there is no spider or active scan, so coverage is lower.
+        scan.engine_metadata = {
+            **(scan.engine_metadata or {}),
+            "zap_unavailable": True,
+            "scan_warnings": list((scan.engine_metadata or {}).get("scan_warnings") or [])
+            + ["ZAP was unreachable, so this scan ran without ZAP's spider and active scan "
+               "(Katana, Nuclei, testssl.sh and the built-in checks only). Re-run once ZAP is back for full coverage."],
+        }
+        db.commit()
         return run_direct_web_scan(db, scan)
 
     scan.target = metadata["target"]
@@ -785,6 +860,20 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
             scan.engine_metadata = {**metadata, "phase": "spider", "spider_progress": spider_progress}
 
             if spider_status["status"] == "completed":
+                # Katana finds endpoints ZAP's spider misses (JavaScript routes, sitemap, robots.txt);
+                # requesting them through ZAP puts them in scope for the active scan.
+                from app.services import web_pipeline as wp
+
+                scan.error_message = "Katana: crawling JavaScript-heavy pages for endpoints the spider missed..."
+                db.commit()
+                crawled, crawl_warnings = wp.katana_crawl(target)
+                fed = wp.feed_urls_to_zap(client, crawled) if crawled else 0
+                scan.engine_metadata = {
+                    **scan.engine_metadata,
+                    "crawled_urls": crawled[:300],
+                    "katana_fed_to_zap": fed,
+                    "scan_warnings": list(scan.engine_metadata.get("scan_warnings") or []) + crawl_warnings,
+                }
                 active_metadata = client.launch_active_scan(target)
                 scan.status = "running"
                 scan.progress = "40"
@@ -887,6 +976,15 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
                 except Exception as web_exc:
                     print(f"[WebAssessment] Failed: {web_exc}")
 
+                try:
+                    normalized_findings = _augment_web_findings(db, scan, target, normalized_findings, zap_client=client)
+                except Exception as aug_exc:
+                    print(f"[WebPipeline] Failed: {aug_exc}")
+                    scan.engine_metadata = {
+                        **scan.engine_metadata,
+                        "scan_warnings": list(scan.engine_metadata.get("scan_warnings") or [])
+                        + [f"Extra web engines failed ({aug_exc}); ZAP and built-in results are still included."],
+                    }
 
                 _store_findings(db, scan, normalized_findings)
                 scan.status = "completed"

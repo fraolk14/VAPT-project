@@ -1,16 +1,13 @@
-import asyncio
 import ipaddress
 import re
-import socket
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
-import requests
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.models.misconfiguration import MisconfigAsset, Misconfiguration, Organization, ScanJob
+from app.models.misconfiguration import MisconfigAsset, Misconfiguration, ScanJob
 
 
 def parse_scope_type(scope: str) -> str:
@@ -51,256 +48,33 @@ def parse_scope_type(scope: str) -> str:
     return "IP"
 
 
-def discover_scope_targets(scope: str, scope_type: str) -> list[dict[str, str]]:
-    targets: list[dict[str, str]] = []
-    s = scope.strip()
-
-    if scope_type == "IP":
-        targets.append({"ip": s, "hostname": s, "type": "ip"})
-    elif scope_type == "CIDR":
-        try:
-            net = ipaddress.ip_network(s, strict=False)
-            hosts = list(net.hosts())[:64]  # Limit sweep for fast asynchronous scans
-            for h in hosts:
-                targets.append({"ip": str(h), "hostname": str(h), "type": "cidr"})
-        except ValueError:
-            targets.append({"ip": s, "hostname": s, "type": "cidr"})
-    elif scope_type == "Range":
-        try:
-            parts = s.split("-")
-            start_ip = ipaddress.ip_address(parts[0].strip())
-            end_ip = ipaddress.ip_address(parts[1].strip())
-            curr = int(start_ip)
-            end_val = int(end_ip)
-            count = 0
-            while curr <= end_val and count < 64:
-                ip_str = str(ipaddress.ip_address(curr))
-                targets.append({"ip": ip_str, "hostname": ip_str, "type": "range"})
-                curr += 1
-                count += 1
-        except ValueError:
-            targets.append({"ip": s, "hostname": s, "type": "range"})
-    elif scope_type in {"Domain", "Subdomain"}:
-        try:
-            resolved_ip = socket.gethostbyname(s)
-            targets.append({"ip": resolved_ip, "hostname": s, "type": scope_type.lower()})
-        except Exception:
-            targets.append({"ip": s, "hostname": s, "type": scope_type.lower()})
-    elif scope_type == "URL":
-        parsed = urlparse(s)
-        host = parsed.hostname or s
-        try:
-            resolved_ip = socket.gethostbyname(host)
-            targets.append({"ip": resolved_ip, "hostname": host, "type": "url", "url": s})
-        except Exception:
-            targets.append({"ip": host, "hostname": host, "type": "url", "url": s})
-    elif scope_type == "ASN":
-        # OSINT Shodan / RIPE lookup fallback simulation for real IP mapping
-        try:
-            resp = requests.get(f"https://stat.ripe.net/data/announced-prefixes/data.json?resource={s}", timeout=5)
-            if resp.status_code == 200:
-                prefixes = resp.json().get("data", {}).get("prefixes", [])
-                for p in prefixes[:3]:
-                    net_str = p.get("prefix")
-                    if net_str:
-                        try:
-                            net = ipaddress.ip_network(net_str, strict=False)
-                            for h in list(net.hosts())[:5]:
-                                targets.append({"ip": str(h), "hostname": str(h), "type": "asn"})
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        if not targets:
-            targets.append({"ip": "127.0.0.1", "hostname": s, "type": "asn"})
-    elif scope_type == "Cloud":
-        targets.append({"ip": "10.0.1.50", "hostname": f"{s.lower()}.cloud.internal", "type": "cloud"})
-
-    return targets
+# Issues the old misconfiguration engine wrote for every target without probing anything
+# (e.g. a Cisco IOS XE RCE on any private IP). They are hidden everywhere and can be purged
+# with `python -m app.scripts.purge_fabricated_misconfigs`.
+FABRICATED_MISCONFIGS: frozenset[tuple[str, str]] = frozenset({
+    ("Lynis", "SSH PermitRootLogin set to yes"),
+    ("Lynis", "World-Writable File Permissions Detected in /var/tmp"),
+    ("Lynis", "Outdated Kernel Version Vulnerable to Privilege Escalation"),
+    ("Nmap", "Default SNMP Community String 'public' Accessible"),
+    ("Nmap", "Cisco IOS XE Web UI Unauthenticated Remote Code Execution"),
+    ("Nmap", "Default Administrative Credentials (admin/admin) Active"),
+    ("SecurityHeaders", "Missing Content-Security-Policy (CSP) Header"),
+    ("SSLLabs", "Missing HTTP Strict Transport Security (HSTS) Header"),
+    ("Nuclei", "Exposed .env Configuration File"),
+    ("ZAP", "Wildcard Access-Control-Allow-Origin (CORS) Enabled"),
+    ("ZAP", "GraphQL Introspection Query Unrestricted"),
+    ("ZAP", "Exposed Unauthenticated Swagger UI Documentation"),
+    ("MobSF", "Wildcard Access-Control-Allow-Origin (CORS) Enabled"),
+    ("MobSF", "GraphQL Introspection Query Unrestricted"),
+    ("MobSF", "Exposed Unauthenticated Swagger UI Documentation"),
+})
 
 
-def fingerprint_asset(ip: str, hostname: str, url: str | None = None) -> tuple[str, str]:
-    if url or hostname.startswith("http"):
-        return "Endpoint" if "/api" in (url or "") else "Website", "Linux"
+def fabricated_filter(model):
+    """SQLAlchemy condition that excludes the fabricated rows from a Misconfiguration query."""
+    from sqlalchemy import and_, not_, or_
 
-    if ":" in ip or ip.startswith("10.") or ip.startswith("192.168."):
-        return "Network", "RouterOS"
-
-    return "OS", "Linux"
-
-
-def scan_asset_misconfigurations(asset_type: str, target: str, ip: str) -> list[dict[str, Any]]:
-    issues: list[dict[str, Any]] = []
-
-    if asset_type == "OS":
-        issues.extend([
-            {
-                "issue": "SSH PermitRootLogin set to yes",
-                "severity": "HIGH",
-                "cve": None,
-                "detected_by": "Lynis",
-                "remediation": "Set PermitRootLogin no in /etc/ssh/sshd_config and restart sshd.",
-                "status": "OPEN"
-            },
-            {
-                "issue": "World-Writable File Permissions Detected in /var/tmp",
-                "severity": "MEDIUM",
-                "cve": None,
-                "detected_by": "Lynis",
-                "remediation": "Audit file permissions using chmod o-w /var/tmp/*.",
-                "status": "OPEN"
-            },
-            {
-                "issue": "Outdated Kernel Version Vulnerable to Privilege Escalation",
-                "severity": "CRITICAL",
-                "cve": "CVE-2023-3269",
-                "detected_by": "Lynis",
-                "remediation": "Update system kernel packages via apt upgrade linux-image-generic or yum update kernel.",
-                "status": "OPEN"
-            }
-        ])
-    elif asset_type == "Network":
-        issues.extend([
-            {
-                "issue": "Default SNMP Community String 'public' Accessible",
-                "severity": "HIGH",
-                "cve": None,
-                "detected_by": "Nmap",
-                "remediation": "Disable SNMPv1/v2c or change default community strings to a strong random passphrase.",
-                "status": "OPEN"
-            },
-            {
-                "issue": "Cisco IOS XE Web UI Unauthenticated Remote Code Execution",
-                "severity": "CRITICAL",
-                "cve": "CVE-2023-20198",
-                "detected_by": "Nmap",
-                "remediation": "Disable the HTTP Server feature on internet-facing network interfaces or apply Cisco security patch.",
-                "status": "OPEN"
-            },
-            {
-                "issue": "Default Administrative Credentials (admin/admin) Active",
-                "severity": "HIGH",
-                "cve": None,
-                "detected_by": "Nmap",
-                "remediation": "Change default password for administrative interface immediately.",
-                "status": "OPEN"
-            }
-        ])
-    elif asset_type == "Website":
-        issues.extend([
-            {
-                "issue": "Missing Content-Security-Policy (CSP) Header",
-                "severity": "MEDIUM",
-                "cve": None,
-                "detected_by": "SecurityHeaders",
-                "remediation": "Configure Content-Security-Policy header restricting script-src and object-src.",
-                "status": "OPEN"
-            },
-            {
-                "issue": "Missing HTTP Strict Transport Security (HSTS) Header",
-                "severity": "HIGH",
-                "cve": None,
-                "detected_by": "SSLLabs",
-                "remediation": "Add Strict-Transport-Security: max-age=31536000; includeSubDomains header.",
-                "status": "OPEN"
-            },
-            {
-                "issue": "Exposed .env Configuration File",
-                "severity": "CRITICAL",
-                "cve": None,
-                "detected_by": "Nuclei",
-                "remediation": "Restrict web server access to .env files and move sensitive credentials outside web root.",
-                "status": "OPEN"
-            }
-        ])
-    elif asset_type == "Endpoint":
-        issues.extend([
-            {
-                "issue": "Wildcard Access-Control-Allow-Origin (CORS) Enabled",
-                "severity": "HIGH",
-                "cve": None,
-                "detected_by": "ZAP",
-                "remediation": "Configure specific trusted origin domains in Access-Control-Allow-Origin.",
-                "status": "OPEN"
-            },
-            {
-                "issue": "GraphQL Introspection Query Unrestricted",
-                "severity": "MEDIUM",
-                "cve": None,
-                "detected_by": "ZAP",
-                "remediation": "Disable GraphQL introspection in production environments.",
-                "status": "OPEN"
-            },
-            {
-                "issue": "Exposed Unauthenticated Swagger UI Documentation",
-                "severity": "LOW",
-                "cve": None,
-                "detected_by": "ZAP",
-                "remediation": "Require authentication to access /swagger-ui or API documentation endpoints.",
-                "status": "OPEN"
-            }
-        ])
-
-    return issues
-
-
-def run_misconfiguration_scan_job(scan_job_id: int) -> None:
-    db: Session = SessionLocal()
-    try:
-        job = db.get(ScanJob, scan_job_id)
-        if not job:
-            return
-        job.status = "RUNNING"
-        job.started_at = datetime.now(timezone.utc)
-        db.commit()
-
-        targets = discover_scope_targets(job.scope, job.scope_type)
-
-        for target in targets:
-            ip_str = target.get("ip") or job.scope
-            host_str = target.get("hostname") or job.scope
-            url_str = target.get("url")
-
-            asset_type, os_type = fingerprint_asset(ip_str, host_str, url_str)
-
-            asset_model = MisconfigAsset(
-                scan_job_id=job.id,
-                ip=ip_str,
-                hostname=host_str,
-                asset_type=asset_type,
-                os_type=os_type,
-                discovered_at=datetime.now(timezone.utc)
-            )
-            db.add(asset_model)
-            db.commit()
-            db.refresh(asset_model)
-
-            misconfigs = scan_asset_misconfigurations(asset_type, host_str, ip_str)
-            for m in misconfigs:
-                db.add(
-                    Misconfiguration(
-                        asset_id=asset_model.id,
-                        issue=m["issue"],
-                        severity=m["severity"],
-                        cve=m.get("cve"),
-                        detected_by=m["detected_by"],
-                        remediation=m["remediation"],
-                        status=m.get("status", "OPEN"),
-                        discovered_at=datetime.now(timezone.utc)
-                    )
-                )
-
-        job.status = "COMPLETED"
-        job.completed_at = datetime.now(timezone.utc)
-        db.commit()
-    except Exception as exc:
-        job = db.get(ScanJob, scan_job_id)
-        if job:
-            job.status = "FAILED"
-            job.completed_at = datetime.now(timezone.utc)
-            db.commit()
-    finally:
-        db.close()
+    return not_(or_(*[and_(model.detected_by == by, model.issue == issue) for by, issue in FABRICATED_MISCONFIGS]))
 
 
 def run_scan_job_engine(scan_job_id: int) -> None:
@@ -365,18 +139,9 @@ def run_scan_job_engine(scan_job_id: int) -> None:
             # Real Web Engine: Advanced Deep Pentest (Sensitive Endpoints, Injection Probes, Headers, CORS, Cookies)
             findings_list = run_web_assessment(target_str, progress_callback=progress_cb, deep_mode=True)
         else:
-            # Real Mobile Engine: MobSF static binary & permission analysis
-            time.sleep(3)
-            asset_type_val = "Endpoint"
-            misconfigs = scan_asset_misconfigurations(asset_type_val, target_str, target_str)
-            for m in misconfigs:
-                findings_list.append({
-                    "title": m["issue"],
-                    "severity": m["severity"],
-                    "cve_id": m.get("cve"),
-                    "source": "MobSF",
-                    "remediation": m.get("remediation"),
-                })
+            # Mobile apps are analysed by MobSF through /scans/mobile (file upload). This legacy
+            # job path has no binary to analyse, so it records nothing rather than inventing issues.
+            findings_list = []
 
         # Phase 3: Vulnerability Correlation & Persistence to Hosts & Findings
         progress_cb(75, {"phase": "persisting", "message": "Persisting findings to Misconfigurations & Findings registry."})

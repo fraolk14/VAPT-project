@@ -40,6 +40,7 @@ class FindingOut(BaseModel):
     target: Optional[str] = None
     detected_at: datetime
     scan_finished_at: Optional[datetime] = None
+    last_seen: Optional[datetime] = None
 
 
     class Config:

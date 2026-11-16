@@ -7,7 +7,8 @@ from app.services.threat_intelligence import _infer_company_name, fetch_abusech_
 
 
 class ThreatIntelligenceTests(unittest.TestCase):
-    def test_lookup_cve_for_service_uses_live_nvd_data_when_available(self):
+    def test_lookup_cve_for_service_does_not_tag_from_keyword_search(self):
+        # A keyword hit for "nginx" doesn't mean this host's nginx is vulnerable, so no CVE is attached.
         with patch("app.services.cve_lookup.requests.get") as mock_get:
             mock_get.return_value.raise_for_status.return_value = None
             mock_get.return_value.ok = True
@@ -26,9 +27,9 @@ class ThreatIntelligenceTests(unittest.TestCase):
 
             result = lookup_cve_for_service("nginx")
 
-        self.assertEqual(result["cve_id"], "CVE-2024-12345")
-        self.assertEqual(result["cvss_score"], 8.1)
-        self.assertEqual(result["severity"], "high")
+        self.assertIsNone(result["cve_id"])
+        self.assertIsNone(result["severity"])
+        mock_get.assert_not_called()
 
     def test_infer_company_name_prefers_live_company_lookup(self):
         with patch("app.services.threat_intelligence.requests.get") as mock_get:

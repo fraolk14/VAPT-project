@@ -1,4 +1,5 @@
 import os
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -506,14 +507,29 @@ def download_agent_binary():
     return FileResponse(binary_path, filename="vap-agent.exe", media_type="application/octet-stream", headers=headers)
 
 
+_TOKEN_RE = re.compile(r"^vap_tok_[0-9a-f]{32}$")
+_URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d{1,5})?$")
+
+
 @router.get("/installer-script")
-def download_installer_script(token: str = Query(default="YOUR_ENROLLMENT_TOKEN")):
-    """Generate GPO / Intune PowerShell installation script for silent deployment."""
+def download_installer_script(
+    token: str = Query(default=""),
+    backend_url: str = Query(default=""),
+):
+    """Generate GPO / Intune PowerShell installation script for silent deployment.
+
+    Both values are strictly validated before being written into the script so a crafted link
+    cannot inject PowerShell. The server address comes from the console (the address the admin
+    is using) or FRONTEND_BASE_URL; it must be reachable from the endpoints being enrolled.
+    """
+    safe_token = token if _TOKEN_RE.match(token or "") else "PASTE_ENROLLMENT_TOKEN_HERE"
+    candidate = (backend_url or os.getenv("FRONTEND_BASE_URL", "")).strip().rstrip("/")
+    safe_url = candidate if _URL_RE.match(candidate) else "http://YOUR_SERVER_ADDRESS:18080"
     ps_content = f"""# VAP Windows Endpoint Agent - GPO / Intune Deployment Script
 $ErrorActionPreference = "Stop"
 
-$BackendUrl = "http://localhost:18080"
-$EnrollmentToken = "{token}"
+$BackendUrl = "{safe_url}"
+$EnrollmentToken = "{safe_token}"
 $InstallDir = "$env:ProgramFiles\\VAP\\Agent"
 $ExePath = "$InstallDir\\vap-agent.exe"
 

@@ -1,0 +1,124 @@
+/* Users & Access page */
+
+.us-role {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--cc-line-hi);
+  font-size: 12px;
+  color: #cfe9ff;
+}
+
+.us-role--admin {
+  border-color: rgba(255, 159, 90, 0.7);
+  color: #ffc4a1;
+}
+
+.us-detail .us-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+  gap: 10px 12px;
+  align-items: end;
+}
+
+.us-detail label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--cc-muted);
+}
+
+.us-detail label.cc-check {
+  flex-direction: row;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 14px;
+  color: var(--cc-text);
+}
+
+.us-detail input.so-input,
+.us-detail select.so-input {
+  width: 100%;
+  box-sizing: border-box;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.us-groups {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--cc-line);
+}
+
+.us-groups legend {
+  padding: 0 6px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cc-muted);
+}
+
+.us-form .cc-btn--primary {
+  min-height: 44px;
+}
+
+.us-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.us-actions .cc-btn,
+.us-delete {
+  min-height: 40px;
+}
+
+.us-delete {
+  border-color: rgba(255, 107, 107, 0.4) !important;
+  color: #ffb4b4 !important;
+}
+
+.us-confirm {
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 107, 107, 0.7);
+  background: rgba(255, 107, 107, 0.08);
+}
+
+.us-confirm p {
+  margin: 0 0 8px;
+}
+
+.us-subhead {
+  margin-top: 16px !important;
+}
+
+.us-sessions li {
+  padding: 6px 0;
+}
+
+.us-perms td {
+  text-align: center;
+}
+
+.us-yes {
+  color: #9ff0c9;
+  font-weight: 700;
+}
+
+.us-no {
+  color: var(--cc-muted);
+}
+
+.us-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 10px;
+}

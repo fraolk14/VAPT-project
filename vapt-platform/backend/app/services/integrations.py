@@ -556,7 +556,10 @@ class ZAPClient:
                     "confidence": confidence,
                     "metadata": {
                         "url": alert.get("url"),
+                        "host": (parsed_url.hostname or "").lower(),
                         "param": alert.get("param"),
+                        "method": alert.get("method"),
+                        "message_id": alert.get("messageId"),
                         "plugin_id": alert.get("pluginId"),
                         "confidence": alert.get("confidence"),
                         "risk": alert.get("risk"),
@@ -585,7 +588,7 @@ def _group_zap_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         key = (finding.get("title"), finding.get("severity"), meta.get("plugin_id"), host)
         if key not in grouped:
             first = dict(finding)
-            first["metadata"] = {**meta, "affected_urls": [], "affected_params": []}
+            first["metadata"] = {**meta, "affected_urls": [], "affected_params": [], "instances": []}
             grouped[key] = first
         entry = grouped[key]
         url = meta.get("url")
@@ -594,6 +597,11 @@ def _group_zap_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         param = meta.get("param")
         if param and param not in entry["metadata"]["affected_params"]:
             entry["metadata"]["affected_params"].append(param)
+        # Keep a few exact requests so confirmation tools can replay them.
+        if url and param and len(entry["metadata"]["instances"]) < 10:
+            entry["metadata"]["instances"].append(
+                {"url": url, "param": param, "method": meta.get("method"), "message_id": meta.get("message_id")}
+            )
         entry["confidence"] = max(entry.get("confidence") or 0, finding.get("confidence") or 0)
 
     results = []
@@ -939,11 +947,50 @@ def _probe_service(name: str, base_url: str) -> dict[str, Any]:
         return {"healthy": False, "url": base_url}
 
 
+def _probe_nmap() -> dict[str, Any]:
+    """Network scans run on the Nmap binary inside the API container (plus socket probes)."""
+    import shutil
+    import subprocess
+
+    path = shutil.which("nmap")
+    if not path:
+        return {"healthy": False, "url": "built-in (API container)", "detail": "nmap binary not found; network scans fall back to socket probes only."}
+    try:
+        out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=5).stdout
+        version = (out.splitlines() or ["Nmap"])[0].replace("Nmap version", "Nmap").split("(")[0].strip()
+        return {"healthy": True, "url": "built-in (API container)", "detail": version}
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"healthy": False, "url": "built-in (API container)", "detail": f"nmap failed to start: {exc}"}
+
+
+def _probe_kev() -> dict[str, Any]:
+    from app.services.intel import KEV_URL, kev_catalog
+
+    kev = kev_catalog()
+    ok = kev["status"] == "connected"
+    return {"healthy": ok, "url": KEV_URL,
+            "detail": f"CISA KEV {kev['version'] or ''}: {len(kev['by_cve'])} exploited CVEs" if ok else "CISA KEV catalog unreachable"}
+
+
 def integration_health() -> dict[str, Any]:
-    services = {
-        "openvas": os.getenv("OPENVAS_API_URL", "http://host.docker.internal:9392"),
-        "zap": os.getenv("ZAP_API_URL", "http://zap:8080"),
-        "mobsf": os.getenv("MOBSF_API_URL", "http://mobsf:8000"),
-        "misp": os.getenv("MISP_FEED_URL", "https://www.misp-project.org/feeds/"),
+    """Health of the engines scans actually use. Keys are kept for older UI code:
+    "openvas" is the network engine (Nmap) and "misp" is the threat-intel feed (CISA KEV)."""
+    meta = {
+        "openvas": ("Network engine", "Port, service and version discovery (Nmap + socket probes)"),
+        "zap": ("Web engine", "OWASP ZAP spider and active scan"),
+        "mobsf": ("Mobile engine", "MobSF static analysis of APK / AAB / IPA"),
+        "misp": ("Threat intel", "CISA Known Exploited Vulnerabilities catalog"),
     }
-    return {name: _probe_service(name, base_url) for name, base_url in services.items()}
+    results: dict[str, Any] = {}
+    for key, probe in (
+        ("openvas", _probe_nmap),
+        ("zap", lambda: _probe_service("zap", os.getenv("ZAP_API_URL", "http://zap:8080"))),
+        ("mobsf", lambda: _probe_service("mobsf", os.getenv("MOBSF_API_URL", "http://mobsf:8000"))),
+        ("misp", _probe_kev),
+    ):
+        started = time.perf_counter()
+        result = probe()
+        result["latency_ms"] = round((time.perf_counter() - started) * 1000)
+        result["name"], result["role"] = meta[key]
+        results[key] = result
+    return results

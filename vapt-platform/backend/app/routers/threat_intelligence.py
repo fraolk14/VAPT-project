@@ -84,6 +84,55 @@ def get_attack_map_dashboard(
     return build_attack_map_dashboard_data(db, time_range=time_range)
 
 
+@router.get("/exposure")
+def cve_exposure(db: Session = Depends(get_db)):
+    """CVEs in open findings, prioritised by CISA KEV (exploited in the wild) and FIRST EPSS."""
+    from app.services.intel import exposure
+
+    return exposure(db)
+
+
+@router.get("/kev/recent")
+def kev_recent_additions(days: int = Query(default=30, ge=1, le=365), db: Session = Depends(get_db)):
+    from app.services.intel import kev_recent
+
+    return kev_recent(db, days)
+
+
+@router.get("/today")
+def vulnerabilities_today(kev_days: int = Query(default=3, ge=1, le=14), db: Session = Depends(get_db)):
+    """Today's vulnerability news: new CISA KEV entries, Microsoft's latest release, NVD's last 24 hours."""
+    from app.services.intel_today import today_feed
+
+    return today_feed(db, kev_days)
+
+
+@router.get("/lookup")
+def indicator_lookup(q: str = Query(min_length=2, max_length=255), db: Session = Depends(get_db)):
+    """Reputation and exposure for an IP or domain from real sources, with the verdict's reasons."""
+    from app.services.intel import lookup
+
+    return lookup(db, q)
+
+
+@router.get("/sources")
+def intel_sources():
+    from app.services.intel import sources_status
+
+    return sources_status()
+
+
+@router.get("/live-map")
+def live_threat_map(window: str = Query(default="7d", pattern="^(24h|7d|30d)$")):
+    """Real global threat telemetry (DShield, Feodo Tracker, optional ThreatFox), geolocated.
+
+    Declared before the catch-all target route below so it isn't swallowed by it.
+    """
+    from app.services.live_threat_map import get_live_map
+
+    return get_live_map(window)
+
+
 @router.get("/{target:path}")
 def get_target_threat_intelligence(target: str, db: Session = Depends(get_db)):
     from app.services.threat_intelligence import get_target_threat_intel

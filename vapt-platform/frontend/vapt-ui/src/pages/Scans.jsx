@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+
 import api from "../api/client";
+import "../commandcenter.css";
+import "../scans.css";
 
 // Report downloads must go through the API client so the bearer token is sent.
 async function downloadScanReport(scanId) {
@@ -17,644 +20,511 @@ async function downloadScanReport(scanId) {
     link.click();
     link.remove();
     window.URL.revokeObjectURL(url);
-  } catch (error) {
+  } catch {
     window.alert("Report download failed. Please try again.");
   }
 }
 
-// ─── Engine definitions ───────────────────────────────────────────────────────
+// ---------- engines ----------
+
 const ENGINES = {
-  Web: {
-    label: "Web Engine (ZAP)",
+  web: {
+    name: "Web",
+    engine: "ZAP",
+    health: "zap",
+    tools: ["zap"],
     endpoint: "/scans/web",
-    payloadKey: "target",     // field name in POST body
     targetLabel: "Website URL",
-    targetHelp: "ZAP spiders the site then runs a full active scan. Takes 5–30+ minutes depending on site size. Use an authorized https:// or http:// URL.",
-    placeholder: "https://juice-shop.herokuapp.com",
-    icon: "🌐",
-    tool: "zap",
-    tab: "zap",
-    description: "OWASP ZAP: Spider Discovery → Active Vulnerability Scanning (SQLi, XSS, SSRF, CORS, Auth…)",
-    buttonLabel: "Launch ZAP Web Scan",
+    placeholder: "https://app.example.com",
+    help: "Spiders the site, then actively tests every page for SQL injection, XSS, SSRF and more.",
+    duration: "Usually 5–30 minutes, longer for large sites.",
+    phases: ["Queued", "Spider", "Active scan", "Ingest"],
   },
-  Network: {
-    label: "Network Engine (Nmap)",
+  network: {
+    name: "Network",
+    engine: "Nmap",
+    health: null,
+    tools: ["openvas", "nmap"],
     endpoint: "/scans/network",
-    payloadKey: "target",
-    targetLabel: "IP / CIDR / Domain",
-    targetHelp: "Nmap + banner analysis probes every port. A single host takes ~2–5 min; a /24 block can take 20+ min.",
-    placeholder: "192.168.1.0/24",
-    icon: "🔌",
-    tool: "openvas",
-    tab: "openvas",
-    description: "Nmap: Port Discovery → Service Version Detection → CVE Correlation → Exposure Analysis",
-    buttonLabel: "Launch Network Scan",
+    targetLabel: "IP address, domain or CIDR (max /24)",
+    placeholder: "192.168.1.10 or 10.0.0.0/24",
+    help: "Discovers open ports, fingerprints services and correlates versions with known CVEs.",
+    duration: "About 2–5 minutes per host; a /24 can take 20+ minutes.",
+    phases: ["Queued", "Discovery", "Service detection", "Correlation"],
+  },
+  mobile: {
+    name: "Mobile",
+    engine: "MobSF",
+    health: "mobsf",
+    tools: ["mobsf"],
+    endpoint: "/scans/mobile",
+    targetLabel: "App package (.apk, .aab or .ipa)",
+    placeholder: "",
+    help: "Static analysis of the app package: permissions, secrets, insecure transport, code issues.",
+    duration: "Usually 1–5 minutes.",
+    phases: ["Queued", "Upload", "Static analysis", "Ingest"],
   },
 };
 
-// ─── helpers ─────────────────────────────────────────────────────────────────
-const statusColor = (s) => {
-  if (!s) return "#94a3b8";
-  const l = s.toLowerCase();
-  if (l === "completed") return "#34d399";
-  if (l === "running")   return "#38bdf8";
-  if (l === "waiting" || l === "queued") return "#fbbf24";
-  if (l === "failed")    return "#fb7185";
-  if (l === "cancelled") return "#94a3b8";
-  return "#94a3b8";
+const ACTIVE = new Set(["running", "queued", "waiting"]);
+
+const engineKeyOf = (scan) => {
+  const tool = String(scan.tool || "").toLowerCase();
+  if (tool === "zap" || scan.scan_type === "web") return "web";
+  if (tool === "mobsf" || scan.scan_type === "mobile") return "mobile";
+  return "network";
 };
 
-const toolLabel = (tool) => {
-  if (tool === "zap" || tool === "web")     return { label: "ZAP Web Engine",    tab: "zap"    };
-  if (tool === "openvas" || tool === "nmap" || tool === "network") return { label: "Dual-Engine (Nmap + Socket)", tab: "openvas" };
-  if (tool === "mobsf" || tool === "mobile")   return { label: "MobSF Mobile",  tab: "mobsf"  };
-  return { label: "Scan", tab: "all" };
+function phaseIndex(scan) {
+  const status = String(scan.status || "").toLowerCase();
+  const meta = scan.engine_metadata || {};
+  const pct = Number(scan.progress) || 0;
+  if (status === "waiting" || status === "queued") return 0;
+  if (status === "completed") return 4;
+  const kind = engineKeyOf(scan);
+  if (kind === "web") {
+    if (meta.phase === "spider") return 1;
+    if (meta.phase === "active") return pct >= 99 ? 3 : 2;
+    return 1;
+  }
+  if (pct >= 90) return 3;
+  if (pct >= 40) return 2;
+  return 1;
+}
+
+const fmtDuration = (startIso, endIso) => {
+  const start = startIso ? new Date(startIso).getTime() : NaN;
+  const end = endIso ? new Date(endIso).getTime() : Date.now();
+  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return "—";
+  const s = Math.round((end - start) / 1000);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 };
 
-const progressLabel = (scan) => {
-  const phase = scan.engine_metadata?.phase;
-  const pct   = parseInt(scan.progress || "0", 10);
-  if (phase === "spider") return `🕷️ Spidering… ${pct}%`;
-  if (phase === "active") return `⚡ Active scan… ${pct}%`;
-  if (scan.status === "waiting" || scan.status === "queued") return "⏳ Waiting for scanner…";
-  if (scan.status === "running") return `🔍 Scanning… ${pct}%`;
-  if (scan.status === "completed") return "✅ Completed";
-  if (scan.status === "failed") return "❌ Failed";
-  return `${pct}%`;
+const fmtWhen = (iso) => {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const today = new Date().toDateString() === d.toDateString();
+  return today
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
+    : d.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
 };
 
-const fmtTime = (t) => {
-  if (!t) return "—";
-  const d = new Date(t);
-  return isNaN(d) ? t : d.toLocaleString();
+const errorText = (err, fallback) => {
+  const detail = err?.response?.data?.detail;
+  if (err?.response?.status === 403) return "You don't have permission to do that. Ask an analyst or admin.";
+  if (err?.response?.status === 413 && typeof detail !== "string") return "The file is too large to upload. The limit is 200 MB.";
+  if (err?.response?.status === 401) return "Your session ended. Sign in again and retry.";
+  if (Array.isArray(detail)) return detail.map((d) => d.msg).join("; ");
+  return typeof detail === "string" ? detail : fallback;
 };
 
-// ─── Component ────────────────────────────────────────────────────────────────
-export default function Scans() {
-  const [engine, setEngine]       = useState("Web");
-  const [target, setTarget]       = useState("");
-  const [label, setLabel]         = useState("");
-  const [submitting, setSubmit]   = useState(false);
-  const [message, setMessage]     = useState({ type: "", text: "" });
-  const [scans, setScans]         = useState([]);
-  const [loading, setLoading]     = useState(true);
-  const pollRef = useRef(null);
+// ---------- page ----------
 
-  const cfg = ENGINES[engine];
+export default function Scans({ integrations = {}, canOperate = true }) {
+  const [engineKey, setEngineKey] = useState("web");
+  const [target, setTarget] = useState("");
+  const [file, setFile] = useState(null);
+  const [label, setLabel] = useState("");
+  const [authorized, setAuthorized] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [notice, setNotice] = useState(null);
+  const [scans, setScans] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [kindFilter, setKindFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [query, setQuery] = useState("");
+  const [limit, setLimit] = useState(15);
+  const fileRef = useRef(null);
 
-  // ── Fetch scan list ────────────────────────────────────────────────────────
-  const fetchScans = async () => {
+  const cfg = ENGINES[engineKey];
+
+  const fetchScans = useCallback(async () => {
     try {
       const res = await api.get("/scans/");
-      setScans(res.data || []);
+      setScans(Array.isArray(res.data) ? res.data : []);
     } catch {
-      setScans([]);
+      // Keep the last list on a transient error.
     } finally {
       setLoading(false);
     }
-  };
-
-  // ── Polling: refresh every 5 seconds while any scan is running/waiting ─────
-  useEffect(() => {
-    fetchScans();
-    pollRef.current = setInterval(() => {
-      fetchScans();
-    }, 5000);
-    return () => clearInterval(pollRef.current);
   }, []);
 
-  // ── Submit form ────────────────────────────────────────────────────────────
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    const t = target.trim();
-    if (!t) {
-      setMessage({ type: "error", text: "Please enter a target." });
-      return;
-    }
+  const hasActive = scans.some((s) => ACTIVE.has(String(s.status).toLowerCase()) || String(s.status).toLowerCase() === "paused");
 
-    setSubmit(true);
-    setMessage({ type: "", text: "" });
-
-    const body = {
-      [cfg.payloadKey]: t,
-      label: label.trim() || `${engine} scan – ${t}`,
+  // Poll quickly only while something is running; otherwise every 30 seconds.
+  useEffect(() => {
+    const first = window.setTimeout(fetchScans, 0);
+    const id = window.setInterval(() => {
+      if (!document.hidden) fetchScans();
+    }, hasActive ? 5000 : 30000);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(id);
     };
+  }, [fetchScans, hasActive]);
 
+  const engineState = (key) => {
+    const e = ENGINES[key];
+    const running = scans.some((s) => ACTIVE.has(String(s.status).toLowerCase()) && e.tools.includes(String(s.tool).toLowerCase()));
+    const healthy = e.health ? Boolean(integrations?.[e.health]?.healthy) : true;
+    if (running) return "active";
+    return healthy ? "healthy" : "down";
+  };
+
+  const pickEngine = (key) => {
+    setEngineKey(key);
+    setTarget("");
+    setFile(null);
+    setNotice(null);
+  };
+
+  const act = async (fn, okText, failText) => {
     try {
-      await api.post(cfg.endpoint, body);
-      setMessage({
-        type: "success",
-        text: `${engine} scan queued for ${t}. The scanner is now running in the background — this will take several minutes.`,
-      });
-      setTarget("");
-      setLabel("");
+      await fn();
+      setNotice({ ok: true, text: okText });
       fetchScans();
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      setMessage({
-        type: "error",
-        text: detail || `Failed to launch ${engine} scan. Check the target and try again.`,
-      });
-    } finally {
-      setSubmit(false);
+      setNotice({ ok: false, text: errorText(err, failText) });
     }
   };
 
-  // ── Pause a scan ───────────────────────────────────────────────────────────
-  const handlePause = async (scanId) => {
-    try {
-      await api.post(`/scans/${scanId}/pause`);
-      setMessage({ type: "success", text: "Scan paused." });
-      fetchScans();
-    } catch (err) {
-      alert(err?.response?.data?.detail || "Failed to pause scan.");
-    }
-  };
-
-  // ── Resume a scan ──────────────────────────────────────────────────────────
-  const handleResume = async (scanId) => {
-    try {
-      await api.post(`/scans/${scanId}/resume`);
-      setMessage({ type: "success", text: "Scan resumed." });
-      fetchScans();
-    } catch (err) {
-      alert(err?.response?.data?.detail || "Failed to resume scan.");
-    }
-  };
-
-  // ── Cancel a scan (cancels & deletes scan) ─────────────────────────────────
-  const handleCancel = async (scanId) => {
-    try {
-      await api.post(`/scans/${scanId}/cancel`);
-      setMessage({ type: "success", text: "Scan cancelled and removed." });
-      fetchScans();
-    } catch (err) {
-      alert(err?.response?.data?.detail || "Failed to cancel scan.");
-    }
-  };
-
-  // ── Reprocess (re-ingest results for scan) ─────────────────────────────────
-  const handleReprocess = async (scanId) => {
-    try {
-      await api.post(`/scans/${scanId}/reprocess`);
-      setMessage({
-        type: "success",
-        text: "Scan results re-ingested successfully.",
-      });
-      fetchScans();
-    } catch (err) {
-      alert(err?.response?.data?.detail || "Failed to reprocess scan results.");
-    }
-  };
-
-  // ── Rescan (re-trigger scan for target) ────────────────────────────────────
-  const handleRescan = async (scanId, scanName) => {
-    try {
-      await api.post(`/scans/${scanId}/rescan`);
-      setMessage({
-        type: "success",
-        text: `Re-scan queued for ${scanName || "target"}. Scanner is running in background.`,
-      });
-      fetchScans();
-    } catch (err) {
-      alert(err?.response?.data?.detail || "Failed to trigger re-scan.");
-    }
-  };
-
-  // ── Delete a scan record ────────────────────────────────────────────────────
-  const handleDelete = async (scanId, scanName) => {
-    if (!window.confirm(`Are you sure you want to delete scan record "${scanName}"? This will also remove associated findings.`)) {
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    if (!authorized) {
+      setNotice({ ok: false, text: "Confirm you are authorized to test this target." });
       return;
     }
+    setSubmitting(true);
+    setNotice(null);
     try {
-      await api.delete(`/scans/${scanId}`);
+      if (engineKey === "mobile") {
+        if (!file) throw new Error("Choose an .apk, .aab or .ipa file.");
+        const form = new FormData();
+        form.append("file", file);
+        if (label.trim()) form.append("label", label.trim());
+        await api.post(cfg.endpoint, form);
+        setNotice({ ok: true, text: `Mobile scan of ${file.name} queued.` });
+      } else {
+        const t = target.trim();
+        if (!t) throw new Error("Enter a target.");
+        await api.post(cfg.endpoint, { target: t, label: label.trim() || undefined });
+        setNotice({ ok: true, text: `${cfg.name} scan of ${t} queued. ${cfg.duration}` });
+      }
+      setTarget("");
+      setFile(null);
+      setLabel("");
+      setAuthorized(false);
+      if (fileRef.current) fileRef.current.value = "";
       fetchScans();
     } catch (err) {
-      alert(err?.response?.data?.detail || "Failed to delete scan record.");
+      setNotice({ ok: false, text: err?.response ? errorText(err, `Couldn't launch the ${cfg.name.toLowerCase()} scan.`) : err.message });
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  const color = statusColor;
+  const visible = scans.filter((s) => String(s.status).toLowerCase() !== "cancelled");
+  const live = visible.filter((s) => ACTIVE.has(String(s.status).toLowerCase()) || String(s.status).toLowerCase() === "paused");
+
+  const counts = useMemo(() => {
+    const dayAgo = Date.now() - 86400e3;
+    const recent = (s) => new Date(s.finished_at || s.started_at || 0).getTime() >= dayAgo;
+    return {
+      running: visible.filter((s) => String(s.status).toLowerCase() === "running").length,
+      queued: visible.filter((s) => ["queued", "waiting"].includes(String(s.status).toLowerCase())).length,
+      done: visible.filter((s) => String(s.status).toLowerCase() === "completed" && recent(s)).length,
+      failed: visible.filter((s) => String(s.status).toLowerCase() === "failed" && recent(s)).length,
+    };
+  }, [visible]);
+
+  const history = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return visible
+      .filter((s) => !ACTIVE.has(String(s.status).toLowerCase()) && String(s.status).toLowerCase() !== "paused")
+      .filter((s) => kindFilter === "all" || engineKeyOf(s) === kindFilter)
+      .filter((s) => statusFilter === "all" || String(s.status).toLowerCase() === statusFilter)
+      .filter((s) => !needle || `${s.scan_name} ${s.target}`.toLowerCase().includes(needle))
+      .sort((a, b) => new Date(b.finished_at || b.started_at || 0) - new Date(a.finished_at || a.started_at || 0));
+  }, [visible, kindFilter, statusFilter, query]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "28px" }}>
-
-      {/* ── Launch form ─────────────────────────────────────────────────── */}
-      <section style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "14px", padding: "28px" }}>
-        <div style={{ marginBottom: "20px" }}>
-          <p style={{ color: "#38bdf8", textTransform: "uppercase", fontSize: "0.72rem", letterSpacing: "1.5px", margin: "0 0 4px 0" }}>
-            VAPT Scan Orchestration Engine
-          </p>
-          <h2 style={{ color: "#f8fafc", margin: "0 0 6px 0", fontSize: "1.5rem" }}>Launch a Scan</h2>
-          <p style={{ color: "#64748b", fontSize: "0.875rem", margin: 0 }}>{cfg.description}</p>
+    <div className="cc so">
+      <header className="cc-top">
+        <div className="cc-top__title">
+          <span className="cc-live-dot" aria-hidden="true" />
+          <h1>Scan Operations</h1>
         </div>
-
-        {/* Engine toggle */}
-        <div style={{ display: "flex", gap: "10px", marginBottom: "24px" }}>
-          {Object.entries(ENGINES).map(([key, e]) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => { setEngine(key); setTarget(""); setLabel(""); setMessage({ type: "", text: "" }); }}
-              style={{
-                padding: "10px 20px",
-                borderRadius: "8px",
-                border: engine === key ? "2px solid #38bdf8" : "2px solid #334155",
-                background: engine === key ? "#0284c722" : "#1e293b",
-                color: engine === key ? "#38bdf8" : "#94a3b8",
-                fontWeight: 700,
-                cursor: "pointer",
-                fontSize: "0.875rem",
-                display: "flex",
-                alignItems: "center",
-                gap: "6px",
-                transition: "all 0.15s",
-              }}
-            >
-              {e.icon} {e.label}
-            </button>
-          ))}
+        <div className="cc-top__tools">
+          <button type="button" className="cc-btn" onClick={fetchScans}>Refresh</button>
         </div>
+      </header>
 
-        <form onSubmit={handleSubmit} style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
-          {/* Target */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-            <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>
-              {cfg.targetLabel} <span style={{ color: "#fb7185" }}>*</span>
-            </label>
-            <input
-              type="text"
-              value={target}
-              onChange={(e) => setTarget(e.target.value)}
-              placeholder={cfg.placeholder}
-              required
-              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 14px", borderRadius: "7px", fontSize: "0.95rem" }}
-            />
-            <span style={{ color: "#64748b", fontSize: "0.75rem" }}>{cfg.targetHelp}</span>
-          </div>
+      <div className="cc-kpis">
+        <div className="cc-kpi cc-kpi--live"><span>Running</span><strong>{counts.running}</strong></div>
+        <div className="cc-kpi"><span>Queued</span><strong>{counts.queued}</strong></div>
+        <div className="cc-kpi"><span>Completed · 24 hr</span><strong>{counts.done}</strong></div>
+        <div className={`cc-kpi${counts.failed ? " cc-kpi--hot" : ""}`}><span>Failed · 24 hr</span><strong>{counts.failed}</strong></div>
+      </div>
 
-          {/* Scan name / label */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-            <label style={{ color: "#94a3b8", fontSize: "0.875rem", fontWeight: 600 }}>Scan Label (optional)</label>
-            <input
-              type="text"
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              placeholder={`e.g. Q3 ${engine} Assessment`}
-              style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", padding: "10px 14px", borderRadius: "7px", fontSize: "0.95rem" }}
-            />
-          </div>
-
-          {/* Info banner */}
-          <div style={{ gridColumn: "1 / -1", background: "#0f2744", border: "1px solid #1d4ed8", borderRadius: "8px", padding: "14px 18px", color: "#93c5fd", fontSize: "0.82rem", lineHeight: 1.6 }}>
-            <strong>⏱ Scan Duration Expectations:</strong><br />
-            {engine === "Web"
-              ? "ZAP spider + active scan typically takes 5–30 minutes. The scanner will discover all pages, then actively probe each for SQLi, XSS, SSRF, CSRF, auth bypass, and 100+ other vulnerability classes."
-              : "Nmap deep port sweep + banner analysis typically takes 2–20 minutes per host. CIDR blocks with many hosts take longer. All open ports are service-fingerprinted and correlated against CVEs."}
-          </div>
-
-          {/* Submit */}
-          <div style={{ gridColumn: "1 / -1" }}>
-            <button
-              type="submit"
-              disabled={submitting}
-              style={{
-                background: submitting
-                  ? "#1e293b"
-                  : "linear-gradient(135deg, #0369a1 0%, #0284c7 100%)",
-                color: "#fff",
-                border: "none",
-                padding: "12px 28px",
-                borderRadius: "8px",
-                fontWeight: 700,
-                fontSize: "0.95rem",
-                cursor: submitting ? "not-allowed" : "pointer",
-                boxShadow: submitting ? "none" : "0 4px 14px #0284c744",
-                transition: "all 0.2s",
-              }}
-            >
-              {submitting ? `⏳ Queuing ${engine} Scan…` : `${cfg.icon} ${cfg.buttonLabel}`}
-            </button>
-          </div>
-        </form>
-
-        {message.text && (
-          <div style={{
-            marginTop: "16px",
-            padding: "14px 16px",
-            borderRadius: "8px",
-            background: message.type === "error" ? "#450a0a" : "#052e16",
-            color: message.type === "error" ? "#fca5a5" : "#86efac",
-            border: `1px solid ${message.type === "error" ? "#7f1d1d" : "#166534"}`,
-            fontSize: "0.875rem",
-          }}>
-            {message.text}
-          </div>
-        )}
-      </section>
-
-      {/* ── Scan list ───────────────────────────────────────────────────── */}
-      <section style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "14px", padding: "28px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px" }}>
-          <div>
-            <h3 style={{ color: "#f8fafc", margin: "0 0 4px 0", fontSize: "1.2rem" }}>Active &amp; Completed Scans</h3>
-            <p style={{ color: "#64748b", margin: 0, fontSize: "0.82rem" }}>Auto-refreshes every 5 seconds • Real engine results only</p>
-          </div>
-          <button
-            onClick={fetchScans}
-            style={{ background: "#1e293b", color: "#38bdf8", border: "1px solid #334155", padding: "6px 16px", borderRadius: "6px", cursor: "pointer", fontSize: "0.82rem" }}
-          >
-            ↺ Refresh
-          </button>
+      {notice && (
+        <div className={`so-notice${notice.ok ? "" : " so-notice--error"}`} role="status">
+          <span>{notice.text}</span>
+          <button type="button" className="cc-icon" aria-label="Dismiss" onClick={() => setNotice(null)}>×</button>
         </div>
+      )}
 
-        {loading ? (
-          <div style={{ textAlign: "center", color: "#64748b", padding: "40px" }}>Loading scans…</div>
-        ) : scans.length === 0 ? (
-          <div style={{ textAlign: "center", color: "#64748b", padding: "40px" }}>
-            No scans found. Launch a scan above to get started.
+      <div className="cc-grid">
+        {/* ---------- Launch console ---------- */}
+        <section className="cc-panel so-launch cc-col--side" aria-label="Launch a scan">
+          <header className="cc-panel__head"><h2>Launch a scan</h2></header>
+
+          <div className="so-engines" role="radiogroup" aria-label="Scan engine">
+            {Object.entries(ENGINES).map(([key, e]) => {
+              const state = engineState(key);
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  role="radio"
+                  aria-checked={engineKey === key}
+                  aria-label={`${e.name} scan with ${e.engine}, ${state === "active" ? "scanning" : state === "healthy" ? "ready" : "offline"}`}
+                  className="so-engine"
+                  onClick={() => pickEngine(key)}
+                >
+                  <span className="so-engine__name">{e.name}</span>
+                  <span className="so-engine__tool">{e.engine}</span>
+                  <span className={`so-engine__state cc-state--${state}`}>
+                    <span className={`cc-dot cc-dot--${state}`} />
+                    {state === "active" ? "Scanning" : state === "healthy" ? "Ready" : "Offline"}
+                  </span>
+                </button>
+              );
+            })}
           </div>
-        ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", color: "#cbd5e1", fontSize: "0.875rem" }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid #334155", textAlign: "left" }}>
-                  {["Scan Name", "Tool", "Target", "Status", "Progress", "Finished", "Actions"].map((h) => (
-                    <th key={h} style={{ padding: "10px 12px", color: "#64748b", fontWeight: 600, whiteSpace: "nowrap" }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {scans.filter((s) => (s.status || "").toLowerCase() !== "cancelled").map((scan) => {
-                  const c = statusColor(scan.status);
-                  const { tab } = toolLabel(scan.tool);
-                  const pct = parseInt(scan.progress || "0", 10);
-                  const statusLower = (scan.status || "").toLowerCase();
-                  const isActive = ["running", "waiting", "queued"].includes(statusLower);
-                  const isPaused = statusLower === "paused";
 
-                  return (
-                    <tr key={scan.id} style={{ borderBottom: "1px solid #1e293b" }}>
-                      {/* Name */}
-                      <td style={{ padding: "12px" }}>
-                        <strong style={{ color: "#f8fafc" }}>{scan.scan_name || "Unnamed Scan"}</strong>
-                        {scan.error_message && !isActive && !isPaused && (
-                          <div style={{ color: "#fda4af", fontSize: "0.72rem", marginTop: "4px", maxWidth: "260px" }}>
-                            {scan.error_message.slice(0, 120)}{scan.error_message.length > 120 ? "…" : ""}
-                          </div>
+          <p className="so-help">{cfg.help}</p>
+
+          {canOperate ? (
+            <form className="so-form" onSubmit={handleSubmit}>
+              {engineKey === "mobile" ? (
+                <label className="so-field">
+                  <span>{cfg.targetLabel}</span>
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    aria-label={cfg.targetLabel}
+                    accept=".apk,.aab,.ipa"
+                    className="so-file"
+                    onChange={(e) => setFile(e.target.files?.[0] || null)}
+                  />
+                </label>
+              ) : (
+                <label className="so-field">
+                  <span>{cfg.targetLabel}</span>
+                  <input
+                    type="text"
+                    aria-label={cfg.targetLabel}
+                    className="so-input cc-mono"
+                    value={target}
+                    onChange={(e) => setTarget(e.target.value)}
+                    placeholder={cfg.placeholder}
+                    autoComplete="off"
+                    spellCheck="false"
+                    required
+                  />
+                </label>
+              )}
+              <label className="so-field">
+                <span>Label <em>(optional)</em></span>
+                <input type="text" aria-label="Scan label (optional)" className="so-input" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. Quarterly external test" />
+              </label>
+              <label className="cc-check so-consent">
+                <input type="checkbox" aria-label="I'm authorized to test this target" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} />
+                I'm authorized to test this target.
+              </label>
+              <p className="so-duration">{cfg.duration}</p>
+              <button type="submit" className="so-launch-btn" disabled={submitting || !authorized}>
+                {submitting ? "Queuing…" : `Launch ${cfg.name.toLowerCase()} scan`}
+              </button>
+            </form>
+          ) : (
+            <p className="cc-empty">Read-only access: an analyst or admin can launch scans.</p>
+          )}
+        </section>
+
+        {/* ---------- Live operations ---------- */}
+        <section className="cc-panel so-live cc-col--center" aria-label="Live operations">
+          <header className="cc-panel__head">
+            <h2>Live operations</h2>
+            <span className="cc-muted">{live.length ? `${live.length} in progress · updates every 5s` : "Idle"}</span>
+          </header>
+          {live.length ? (
+            <div className="so-live__list">
+              {live.map((scan) => {
+                const kind = engineKeyOf(scan);
+                const e = ENGINES[kind];
+                const status = String(scan.status).toLowerCase();
+                const paused = status === "paused";
+                const pct = Math.max(0, Math.min(100, Number(scan.progress) || 0));
+                const step = phaseIndex(scan);
+                return (
+                  <article key={scan.id} className={`so-op${paused ? " is-paused" : ""}`}>
+                    <div className="so-radar" aria-hidden="true"><span /></div>
+                    <div className="so-op__body">
+                      <div className="so-op__head">
+                        <div>
+                          <strong>{scan.scan_name || `${e.name} scan`}</strong>
+                          <div className="cc-mono so-op__target">{scan.target}</div>
+                        </div>
+                        <span className="so-op__pct cc-mono">{paused ? "Paused" : `${pct}%`}</span>
+                      </div>
+                      <ol className="so-steps" aria-label="Scan phases">
+                        {e.phases.map((p, i) => (
+                          <li key={p} className={i < step ? "is-done" : i === step ? "is-now" : ""}>{p}</li>
+                        ))}
+                      </ol>
+                      <div className="cc-progress" role="progressbar" aria-label={`Progress for ${scan.target}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+                        <span style={{ width: `${pct}%` }} />
+                      </div>
+                      <div className="so-op__foot">
+                        <span className="cc-muted">{e.engine} · running {fmtDuration(scan.started_at, null)}</span>
+                        {canOperate && (
+                          <span className="so-op__actions">
+                            {status === "running" && (
+                              <button type="button" className="cc-btn" onClick={() => act(() => api.post(`/scans/${scan.id}/pause`), "Scan paused.", "Couldn't pause the scan.")}>Pause</button>
+                            )}
+                            {paused && (
+                              <button type="button" className="cc-btn" onClick={() => act(() => api.post(`/scans/${scan.id}/resume`), "Scan resumed.", "Couldn't resume the scan.")}>Resume</button>
+                            )}
+                            <button
+                              type="button"
+                              className="cc-btn so-danger"
+                              onClick={() => {
+                                if (window.confirm(`Cancel the scan of ${scan.target}?`)) {
+                                  act(() => api.post(`/scans/${scan.id}/cancel`), "Scan cancelled.", "Couldn't cancel the scan.");
+                                }
+                              }}
+                            >
+                              Cancel
+                            </button>
+                          </span>
                         )}
-                      </td>
-
-                      {/* Tool */}
-                      <td style={{ padding: "12px" }}>
-                        <span style={{ background: "#0284c722", color: "#38bdf8", border: "1px solid #0284c744", padding: "2px 8px", borderRadius: "10px", fontSize: "0.75rem", fontWeight: 700 }}>
-                          {toolLabel(scan.tool).label}
-                        </span>
-                      </td>
-
-                      {/* Target */}
-                      <td style={{ padding: "12px", fontFamily: "monospace", fontSize: "0.82rem", color: "#e2e8f0", maxWidth: "200px", wordBreak: "break-all" }}>
-                        {scan.target}
-                      </td>
-
-                      {/* Status */}
-                      <td style={{ padding: "12px" }}>
-                        <span style={{ color: c, fontWeight: 700, fontSize: "0.8rem", background: `${c}18`, border: `1px solid ${c}44`, padding: "3px 10px", borderRadius: "12px" }}>
-                          {(scan.status || "unknown").toUpperCase()}
-                        </span>
-                      </td>
-
-                      {/* Progress */}
-                      <td style={{ padding: "12px", minWidth: "160px" }}>
-                        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                            <div style={{ flex: 1, background: "#1e293b", height: "6px", borderRadius: "3px", overflow: "hidden" }}>
-                              <div style={{
-                                width: `${Math.min(100, Math.max(0, pct))}%`,
-                                background: isActive
-                                  ? "linear-gradient(90deg, #38bdf8, #0284c7)"
-                                  : c,
-                                height: "100%",
-                                transition: "width 1s ease",
-                                boxShadow: isActive ? "0 0 6px #38bdf888" : "none",
-                              }} />
-                            </div>
-                            <span style={{ fontSize: "0.75rem", color: "#94a3b8", minWidth: "32px" }}>{pct}%</span>
-                          </div>
-                          {isActive && (
-                            <span style={{ fontSize: "0.7rem", color: "#38bdf8", fontStyle: "italic" }}>
-                              {progressLabel(scan)}
-                            </span>
-                          )}
-                          {isPaused && (
-                            <span style={{ fontSize: "0.7rem", color: "#f59e0b" }}>⏸️ Paused</span>
-                          )}
-                          {scan.status?.toLowerCase() === "completed" && (
-                            <span style={{ fontSize: "0.7rem", color: "#34d399" }}>✅ Done</span>
-                          )}
-                        </div>
-                      </td>
-
-                      {/* Finished */}
-                      <td style={{ padding: "12px", fontSize: "0.78rem", color: "#64748b", whiteSpace: "nowrap" }}>
-                        {fmtTime(scan.finished_at)}
-                      </td>
-
-                      {/* Actions */}
-                      <td style={{ padding: "12px" }}>
-                        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                          {/* View Findings */}
-                          <Link
-                            to={`/findings?tab=${tab}&target=${encodeURIComponent(scan.target)}`}
-                            style={{
-                              background: "#10b98122",
-                              color: "#34d399",
-                              border: "1px solid #10b98144",
-                              padding: "4px 10px",
-                              borderRadius: "5px",
-                              fontSize: "0.75rem",
-                              fontWeight: 700,
-                              textDecoration: "none",
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: "4px",
-                            }}
-                          >
-                            🔍 Findings
-                          </Link>
-
-                          {/* PDF report */}
-                          <a
-                            href="#"
-                            onClick={(event) => {
-                              event.preventDefault();
-                              downloadScanReport(scan.id);
-                            }}
-                            style={{
-                              background: "#0284c722",
-                              color: "#38bdf8",
-                              border: "1px solid #0284c744",
-                              padding: "4px 10px",
-                              borderRadius: "5px",
-                              fontSize: "0.75rem",
-                              fontWeight: 700,
-                              textDecoration: "none",
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: "4px",
-                            }}
-                          >
-                            📥 PDF
-                          </a>
-
-                          {/* Pause button for running scans */}
-                          {statusLower === "running" && (
-                            <button
-                              onClick={() => handlePause(scan.id)}
-                              title="Pause scan execution"
-                              style={{
-                                background: "#451a03",
-                                color: "#fbbf24",
-                                border: "1px solid #78350f",
-                                padding: "4px 10px",
-                                borderRadius: "5px",
-                                cursor: "pointer",
-                                fontSize: "0.75rem",
-                                fontWeight: 700,
-                              }}
-                            >
-                              ⏸️ Pause
-                            </button>
-                          )}
-
-                          {/* Resume button for paused scans */}
-                          {isPaused && (
-                            <button
-                              onClick={() => handleResume(scan.id)}
-                              title="Resume scan execution"
-                              style={{
-                                background: "#064e3b",
-                                color: "#34d399",
-                                border: "1px solid #047857",
-                                padding: "4px 10px",
-                                borderRadius: "5px",
-                                cursor: "pointer",
-                                fontSize: "0.75rem",
-                                fontWeight: 700,
-                              }}
-                            >
-                              ▶️ Resume
-                            </button>
-                          )}
-
-                          {/* Rescan button for finished/failed scans */}
-                          {!isActive && !isPaused && (
-                            <button
-                              onClick={() => handleRescan(scan.id, scan.scan_name || scan.target)}
-                              title="Re-trigger security scan for this target"
-                              style={{
-                                background: "#0284c722",
-                                color: "#38bdf8",
-                                border: "1px solid #0284c744",
-                                padding: "4px 10px",
-                                borderRadius: "5px",
-                                cursor: "pointer",
-                                fontSize: "0.75rem",
-                                fontWeight: 700,
-                              }}
-                            >
-                              ⚡ Rescan
-                            </button>
-                          )}
-
-                          {/* Re-ingest button */}
-                          {!isActive && !isPaused && (
-                            <button
-                              onClick={() => handleReprocess(scan.id)}
-                              title="Re-ingest and re-evaluate findings from scanner"
-                              style={{
-                                background: "#1e293b",
-                                color: "#fbbf24",
-                                border: "1px solid #fbbf2444",
-                                padding: "4px 10px",
-                                borderRadius: "5px",
-                                cursor: "pointer",
-                                fontSize: "0.75rem",
-                                fontWeight: 600,
-                              }}
-                            >
-                              🔄 Re-ingest
-                            </button>
-                          )}
-
-                          {/* Cancel for active or paused scans */}
-                          {(isActive || isPaused) && (
-                            <button
-                              onClick={() => handleCancel(scan.id)}
-                              title="Cancel scan and remove from list"
-                              style={{
-                                background: "#450a0a",
-                                color: "#fca5a5",
-                                border: "1px solid #7f1d1d",
-                                padding: "4px 10px",
-                                borderRadius: "5px",
-                                cursor: "pointer",
-                                fontSize: "0.75rem",
-                                fontWeight: 600,
-                              }}
-                            >
-                              ✕ Cancel
-                            </button>
-                          )}
-
-                          {/* Delete button */}
-                          {!isActive && !isPaused && (
-                            <button
-                              onClick={() => handleDelete(scan.id, scan.scan_name || scan.target)}
-                              title="Delete scan record from history"
-                              style={{
-                                background: "#451a1a",
-                                color: "#fca5a5",
-                                border: "1px solid #7f1d1d",
-                                padding: "4px 10px",
-                                borderRadius: "5px",
-                                cursor: "pointer",
-                                fontSize: "0.75rem",
-                                fontWeight: 600,
-                              }}
-                            >
-                              🗑️ Delete
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      {/* ── Info panel ──────────────────────────────────────────────────── */}
-      <section style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: "14px", padding: "24px" }}>
-        <h4 style={{ color: "#f8fafc", margin: "0 0 12px 0" }}>📡 Scanner Status</h4>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px" }}>
-          {[
-            { name: "OWASP ZAP", desc: "Web vulnerability scanner", status: "Running", color: "#34d399" },
-            { name: "Nmap", desc: "Network port scanner + CVE correlation", status: "Running", color: "#34d399" },
-            { name: "MobSF", desc: "Mobile binary static analysis", status: "Running", color: "#fbbf24" },
-          ].map((s) => (
-            <div key={s.name} style={{ background: "#1e293b", borderRadius: "8px", padding: "14px", border: "1px solid #334155" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
-                <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: s.color, display: "inline-block" }} />
-                <strong style={{ color: "#f8fafc", fontSize: "0.875rem" }}>{s.name}</strong>
-              </div>
-              <p style={{ color: "#64748b", fontSize: "0.75rem", margin: 0 }}>{s.desc}</p>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
             </div>
-          ))}
+          ) : (
+            <div className="so-idle">
+              <div className="so-radar so-radar--idle" aria-hidden="true"><span /></div>
+              <p>{loading ? "Loading scans…" : "No scans running. Launch one to see it here in real time."}</p>
+            </div>
+          )}
+        </section>
+      </div>
+
+      {/* ---------- History ---------- */}
+      <section className="cc-panel so-history" aria-label="Scan history">
+        <header className="cc-panel__head">
+          <h2>Scan history</h2>
+          <span className="cc-muted">{history.length} scans</span>
+        </header>
+
+        <div className="so-filters">
+          <label className="so-search">
+            <span className="cc-sr">Search scans</span>
+            <input type="search" placeholder="Search name or target" value={query} onChange={(e) => setQuery(e.target.value)} />
+          </label>
+          <div className="cc-range" role="group" aria-label="Engine">
+            {["all", "web", "network", "mobile"].map((k) => (
+              <button key={k} type="button" aria-pressed={kindFilter === k} onClick={() => setKindFilter(k)}>
+                {k === "all" ? "All" : ENGINES[k].name}
+              </button>
+            ))}
+          </div>
+          <div className="cc-range" role="group" aria-label="Status">
+            {["all", "completed", "failed"].map((k) => (
+              <button key={k} type="button" aria-pressed={statusFilter === k} onClick={() => setStatusFilter(k)}>
+                {k === "all" ? "Any status" : k[0].toUpperCase() + k.slice(1)}
+              </button>
+            ))}
+          </div>
         </div>
+
+        <div className="so-table-wrap">
+          <table className="so-table">
+            <thead>
+              <tr>
+                <th scope="col">Scan</th>
+                <th scope="col">Engine</th>
+                <th scope="col">Status</th>
+                <th scope="col">Findings</th>
+                <th scope="col">Duration</th>
+                <th scope="col">Finished</th>
+                <th scope="col"><span className="cc-sr">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.slice(0, limit).map((scan) => {
+                const kind = engineKeyOf(scan);
+                const status = String(scan.status).toLowerCase();
+                const found = scan.result_summary?.finding_count;
+                const tab = kind === "web" ? "zap" : kind === "mobile" ? "mobsf" : "openvas";
+                return (
+                  <tr key={scan.id}>
+                    <td>
+                      <strong className="so-name">{scan.scan_name || "Unnamed scan"}</strong>
+                      <div className="cc-mono so-sub">{scan.target}</div>
+                      {status === "failed" && scan.error_message ? <div className="so-error">{scan.error_message.slice(0, 160)}</div> : null}
+                      {status === "completed" && scan.error_message ? <div className="so-warn">{scan.error_message.slice(0, 160)}</div> : null}
+                    </td>
+                    <td><span className="so-tag">{ENGINES[kind].engine}</span></td>
+                    <td><span className={`so-status so-status--${status}`}>{status}</span></td>
+                    <td className="cc-mono">{found ?? "—"}</td>
+                    <td className="cc-mono so-sub">{fmtDuration(scan.started_at, scan.finished_at)}</td>
+                    <td className="cc-mono so-sub">{fmtWhen(scan.finished_at)}</td>
+                    <td className="so-actions">
+                      <Link className="cc-btn" to={`/findings?tab=${tab}&target=${encodeURIComponent(scan.target)}`}>Findings</Link>
+                      <button type="button" className="cc-btn" onClick={() => downloadScanReport(scan.id)}>PDF</button>
+                      {canOperate && (
+                        <details className="so-more">
+                          <summary className="cc-btn" aria-label={`More actions for ${scan.scan_name || scan.target}`}>More</summary>
+                          <div className="so-more__menu">
+                            <button type="button" onClick={() => act(() => api.post(`/scans/${scan.id}/rescan`), `Re-scan of ${scan.target} queued.`, "Couldn't start the re-scan.")}>Re-scan target</button>
+                            <button type="button" onClick={() => act(() => api.post(`/scans/${scan.id}/reprocess`), "Results re-ingested.", "Couldn't re-ingest results.")}>Re-ingest results</button>
+                            <button
+                              type="button"
+                              className="so-danger"
+                              onClick={() => {
+                                if (window.confirm(`Delete "${scan.scan_name || scan.target}" and its findings? This can't be undone.`)) {
+                                  act(() => api.delete(`/scans/${scan.id}`), "Scan deleted.", "Couldn't delete the scan.");
+                                }
+                              }}
+                            >
+                              Delete scan
+                            </button>
+                          </div>
+                        </details>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {!history.length && (
+                <tr><td colSpan={7} className="cc-empty so-empty">{loading ? "Loading…" : "No scans match these filters."}</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        {history.length > limit && (
+          <button type="button" className="cc-btn so-showmore" onClick={() => setLimit((n) => n + 25)}>
+            Show more ({history.length - limit} remaining)
+          </button>
+        )}
       </section>
     </div>
   );

@@ -1,0 +1,245 @@
+/* Security Analytics page */
+
+.an-page .cc-kpi {
+  min-height: 92px;
+}
+
+.an-kpi-hint {
+  font-size: 12px;
+  color: var(--cc-muted);
+}
+
+.an-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 400px), 1fr));
+  grid-auto-flow: row dense;
+  gap: 16px;
+  align-items: start;
+}
+
+.an-w {
+  min-width: 0;
+}
+
+@media (min-width: 900px) {
+  .an-w--wide {
+    grid-column: span 2;
+  }
+}
+
+.an-chart--tall {
+  height: 300px;
+}
+
+.an-chart--short {
+  height: 200px;
+}
+
+.an-note {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--cc-muted);
+}
+
+.an-note a,
+.an-callout a {
+  color: var(--cc-cyan);
+}
+
+.an-legend {
+  position: static;
+  justify-content: flex-start;
+  margin-top: 10px;
+}
+
+.an-subhead {
+  margin: 16px 0 4px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cc-muted);
+}
+
+/* ---------- 3D terrain ---------- */
+
+.an-terrain {
+  position: relative;
+}
+
+.an-terrain__stage {
+  position: relative;
+  height: 300px;
+  overflow: hidden;
+}
+
+.an-terrain__canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.an-terrain__canvas canvas {
+  cursor: crosshair;
+}
+
+.an-terrain .cc-legend {
+  position: static;
+  margin-top: 8px;
+}
+
+.an-terrain__readout {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(4, 10, 22, 0.82);
+  border: 1px solid var(--cc-line);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.an-terrain__readout strong {
+  font-family: var(--nw-mono, monospace);
+  font-size: 16px;
+  color: #ffffff;
+}
+
+.an-terrain__axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--cc-muted);
+}
+
+/* ---------- lists & tables ---------- */
+
+.an-overdue,
+.an-stale {
+  align-items: flex-start !important;
+}
+
+.an-overdue .cc-dot {
+  margin-top: 6px;
+  flex: none;
+}
+
+.an-overdue__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.an-overdue__main a {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.an-late {
+  flex: none;
+  color: #ffb4b4;
+}
+
+.an-table {
+  min-width: 0;
+  margin-top: 10px;
+  font-size: 13.5px;
+}
+
+.an-table th,
+.an-table td {
+  padding: 8px 6px;
+}
+
+.an-table th[scope="row"] {
+  text-align: left;
+  font-weight: 500;
+  text-transform: capitalize;
+}
+
+.an-bad {
+  color: #ffb4b4;
+}
+
+.an-fp {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 120px;
+}
+
+.an-fp__track {
+  flex: 1;
+  height: 6px;
+  background: rgba(46, 123, 255, 0.15);
+  overflow: hidden;
+}
+
+.an-fp__fill {
+  display: block;
+  height: 100%;
+  background: #f5d76e;
+  transition: width 0.6s ease;
+}
+
+.an-fp__fill--bad {
+  background: #ff6b6b;
+  box-shadow: 0 0 8px rgba(255, 107, 107, 0.6);
+}
+
+.an-callout {
+  padding: 14px 16px;
+  border: 1px dashed var(--cc-line-hi);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.an-callout p {
+  margin: 6px 0 0;
+  color: var(--cc-muted);
+}
+
+/* ---------- coverage gauge ---------- */
+
+.an-coverage {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.an-coverage p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.an-gauge {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 108px;
+  height: 108px;
+  border-radius: 50%;
+  background:
+    radial-gradient(closest-side, #071225 78%, transparent 79% 100%),
+    conic-gradient(var(--cc-cyan) var(--p), rgba(46, 123, 255, 0.18) 0);
+  box-shadow: 0 0 22px rgba(92, 225, 255, 0.18);
+}
+
+.an-gauge strong {
+  font-family: var(--nw-mono, monospace);
+  font-size: 24px;
+  color: #ffffff;
+}
+
+.an-customize__list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  gap: 0 24px;
+}

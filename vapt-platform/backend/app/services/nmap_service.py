@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.models.finding import Finding
 from app.models.risk import Risk
 from app.services.cve_lookup import lookup_cve_for_service
+from app.services.nmap_scanner import _service_severity
 from app.services.nmap import run_nmap
 from app.services.risk_engine import calculate_risk
 
@@ -65,9 +66,12 @@ def process_nmap_scan(db: Session, target: str, scan_id=None):
     for item in parsed_findings:
 
         # ---- CVE enrichment ----
-        cve_id, cvss_score, severity = lookup_cve_for_service(
-            item["service"]
-        )
+        enrichment = lookup_cve_for_service(item["service"])  # returns a dict, not a tuple
+        cve_id = enrichment["cve_id"]
+        cvss_score = enrichment["cvss_score"]
+        severity = enrichment["severity"]
+        if not severity:  # no confirmed CVE: rate the exposure by port/service instead
+            severity, cvss_score = _service_severity(int(item["port"] or 0), item["service"] or "", "open")
 
         # ---- Save finding ----
         finding = Finding(

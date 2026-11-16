@@ -2,7 +2,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
-from fastapi.responses import PlainTextResponse, Response
+from fastapi import HTTPException
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -25,6 +26,7 @@ from app.services.reporting import (
 )
 
 from app.services.security import require_analyst
+from app.services import report_studio
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
@@ -296,7 +298,7 @@ def get_report_data(scan_job_id: str, db: Session = Depends(get_db)):
             "asset_id": 0,
             "ip": metadata.get("host") or metadata.get("ip_address") or "127.0.0.1",
             "hostname": metadata.get("url") or metadata.get("host") or f.source,
-            "asset_type": "Website" if f.source == "zap" else "OS",
+            "asset_type": "Website" if f.source in {"zap", "web", "nuclei", "testssl"} else "OS",
             "port": metadata.get("port", 443),
             "issue": f.title,
             "severity": (f.severity or "MEDIUM").upper(),
@@ -352,8 +354,10 @@ async def upload_logo_v1(
 ):
     ensure_report_storage()
     suffix = Path(file.filename or "logo").suffix.lower()
-    if suffix not in {".png", ".jpg", ".jpeg", ".svg"}:
-        return Response(content='{"detail":"Supported logo formats: PNG, JPG, JPEG, SVG."}', media_type="application/json", status_code=400)
+    if suffix not in {".png", ".jpg", ".jpeg"}:
+        return Response(content='{"detail":"Use a PNG or JPG logo (SVG cannot be embedded in PDF reports)."}', media_type="application/json", status_code=400)
+    for stale in REPORT_UPLOADS_DIR.glob("report-logo.*"):
+        stale.unlink(missing_ok=True)
     destination = REPORT_UPLOADS_DIR / f"report-logo{suffix}"
     content = await file.read()
     destination.write_bytes(content)
@@ -429,56 +433,100 @@ def download_report_file_get(
     report_title: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    import uuid
-    normalized_mode = _normalize_mode(type)
-    fmt = (format or "pdf").strip().lower()
-    
-    scan = None
-    if scan_job_id and scan_job_id not in ["all", "latest", "default"]:
-        try:
-            valid_uuid = uuid.UUID(str(scan_job_id))
-            scan = db.query(Scan).filter(Scan.id == valid_uuid).first()
-        except (ValueError, TypeError):
-            # If scan_job_id is integer string, try finding by target or recent scan
-            scan = db.query(Scan).filter(Scan.target == scan_job_id).first()
-            if not scan:
-                scan = db.query(Scan).order_by(Scan.created_at.desc()).first()
-
-    if scan:
-        findings = db.query(Finding).filter(Finding.scan_id == scan.id).all()
-        if not findings and scan.target:
-            findings = db.query(Finding).filter(Finding.target.like(f"%{scan.target}%")).all()
-        if not report_title:
-            report_title = f"{scan.scan_name} (Assessment: {scan.target})"
-    else:
-        findings = db.query(Finding).all()
-
-    if fmt == "csv":
-        csv_data = export_findings_csv(findings)
-        return Response(
-            content=csv_data,
-            media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=VAPT_Scan_Report_{scan_job_id}_{normalized_mode}.csv"},
-        )
-    if fmt == "json":
-        data_json = export_findings_json(findings)
-        return Response(
-            content=data_json,
-            media_type="application/json",
-            headers={"Content-Disposition": f"attachment; filename=VAPT_Scan_Report_{scan_job_id}_{normalized_mode}.json"},
-        )
-    if fmt == "docx":
-        docx_bytes = export_findings_docx(findings, mode=normalized_mode, report_title=report_title, company_name=company_name)
-        return Response(
-            content=docx_bytes,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f"attachment; filename=VAPT_Scan_Report_{scan_job_id}_{normalized_mode}.docx"},
-        )
-
-    # Default to PDF
-    pdf_bytes = export_findings_pdf(findings, mode=normalized_mode, report_title=report_title, company_name=company_name)
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename=VAPT_Scan_Report_{scan_job_id}_{normalized_mode}.pdf"},
+    """Per-scan report (used by the Scans page). Rendered by the Report Studio engine."""
+    payload = StudioRequest(
+        mode=type,
+        format=format,
+        scan_id=None if scan_job_id in {"all", "latest", "default"} else scan_job_id,
+        company_name=company_name,
+        report_title=report_title,
+        include_details=True,
     )
+    return studio_export(payload, db)
+
+
+# ---------------------------------------------------------------------------
+# Report Studio: one model drives the live preview and every export format.
+# ---------------------------------------------------------------------------
+
+class StudioRequest(BaseModel):
+    mode: str = "executive"
+    format: str = "pdf"
+    scan_id: str | None = None
+    targets: list[str] = Field(default_factory=list)
+    start_date: str | None = None
+    end_date: str | None = None
+    include_resolved: bool = False
+    include_info: bool = False
+    include_cves: bool = True
+    include_remediation: bool = True
+    include_evidence: bool = True
+    include_compliance: bool = True
+    include_details: bool = False
+    report_title: str | None = Field(default=None, max_length=160)
+    prepared_for: str | None = Field(default=None, max_length=120)
+    author_name: str | None = Field(default=None, max_length=120)
+    company_name: str | None = Field(default=None, max_length=120)
+    classification: str | None = "Confidential"
+    version: str | None = Field(default="1.0", max_length=20)
+
+
+class BrandingUpdate(BaseModel):
+    company_name: str = Field(min_length=1, max_length=120)
+
+
+def _logo_path() -> str | None:
+    branding = load_report_branding()
+    path = branding.get("logo_path")
+    return path if path and Path(path).exists() else None
+
+
+def _safe_filename(value: str) -> str:
+    import re
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", value).strip("_")[:60] or "Report"
+
+
+@router.post("/studio/preview")
+def studio_preview(payload: StudioRequest, db: Session = Depends(get_db)):
+    return report_studio.build_report_model(db, payload.model_dump())
+
+
+@router.post("/studio/export")
+def studio_export(payload: StudioRequest, db: Session = Depends(get_db)):
+    model = report_studio.build_report_model(db, payload.model_dump())
+    fmt = (payload.format or "pdf").lower()
+    base = f"{_safe_filename(model['meta']['prepared_for'] or model['meta']['organization'])}_{model['mode'].title()}_Report_{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+    if fmt == "csv":
+        return Response(report_studio.render_csv(model), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{base}.csv"'})
+    if fmt == "json":
+        return Response(report_studio.render_json(model), media_type="application/json", headers={"Content-Disposition": f'attachment; filename="{base}.json"'})
+    if fmt == "docx":
+        return Response(
+            report_studio.render_docx(model, _logo_path()),
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f'attachment; filename="{base}.docx"'},
+        )
+    return Response(report_studio.render_pdf(model, _logo_path()), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{base}.pdf"'})
+
+
+@router.get("/branding/logo")
+def get_branding_logo():
+    path = _logo_path()
+    if not path:
+        raise HTTPException(status_code=404, detail="No logo uploaded.")
+    return FileResponse(path)
+
+
+@router.delete("/branding/logo", dependencies=[Depends(require_analyst)])
+def delete_branding_logo():
+    path = _logo_path()
+    if path:
+        Path(path).unlink(missing_ok=True)
+    save_report_branding(logo_path="", logo_name="")
+    return {"logo_uploaded": False}
+
+
+@router.put("/branding", dependencies=[Depends(require_analyst)])
+def update_branding(payload: BrandingUpdate):
+    branding = save_report_branding(company_name=payload.company_name.strip())
+    return {"company_name": branding["company_name"], "logo_uploaded": bool(_logo_path()), "updated_at": branding.get("updated_at")}
