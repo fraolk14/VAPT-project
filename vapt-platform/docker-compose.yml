@@ -81,6 +81,9 @@ services:
         "zap.sh",
         "-Xmx1536m",
         "-daemon",
+        # No add-on update checks or downloads at start-up: over a slow internet link a
+        # half-finished add-on download left ZAP stuck at 100% CPU, never serving its API.
+        "-silent",
         "-host",
         "0.0.0.0",
         "-port",

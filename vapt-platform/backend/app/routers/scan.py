@@ -126,7 +126,7 @@ def create_web_scan(
         target=normalized_target,
         profile="spider-active",
         schedule=None,
-        engine_metadata={},
+        engine_metadata={"pace": payload.pace},
         status="waiting",
         progress="0",
         error_message="Web engine queued. Spidering and active scanning will begin automatically in the background.",
@@ -306,7 +306,8 @@ def rescan_record(
         target=scan.target,
         profile=scan.profile,
         schedule=scan.schedule,
-        engine_metadata={},
+        # Keep the speed the original scan was launched with.
+        engine_metadata={"pace": (scan.engine_metadata or {}).get("pace", "auto")} if scan.scan_type == "web" else {},
         status="waiting",
         progress="0",
         error_message=f"{scan.scan_type.capitalize()} assessment queued. Re-scanning target in the background.",

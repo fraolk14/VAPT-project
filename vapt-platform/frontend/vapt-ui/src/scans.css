@@ -512,3 +512,11 @@
     animation: none;
   }
 }
+
+.so-stages {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--cc-muted, #8ea3bd);
+  white-space: normal;
+  max-width: 220px;
+}

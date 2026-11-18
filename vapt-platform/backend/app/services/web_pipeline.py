@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,110 @@ def _env_int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except ValueError:
         return default
+
+
+# ---------------------------------------------------------------------------
+# Scan pace. Internet-facing sites sit behind CDNs and hosting firewalls (Netlify, Cloudflare,
+# cPanel/CSF) that rate-limit or ban an IP that sends a burst of scanner traffic, after which the
+# rest of the scan tests nothing. "polite" (default) keeps every engine under those thresholds;
+# use "normal" or "fast" for your own labs and internal hosts.
+# ---------------------------------------------------------------------------
+
+PACES: dict[str, dict[str, Any]] = {
+    "polite": {"zap_threads": 2, "zap_delay_ms": 150, "zap_rule_min": 5, "zap_max_min": 45,
+               "spider_threads": 2, "spider_min": 10, "ajax_min": 5,
+               "katana_rl": 10, "katana_c": 2, "nuclei_rl": 20, "nuclei_c": 10, "nuclei_full": False},
+    # Public sites by default: ~3-4x quicker than polite, still far below ZAP's 16-thread default.
+    "balanced": {"zap_threads": 4, "zap_delay_ms": 50, "zap_rule_min": 5, "zap_max_min": 45,
+                 "spider_threads": 3, "spider_min": 10, "ajax_min": 5,
+                 "katana_rl": 15, "katana_c": 3, "nuclei_rl": 25, "nuclei_c": 15, "nuclei_full": False},
+    "normal": {"zap_threads": 4, "zap_delay_ms": 0, "zap_rule_min": 8, "zap_max_min": 60,
+               "spider_threads": 4, "spider_min": 15, "ajax_min": 8,
+               "katana_rl": 25, "katana_c": 4, "nuclei_rl": 30, "nuclei_c": 8, "nuclei_full": True},
+    "fast": {"zap_threads": 10, "zap_delay_ms": 0, "zap_rule_min": 10, "zap_max_min": 120,
+             "spider_threads": 8, "spider_min": 20, "ajax_min": 10,
+             "katana_rl": 40, "katana_c": 5, "nuclei_rl": 60, "nuclei_c": 25, "nuclei_full": True,
+             "parallel_share": 1.0},
+}
+
+
+# While Nuclei runs alongside ZAP's active scan it gets this share of its normal rate, so the
+# combined traffic stays moderate. Concurrency (-c) is set high enough that Nuclei actually reaches
+# the rate limit; the rate limit, not concurrency, is what the target feels.
+PARALLEL_NUCLEI_SHARE = 0.6
+
+
+def is_internal_target(target: str) -> bool:
+    """Private / loopback / link-local addresses, single-label names (docker services, intranet
+    hosts) and .local/.internal/.lan/.home names: no CDN or hosting firewall to trip."""
+    import ipaddress
+    import socket
+
+    host = _host_port(target)[0].lower()
+    if not host:
+        return False
+    if "." not in host or host.endswith((".local", ".internal", ".lan", ".home", ".localhost")):
+        return True
+    try:
+        addrs = {ipaddress.ip_address(host)}
+    except ValueError:
+        try:
+            addrs = {ipaddress.ip_address(i[4][0]) for i in socket.getaddrinfo(host, None)}
+        except OSError:
+            return False
+    return bool(addrs) and all(a.is_private or a.is_loopback or a.is_link_local for a in addrs)
+
+
+def resolve_pace(choice: str | None, target: str) -> str:
+    """The pace a scan actually uses. 'auto' (default): fast for internal hosts, balanced for public
+    sites. WEB_SCAN_PACE in .env, when set to a preset, overrides 'auto' for every scan."""
+    choice = (choice or "auto").strip().lower()
+    if choice in PACES:
+        return choice
+    env = os.getenv("WEB_SCAN_PACE", "auto").strip().lower()
+    if env in PACES:
+        return env
+    return "fast" if is_internal_target(target) else "balanced"
+
+
+def pace(name: str | None = None) -> dict[str, Any]:
+    name = (name or os.getenv("WEB_SCAN_PACE", "polite")).strip().lower()
+    return {"name": name if name in PACES else "polite", **PACES.get(name, PACES["polite"])}
+
+
+_public_ip: dict[str, Any] = {"at": 0.0, "ip": ""}
+
+
+def scanner_public_ip() -> str:
+    """The IP the target sees, for 'allow-list this address' advice. Cached; empty if unknown."""
+    import time
+
+    import requests
+
+    if time.time() - _public_ip["at"] > 3600:
+        try:
+            _public_ip["ip"] = requests.get("https://api.ipify.org", timeout=5).text.strip()[:45]
+        except Exception:
+            _public_ip["ip"] = ""
+        _public_ip["at"] = time.time()
+    return _public_ip["ip"]
+
+
+def blocked_advice(host: str) -> str:
+    ip = scanner_public_ip()
+    return (f"{host} most likely rate-limited or blocked this scanner"
+            f"{f' (public IP {ip})' if ip else ''} — CDNs and hosting firewalls do this to bursts of scan traffic. "
+            "Results found before the block are kept. Ask the site's host to allow-list the scanner's IP, "
+            "or re-scan later (bans are often lifted after 15–60 minutes).")
+
+
+def target_answers(target: str, timeout: float = 10) -> bool:
+    """One quick probe: does the target still send response headers?"""
+    try:
+        _first_byte_seconds(_base(target), timeout=timeout)
+        return True
+    except Exception:
+        return False
 
 
 def _first_byte_seconds(url: str, timeout: float = 10) -> float:
@@ -114,16 +219,100 @@ def tool_available(name: str) -> bool:
     return shutil.which(name) is not None
 
 
+_job = threading.local()  # .key is set while a background check job runs in this thread
+_job_procs: dict[str, list[subprocess.Popen]] = {}
+_job_cancelled: set[str] = set()
+
+
 def _run(cmd: list[str], timeout: int, cwd: str | None = None) -> tuple[int, str, str]:
-    """Run a tool with a hard timeout. Returns (exit code, stdout, stderr); -9 means timed out."""
+    """Run a tool with a hard timeout. Returns (exit code, stdout, stderr); -9 means timed out.
+
+    Inside a background job the process is registered so the job can be cancelled (the target
+    started blocking the scanner); a cancelled job's tools return -15."""
+    key = getattr(_job, "key", None)
+    if key and key in _job_cancelled:
+        return -15, "", "cancelled"
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd, errors="replace")
-        return proc.returncode, proc.stdout or "", proc.stderr or ""
-    except subprocess.TimeoutExpired as exc:
-        out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        return -9, out, "timed out"
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd, errors="replace")
     except OSError as exc:
         return -1, "", str(exc)
+    if key:
+        _job_procs.setdefault(key, []).append(proc)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return (-15 if key in _job_cancelled else proc.returncode), out or "", err or ""
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, _err = proc.communicate()
+        return -9, out or "", "timed out"
+    finally:
+        if key and proc in _job_procs.get(key, []):
+            _job_procs[key].remove(proc)
+
+
+def _nuclei_rate(pace_name: str | None, parallel: bool) -> int:
+    p = pace(pace_name)
+    rate = _env_int("NUCLEI_RATE_LIMIT", p["nuclei_rl"])
+    # Internal targets ("fast") have no CDN to trip, so Nuclei keeps its full rate alongside ZAP.
+    share = p.get("parallel_share", PARALLEL_NUCLEI_SHARE)
+    return max(5, int(rate * share)) if parallel else rate
+
+
+# ---------------------------------------------------------------------------
+# Nuclei + testssl.sh alongside ZAP's active scan
+# ---------------------------------------------------------------------------
+
+_executor = None
+_jobs: dict[str, Any] = {}
+
+
+def start_background_checks(key: str, target: str, crawled: list[str], pace_name: str | None) -> None:
+    """Start Nuclei and testssl.sh in the background while ZAP actively scans the same target."""
+    global _executor
+    from concurrent.futures import ThreadPoolExecutor
+
+    if _executor is None:
+        _executor = ThreadPoolExecutor(max_workers=int(os.getenv("WEB_PARALLEL_JOBS", "2")), thread_name_prefix="web-checks")
+    _job_cancelled.discard(key)
+
+    def job() -> dict[str, Any]:
+        import time
+
+        _job.key = key
+        try:
+            t0 = time.time()
+            nuclei, nw = run_nuclei(target, crawled, pace_name=pace_name, parallel=True)
+            t1 = time.time()
+            tls, tw = run_testssl(target)
+            return {"nuclei": nuclei, "nuclei_warnings": nw, "tls": tls, "tls_warnings": tw,
+                    "nuclei_seconds": round(t1 - t0), "testssl_seconds": round(time.time() - t1),
+                    "cancelled": key in _job_cancelled}
+        finally:
+            _job.key = None
+
+    _jobs[key] = _executor.submit(job)
+
+
+def collect_background_checks(key: str, timeout: float) -> dict[str, Any] | None:
+    """Result of start_background_checks, waiting up to `timeout` s. None if no job was started
+    in this process (e.g. the API restarted mid-scan) or it failed: run the checks inline then."""
+    future = _jobs.pop(key, None)
+    if future is None:
+        return None
+    try:
+        return future.result(timeout=timeout)
+    except Exception:
+        cancel_background_checks(key)
+        return None
+
+
+def cancel_background_checks(key: str) -> None:
+    _job_cancelled.add(key)
+    for proc in list(_job_procs.get(key, [])):
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 def _host_port(url: str) -> tuple[str, int, str]:
@@ -141,7 +330,7 @@ def _base(url: str) -> str:
 # Crawl: Katana
 # ---------------------------------------------------------------------------
 
-def katana_crawl(target: str) -> tuple[list[str], list[str]]:
+def katana_crawl(target: str, pace_name: str | None = None) -> tuple[list[str], list[str]]:
     """Return (same-host URLs found, warnings)."""
     if not tool_available("katana"):
         return [], ["Katana is not installed; JavaScript endpoint discovery was skipped."]
@@ -151,7 +340,7 @@ def katana_crawl(target: str) -> tuple[list[str], list[str]]:
         "-jc",                  # parse JavaScript files for endpoints
         "-kf", "all",           # also read robots.txt and sitemap.xml
         "-d", str(_env_int("KATANA_DEPTH", 3)),
-        "-c", "5", "-rl", str(_env_int("KATANA_RATE_LIMIT", 40)),
+        "-c", str(pace(pace_name)["katana_c"]), "-rl", str(_env_int("KATANA_RATE_LIMIT", pace(pace_name)["katana_rl"])),
         "-timeout", "10", "-ct", f"{seconds}s",
         "-fs", "fqdn",          # stay on the exact host being assessed
         "-ef", STATIC_EXT,
@@ -199,7 +388,8 @@ def _nuclei_severity(value: str | None) -> str:
     return value if value in SEV_ORDER else "info"
 
 
-def run_nuclei(target: str, crawled: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+def run_nuclei(target: str, crawled: list[str], pace_name: str | None = None,
+               parallel: bool = False, signature: bool = True) -> tuple[list[dict[str, Any]], list[str]]:
     """Signature checks on the site root, plus DAST templates on crawled URLs that take parameters."""
     if not tool_available("nuclei"):
         return [], ["Nuclei is not installed; known-CVE and exposure checks were skipped."]
@@ -214,9 +404,8 @@ def run_nuclei(target: str, crawled: list[str]) -> tuple[list[dict[str, Any]], l
         # -sr: fall back to the system resolver. Nuclei otherwise retries public resolvers, which cannot
         # resolve internal names (docker services, intranet hosts); one failed lookup marks the host dead.
         "-sr",
-        "-severity", os.getenv("NUCLEI_SEVERITY", "low,medium,high,critical"),
         "-etags", "dos,fuzz-dos,brute-force,bruteforce,intrusive,headless",
-        "-rl", str(_env_int("NUCLEI_RATE_LIMIT", 40)), "-c", "10", "-bs", "10",
+        "-rl", str(_nuclei_rate(pace_name, parallel)), "-c", str(pace(pace_name)["nuclei_c"]), "-bs", "10",
         "-timeout", "10", "-retries", "1",
         "-stats", "-sj", "-si", "30",
     ]
@@ -235,8 +424,23 @@ def run_nuclei(target: str, crawled: list[str]) -> tuple[list[dict[str, Any]], l
         # 1) Signature templates (CVEs, exposures, misconfigurations, default logins) against the root.
         root_file = Path(tmp, "roots.txt")
         root_file.write_text(_base(target) + "\n", encoding="utf-8")
-        cmd = ["nuclei", "-l", str(root_file), "-t", templates, "-pt", "http", *common]
-        code, out, err = _run(cmd, timeout=seconds)
+        severity = os.getenv("NUCLEI_SEVERITY", "low,medium,high,critical")
+        if pace(pace_name)["nuclei_full"]:
+            passes = [(["-t", templates, "-pt", "http"], severity)]
+        else:
+            # Polite: generic web checks incl. default logins, full severity range (~8k requests), plus only the critical
+            # CVE templates (~2.6k), instead of all ~25.7k requests. Keeps a scan under ~10 minutes at
+            # a rate CDNs tolerate; set WEB_SCAN_PACE=normal for the full set.
+            generic = [arg for d in ("exposures", "misconfiguration", "vulnerabilities", "default-logins", "takeovers", "miscellaneous")
+                       for arg in ("-t", f"{templates}/http/{d}")]
+            passes = [(generic, severity), (["-t", f"{templates}/http/cves"], "critical")]
+        out, err, code = "", "", 0
+        if not signature:
+            passes = []  # signature checks already ran (alongside ZAP); only the DAST pass below
+        for args, sev in passes:
+            cmd = ["nuclei", "-l", str(root_file), *args, "-severity", sev, *common]
+            c, o, e = _run(cmd, timeout=seconds)
+            out, err, code = out + o, err + e, (c if c not in (0, 1) else code)
         findings += _parse_nuclei(out)
         done = _nuclei_percent(err)
         if code == -9:
@@ -254,7 +458,8 @@ def run_nuclei(target: str, crawled: list[str]) -> tuple[list[dict[str, Any]], l
             if param_urls:
                 dast_file = Path(tmp, "dast.txt")
                 dast_file.write_text("\n".join(param_urls) + "\n", encoding="utf-8")
-                cmd = ["nuclei", "-l", str(dast_file), "-t", templates, "-dast", *common]
+                cmd = ["nuclei", "-l", str(dast_file), "-t", templates, "-dast",
+                       "-severity", os.getenv("NUCLEI_SEVERITY", "low,medium,high,critical"), *common]
                 code, out, err = _run(cmd, timeout=_env_int("NUCLEI_DAST_MAX_SECONDS", 600))
                 findings += _parse_nuclei(out)
                 done = _nuclei_percent(err)

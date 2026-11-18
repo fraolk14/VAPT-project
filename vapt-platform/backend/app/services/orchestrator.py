@@ -588,6 +588,26 @@ def run_direct_network_scan(db: Session, scan: Scan) -> Scan:
         return scan
 
 
+def _env_seconds(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _stamp(scan: Scan, name: str, since: datetime | None = None, value: float | None = None) -> None:
+    """Record how long a stage took, in seconds, under engine_metadata['timings']."""
+    if value is None:
+        if since is None:
+            return
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        value = (datetime.now(timezone.utc) - since).total_seconds()
+    meta = dict(scan.engine_metadata or {})
+    meta["timings"] = {**(meta.get("timings") or {}), name: round(value)}
+    scan.engine_metadata = meta
+
+
 def _augment_web_findings(db: Session, scan: Scan, target: str, findings: list[dict[str, Any]], zap_client: Any | None) -> list[dict[str, Any]]:
     """Run the extra web engines and the false-positive controls on a web scan's results."""
     from app.services import web_pipeline as wp
@@ -600,21 +620,27 @@ def _augment_web_findings(db: Session, scan: Scan, target: str, findings: list[d
         scan.error_message = text
         db.commit()
 
+    eff = (scan.engine_metadata or {}).get("pace_effective") or wp.resolve_pace((scan.engine_metadata or {}).get("pace"), target)
     crawled = list((scan.engine_metadata or {}).get("crawled_urls") or [])
-    if not crawled:
+    if not crawled and not (scan.engine_metadata or {}).get("katana_done"):
+        # Only when Katana never ran (the no-ZAP fallback path); an empty result is a result.
         status(91, "Katana: discovering JavaScript endpoints and sitemap URLs...")
-        crawled, w = wp.katana_crawl(target)
+        crawled, w = wp.katana_crawl(target, pace_name=eff)
         warnings += w
     stages["katana_urls"] = len(crawled)
 
     status(92, "Waiting for the target to respond normally again before the next engines...")
-    ready, waited, answered = wp.wait_for_target(target)
+    # Already known to be blocking: one short check instead of a three-minute wait.
+    blocked_before = bool((scan.engine_metadata or {}).get("target_blocked"))
+    ready, waited, answered = wp.wait_for_target(target, max_wait=30 if blocked_before else None)
     stages["target_recovery_seconds"] = waited
     if not answered:
         # Nothing to test: don't spend 25 minutes of Nuclei and confirmation on a target that is gone.
-        warnings.append(f"The target stopped answering (no response for {int(waited)}s), so Nuclei, testssl.sh "
-                        "and the confirmation tools were skipped. Check that the site is up and not blocking the scanner.")
+        if not blocked_before:
+            warnings.append(f"The target stopped answering (no response for {int(waited)}s), so Nuclei, testssl.sh "
+                            "and the confirmation tools were skipped. " + wp.blocked_advice(wp._host_port(target)[0]))
         stages["skipped_unreachable"] = True
+        wp.cancel_background_checks(str(scan.id))
         scan.engine_metadata = {
             **(scan.engine_metadata or {}),
             "pipeline": stages,
@@ -625,14 +651,37 @@ def _augment_web_findings(db: Session, scan: Scan, target: str, findings: list[d
     if not ready:
         warnings.append(f"The target was still slow {int(waited)}s after the active scan; later engine results may be incomplete.")
 
-    status(92, "Nuclei: checking known CVEs, exposed files and misconfigurations...")
-    nuclei, w = wp.run_nuclei(target, crawled)
-    warnings += w
+    bg = None
+    if (scan.engine_metadata or {}).get("parallel_checks"):
+        status(93, "Finishing Nuclei and testssl.sh (started alongside the active scan)...")
+        w0 = datetime.now(timezone.utc)
+        bg = wp.collect_background_checks(str(scan.id), timeout=_env_seconds("NUCLEI_MAX_SECONDS", 1500) + 600)
+        _stamp(scan, "waited_for_parallel_seconds", since=w0)
+    if bg and not bg.get("cancelled"):
+        nuclei, tls = bg["nuclei"], bg["tls"]
+        warnings += bg["nuclei_warnings"] + bg["tls_warnings"]
+        _stamp(scan, "nuclei_seconds", value=bg["nuclei_seconds"])
+        _stamp(scan, "testssl_seconds", value=bg["testssl_seconds"])
+        stages["parallel"] = True
+        if any("?" in u for u in crawled):
+            status(94, "Nuclei: fuzzing the parameters of crawled URLs...")
+            d0 = datetime.now(timezone.utc)
+            dast, w = wp.run_nuclei(target, crawled, pace_name=eff, signature=False)
+            nuclei = nuclei + dast
+            warnings += w
+            _stamp(scan, "nuclei_dast_seconds", since=d0)
+    else:
+        status(92, "Nuclei: checking known CVEs, exposed files and misconfigurations...")
+        n0 = datetime.now(timezone.utc)
+        nuclei, w = wp.run_nuclei(target, crawled, pace_name=eff)
+        warnings += w
+        _stamp(scan, "nuclei_seconds", since=n0)
+        status(95, "testssl.sh: checking TLS protocols, ciphers and certificate...")
+        t0 = datetime.now(timezone.utc)
+        tls, w = wp.run_testssl(target)
+        warnings += w
+        _stamp(scan, "testssl_seconds", since=t0)
     stages["nuclei_findings"] = len(nuclei)
-
-    status(95, "testssl.sh: checking TLS protocols, ciphers and certificate...")
-    tls, w = wp.run_testssl(target)
-    warnings += w
     stages["testssl_findings"] = len(tls)
 
     combined = findings + nuclei + tls
@@ -731,9 +780,19 @@ def launch_zap_scan(db: Session, scan: Scan) -> Scan:
         db.commit()
         db.refresh(scan)
         return scan
+    from app.services import web_pipeline as wp
+
     client = ZAPClient()
     try:
-        metadata = client.launch_scan(scan.target, scan.profile)
+        eff = wp.resolve_pace((scan.engine_metadata or {}).get("pace"), scan.target)
+        scan.engine_metadata = {**(scan.engine_metadata or {}), "pace_effective": eff}
+        metadata = client.launch_scan(scan.target, scan.profile, pace_name=eff)
+        if os.getenv("WEB_PARALLEL_CHECKS", "1") == "1":
+            # Nuclei's signature checks and testssl.sh need only the site's address, not ZAP's crawl:
+            # start them now, alongside ZAP's spider and active scan. Nuclei's parameter-fuzzing (DAST)
+            # pass, which does need the crawled URLs, runs at the end.
+            wp.start_background_checks(str(scan.id), metadata.get("target") or scan.target, [], eff)
+            metadata = {**metadata, "parallel_checks": True}
     except Exception as exc:
         print(f"[ZAP] Launch failed ({exc}), falling back to direct deep web assessment.")
         # Say so on the scan: without ZAP there is no spider or active scan, so coverage is lower.
@@ -862,6 +921,25 @@ def refresh_openvas_scan(db: Session, scan: Scan) -> Scan:
 ZAP_MAX_ACTIVE_MINUTES = int(os.getenv("ZAP_MAX_ACTIVE_MINUTES", "120"))
 ZAP_MAX_STATUS_FAILURES = int(os.getenv("ZAP_MAX_STATUS_FAILURES", "12"))
 ZAP_POLL_SECONDS = 10
+BLOCK_PROBE_SECONDS = int(os.getenv("WEB_BLOCK_PROBE_SECONDS", "60"))
+BLOCK_ABORT_SECONDS = int(os.getenv("WEB_BLOCK_ABORT_SECONDS", "180"))
+
+
+def _watch_for_block(metadata: dict[str, Any], target: str) -> tuple[dict[str, Any], bool]:
+    """Probe the target about once a minute while ZAP runs. Returns (metadata, blocked) where blocked
+    means it has sent nothing back for BLOCK_ABORT_SECONDS: further scanning would test nothing."""
+    from app.services import web_pipeline as wp
+
+    now = datetime.now(timezone.utc)
+    last = metadata.get("block_probe_at")
+    if last and (now - datetime.fromisoformat(last)).total_seconds() < BLOCK_PROBE_SECONDS:
+        return metadata, False
+    metadata = {**metadata, "block_probe_at": now.isoformat()}
+    if wp.target_answers(target):
+        return {**metadata, "unreachable_since": None}, False
+    since = metadata.get("unreachable_since") or now.isoformat()
+    metadata = {**metadata, "unreachable_since": since}
+    return metadata, (now - datetime.fromisoformat(since)).total_seconds() >= BLOCK_ABORT_SECONDS
 
 
 def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
@@ -884,6 +962,23 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
             scan.error_message = f"🕷️ ZAP Spider: {spider_progress}% complete. Discovering web pages and application routes..."
             scan.engine_metadata = {**metadata, "phase": "spider", "spider_progress": spider_progress}
 
+            if spider_status["status"] != "completed":
+                watched, blocked = _watch_for_block(scan.engine_metadata, target)
+                scan.engine_metadata = watched
+                if blocked:
+                    from app.services import web_pipeline as wp
+
+                    client.stop_spider(str(spider_scan_id))
+                    client.stop_ajax_spider()
+                    wp.cancel_background_checks(str(scan.id))
+                    host = wp._host_port(target)[0]
+                    scan.engine_metadata = {
+                        **scan.engine_metadata, "target_blocked": True, "blocked_during": "spider",
+                        "scan_warnings": list(scan.engine_metadata.get("scan_warnings") or [])
+                        + [f"The target stopped answering during crawling ({spider_progress}%). " + wp.blocked_advice(host)],
+                    }
+                    spider_status = {"status": "completed", "progress": spider_progress}
+
             if spider_status["status"] == "completed":
                 # Katana finds endpoints ZAP's spider misses (JavaScript routes, sitemap, robots.txt);
                 # requesting them through ZAP puts them in scope for the active scan.
@@ -891,15 +986,29 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
 
                 scan.error_message = "Katana: crawling JavaScript-heavy pages for endpoints the spider missed..."
                 db.commit()
-                crawled, crawl_warnings = wp.katana_crawl(target)
+                client.stop_ajax_spider()
+                eff = scan.engine_metadata.get("pace_effective")
+                _stamp(scan, "crawl_seconds", since=scan.started_at)
+                k0 = datetime.now(timezone.utc)
+                crawled, crawl_warnings = ([], []) if scan.engine_metadata.get("target_blocked") else wp.katana_crawl(target, pace_name=eff)
+                _stamp(scan, "katana_seconds", since=k0)
                 fed = wp.feed_urls_to_zap(client, crawled) if crawled else 0
                 scan.engine_metadata = {
                     **scan.engine_metadata,
                     "crawled_urls": crawled[:300],
+                    "katana_done": True,
                     "katana_fed_to_zap": fed,
                     "scan_warnings": list(scan.engine_metadata.get("scan_warnings") or []) + crawl_warnings,
                 }
-                active_metadata = client.launch_active_scan(target)
+                active_metadata = (
+                    {"active_scan_id": None, "active_scan_error": "Active scan skipped: the target had stopped answering."}
+                    if scan.engine_metadata.get("target_blocked") else client.launch_active_scan(target)
+                )
+                if (active_metadata.get("active_scan_id") is not None and not scan.engine_metadata.get("parallel_checks")
+                        and os.getenv("WEB_PARALLEL_CHECKS", "1") == "1"):
+                    # Nuclei and testssl.sh don't need ZAP's results: run them now, side by side.
+                    wp.start_background_checks(str(scan.id), target, crawled, eff)
+                    active_metadata = {**active_metadata, "parallel_checks": True}
                 scan.status = "running"
                 scan.progress = "40"
                 scan.error_message = "⚡ ZAP Active Scan launched. Probing discovered routes for security vulnerabilities..."
@@ -936,6 +1045,17 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
                         return scan
                     warnings.append(f"Lost contact with ZAP while the active scan was running ({status_exc}); results may be incomplete.")
                     active_status = {"status": "completed", "progress": int(metadata.get("active_progress") or 0)}
+                if active_status["status"] != "completed":
+                    metadata, blocked = _watch_for_block(metadata, target)
+                    if blocked:
+                        from app.services import web_pipeline as wp
+
+                        wp.cancel_background_checks(str(scan.id))
+                        client.stop_active_scan(str(active_scan_id))
+                        warnings.append(f"The target stopped answering {active_status.get('progress', 0)}% into the active scan. "
+                                        + wp.blocked_advice(wp._host_port(target)[0]))
+                        metadata = {**metadata, "target_blocked": True, "blocked_during": "active"}
+                        active_status = {"status": "completed", "progress": active_status.get("progress", 0)}
                 if active_status["status"] != "completed" and elapsed_min >= ZAP_MAX_ACTIVE_MINUTES:
                     client.stop_active_scan(str(active_scan_id))
                     warnings.append(
@@ -953,6 +1073,8 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
             metadata = scan.engine_metadata
 
             if active_status["status"] == "completed":
+                if metadata.get("active_started_at"):
+                    _stamp(scan, "active_seconds", since=datetime.fromisoformat(metadata["active_started_at"]))
                 scan.progress = "99"
                 scan.error_message = "📊 Processing and ingesting ZAP vulnerability findings..."
                 db.commit()
@@ -979,7 +1101,12 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
                 # ALWAYS run web_assessment in addition to ZAP — not just as fallback.
                 # web_assessment does deep API/header/cookie/path scanning that ZAP misses on SPAs.
                 from app.services.web_assessment import run_web_assessment
+                from app.services.web_pipeline import target_answers
+
                 try:
+                    # A target that has stopped answering would only make every built-in check time out.
+                    if (scan.engine_metadata or {}).get("target_blocked") and not target_answers(target):
+                        raise RuntimeError("target is not answering; built-in checks skipped")
                     web_findings = run_web_assessment(target)
                     # Merge: keep findings with distinct title and URL/path
                     existing_keys = {
@@ -1015,6 +1142,7 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
                 scan.status = "completed"
                 scan.progress = "100"
                 scan.finished_at = datetime.now(timezone.utc)
+                _stamp(scan, "total_seconds", since=scan.started_at)
                 scan_warnings = (scan.engine_metadata or {}).get("scan_warnings") or []
                 scan.error_message = " ".join(scan_warnings) if scan_warnings else None
                 scan.engine_metadata = {

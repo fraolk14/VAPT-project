@@ -37,7 +37,7 @@ const ENGINES = {
     targetLabel: "Website URL",
     placeholder: "https://app.example.com",
     help: "Spiders the site, then actively tests every page for SQL injection, XSS, SSRF and more.",
-    duration: "Usually 5–30 minutes, longer for large sites.",
+    duration: "Usually 5–20 minutes, longer for large sites.",
     phases: ["Queued", "Spider", "Active scan", "Ingest"],
   },
   network: {
@@ -102,6 +102,17 @@ const fmtDuration = (startIso, endIso) => {
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 };
 
+// "balanced · crawl 1m · active 3m · Nuclei 4m (alongside)" from engine_metadata.timings
+const STAGE_LABELS = [["crawl_seconds", "crawl"], ["katana_seconds", "Katana"], ["active_seconds", "active"], ["nuclei_seconds", "Nuclei"], ["testssl_seconds", "TLS"]];
+const fmtSecs = (s) => (s < 60 ? `${s}s` : `${Math.round(s / 60)}m`);
+function stageSummary(scan) {
+  const meta = scan.engine_metadata || {};
+  const t = meta.timings || {};
+  const parts = STAGE_LABELS.filter(([k]) => t[k] > 0).map(([k, label]) => `${label} ${fmtSecs(t[k])}`);
+  if (!parts.length) return meta.pace_effective || "";
+  return [meta.pace_effective, ...parts].filter(Boolean).join(" · ") + (meta.pipeline?.parallel ? " (Nuclei alongside ZAP)" : "");
+}
+
 const fmtWhen = (iso) => {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -128,6 +139,7 @@ export default function Scans({ integrations = {}, canOperate = true }) {
   const [target, setTarget] = useState("");
   const [file, setFile] = useState(null);
   const [label, setLabel] = useState("");
+  const [pace, setPace] = useState("auto");
   const [authorized, setAuthorized] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState(null);
@@ -210,7 +222,7 @@ export default function Scans({ integrations = {}, canOperate = true }) {
       } else {
         const t = target.trim();
         if (!t) throw new Error("Enter a target.");
-        await api.post(cfg.endpoint, { target: t, label: label.trim() || undefined });
+        await api.post(cfg.endpoint, { target: t, label: label.trim() || undefined, ...(engineKey === "web" ? { pace } : {}) });
         setNotice({ ok: true, text: `${cfg.name} scan of ${t} queued. ${cfg.duration}` });
       }
       setTarget("");
@@ -335,6 +347,17 @@ export default function Scans({ integrations = {}, canOperate = true }) {
                     spellCheck="false"
                     required
                   />
+                </label>
+              )}
+              {engineKey === "web" && (
+                <label className="so-field">
+                  <span>Speed</span>
+                  <select className="so-input" aria-label="Scan speed" value={pace} onChange={(e) => setPace(e.target.value)}>
+                    <option value="auto">Auto: fast for internal hosts, balanced for public sites</option>
+                    <option value="balanced">Balanced: public sites behind a CDN or hosting firewall</option>
+                    <option value="polite">Polite: strict hosts that rate-limit or ban scanners</option>
+                    <option value="fast">Fast: systems you own that won't block the scanner</option>
+                  </select>
                 </label>
               )}
               <label className="so-field">
@@ -485,7 +508,10 @@ export default function Scans({ integrations = {}, canOperate = true }) {
                     <td><span className="so-tag">{ENGINES[kind].engine}</span></td>
                     <td><span className={`so-status so-status--${status}`}>{status}</span></td>
                     <td className="cc-mono">{found ?? "—"}</td>
-                    <td className="cc-mono so-sub">{fmtDuration(scan.started_at, scan.finished_at)}</td>
+                    <td className="cc-mono so-sub">
+                      {fmtDuration(scan.started_at, scan.finished_at)}
+                      {stageSummary(scan) ? <div className="so-stages" title="Speed used and time per stage">{stageSummary(scan)}</div> : null}
+                    </td>
                     <td className="cc-mono so-sub">{fmtWhen(scan.finished_at)}</td>
                     <td className="so-actions">
                       <Link className="cc-btn" to={`/findings?tab=${tab}&target=${encodeURIComponent(scan.target)}`}>Findings</Link>

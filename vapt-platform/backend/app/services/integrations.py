@@ -389,8 +389,36 @@ class ZAPClient:
             raise RuntimeError("Web scans require a valid absolute http:// or https:// URL.")
         return normalized
 
-    def launch_scan(self, target: str, mode: str = "spider-active") -> dict[str, Any]:
+    def launch_scan(self, target: str, mode: str = "spider-active", pace_name: str | None = None) -> dict[str, Any]:
         normalized_target = self.normalize_target(target)
+
+        # Pace (see web_pipeline.PACES). ZAP's own defaults are 16 threads per host, no delay and no
+        # time limits, a burst that gets the scanner rate-limited or banned by most hosting firewalls.
+        from app.services.web_pipeline import pace
+
+        p = pace(pace_name)
+        for component, option, value in (
+            ("spider", "setOptionThreadCount", p["spider_threads"]),
+            ("spider", "setOptionMaxDuration", p["spider_min"]),
+            ("ajaxSpider", "setOptionMaxDuration", p["ajax_min"]),
+            ("ascan", "setOptionThreadPerHost", p["zap_threads"]),
+            ("ascan", "setOptionDelayInMs", p["zap_delay_ms"]),
+            ("ascan", "setOptionMaxRuleDurationInMins", p["zap_rule_min"]),
+            ("ascan", "setOptionMaxScanDurationInMins", p["zap_max_min"]),
+        ):
+            try:
+                self._request(component, "action", option, Integer=value)
+            except Exception:
+                pass
+        # Rule 40026 (DOM-based XSS) drives a headless browser. In this container the browser does not
+        # start, so the rule sends no requests yet burns its full per-rule time (5 min) on every scan.
+        # DOM XSS is still covered by Dalfox's JavaScript analysis when it confirms ZAP's XSS findings.
+        # Set ZAP_DOM_XSS=1 once ZAP has a working browser.
+        try:
+            action = "enableScanners" if os.getenv("ZAP_DOM_XSS", "0") == "1" else "disableScanners"
+            self._request("ascan", "action", action, ids="40026")
+        except Exception:
+            pass
 
         # Configure ZAP Spider for deep recursive subdirectory crawling
         try:
@@ -426,6 +454,19 @@ class ZAPClient:
         }
 
 
+
+    def stop_ajax_spider(self) -> None:
+        """Stop the browser crawl before active scanning so two engines never hit the target at once."""
+        try:
+            self._request("ajaxSpider", "action", "stop")
+        except Exception:
+            pass
+
+    def stop_spider(self, spider_scan_id: str) -> None:
+        try:
+            self._request("spider", "action", "stop", scanId=spider_scan_id)
+        except Exception:
+            pass
 
     def get_spider_status(self, spider_scan_id: str) -> dict[str, Any]:
         payload = self._request("spider", "view", "status", scanId=spider_scan_id)
