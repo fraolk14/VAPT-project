@@ -141,11 +141,11 @@ def check_new_cves(db: Session) -> dict[str, int]:
                 if not cve:
                     continue
                 mine = cve in env
+                cvss = f", CVSS {row['cvss']}" if row.get("cvss") else ""
                 stats["microsoft"] += notify(
                     db, users, kind="new_cve", ref=cve,
                     title=f"Microsoft {cve} {label}{' — affects your findings' if mine else ''}",
-                    body=f"{row.get('title') or ''}. {row.get('severity') or 'Unrated'}"
-                         f"{f', CVSS {row.get('cvss')}' if row.get('cvss') else ''}. {ms.get('title') or ''}",
+                    body=f"{row.get('title') or ''}. {row.get('severity') or 'Unrated'}{cvss}. {ms.get('title') or ''}",
                     severity="critical" if row.get("exploited") else "high", link=f"/threat-intelligence?cve={cve}",
                     data={"source": "Microsoft MSRC", "cve": cve, "in_environment": mine, "release": ms.get("release")},
                 )
