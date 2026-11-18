@@ -133,6 +133,35 @@ def live_threat_map(window: str = Query(default="7d", pattern="^(24h|7d|30d)$"))
     return get_live_map(window)
 
 
+@router.get("/live-map/country/{cc}")
+def live_threat_map_country(cc: str, window: str = Query(default="7d", pattern="^(24h|7d|30d)$")):
+    """For one country (ISO 3166-1 alpha-2): attack types launched from it (DShield per-IP logs) and
+    organisations in it claimed by ransomware groups (ransomware.live). Real data only."""
+    from fastapi import HTTPException
+
+    from app.services.live_threat_map import country_detail
+
+    if not (len(cc) == 2 and cc.isalpha()):
+        raise HTTPException(status_code=400, detail="Use a two-letter country code, e.g. US.")
+    return country_detail(cc, window)
+
+
+@router.get("/live-map/source/{ip}")
+def live_threat_map_source(ip: str):
+    """What one attacking IP did on the DShield sensors: ports hit, inferred attack types, last activity."""
+    import ipaddress
+
+    from fastapi import HTTPException
+
+    from app.services.live_threat_map import source_activity
+
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Not an IP address.") from exc
+    return source_activity(ip)
+
+
 @router.get("/{target:path}")
 def get_target_threat_intelligence(target: str, db: Session = Depends(get_db)):
     from app.services.threat_intelligence import get_target_threat_intel
