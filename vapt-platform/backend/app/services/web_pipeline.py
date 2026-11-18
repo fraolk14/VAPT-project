@@ -38,6 +38,66 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+# ---------------------------------------------------------------------------
+# Scan pace. Internet-facing sites sit behind CDNs and hosting firewalls (Netlify, Cloudflare,
+# cPanel/CSF) that rate-limit or ban an IP that sends a burst of scanner traffic, after which the
+# rest of the scan tests nothing. "polite" (default) keeps every engine under those thresholds;
+# use "normal" or "fast" for your own labs and internal hosts.
+# ---------------------------------------------------------------------------
+
+PACES: dict[str, dict[str, Any]] = {
+    "polite": {"zap_threads": 2, "zap_delay_ms": 150, "zap_rule_min": 5, "zap_max_min": 45,
+               "spider_threads": 2, "spider_min": 10, "ajax_min": 5,
+               "katana_rl": 10, "katana_c": 2, "nuclei_rl": 20, "nuclei_c": 5, "nuclei_full": False},
+    "normal": {"zap_threads": 4, "zap_delay_ms": 0, "zap_rule_min": 8, "zap_max_min": 60,
+               "spider_threads": 4, "spider_min": 15, "ajax_min": 8,
+               "katana_rl": 25, "katana_c": 4, "nuclei_rl": 30, "nuclei_c": 8, "nuclei_full": True},
+    "fast": {"zap_threads": 10, "zap_delay_ms": 0, "zap_rule_min": 10, "zap_max_min": 120,
+             "spider_threads": 8, "spider_min": 20, "ajax_min": 10,
+             "katana_rl": 40, "katana_c": 5, "nuclei_rl": 40, "nuclei_c": 10, "nuclei_full": True},
+}
+
+
+def pace() -> dict[str, Any]:
+    name = os.getenv("WEB_SCAN_PACE", "polite").strip().lower()
+    return {"name": name if name in PACES else "polite", **PACES.get(name, PACES["polite"])}
+
+
+_public_ip: dict[str, Any] = {"at": 0.0, "ip": ""}
+
+
+def scanner_public_ip() -> str:
+    """The IP the target sees, for 'allow-list this address' advice. Cached; empty if unknown."""
+    import time
+
+    import requests
+
+    if time.time() - _public_ip["at"] > 3600:
+        try:
+            _public_ip["ip"] = requests.get("https://api.ipify.org", timeout=5).text.strip()[:45]
+        except Exception:
+            _public_ip["ip"] = ""
+        _public_ip["at"] = time.time()
+    return _public_ip["ip"]
+
+
+def blocked_advice(host: str) -> str:
+    ip = scanner_public_ip()
+    return (f"{host} most likely rate-limited or blocked this scanner"
+            f"{f' (public IP {ip})' if ip else ''} — CDNs and hosting firewalls do this to bursts of scan traffic. "
+            "Results found before the block are kept. Ask the site's host to allow-list the scanner's IP, "
+            "or re-scan later (bans are often lifted after 15–60 minutes).")
+
+
+def target_answers(target: str, timeout: float = 10) -> bool:
+    """One quick probe: does the target still send response headers?"""
+    try:
+        _first_byte_seconds(_base(target), timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
 def _first_byte_seconds(url: str, timeout: float = 10) -> float:
     """Seconds until the response headers arrive. The body is not downloaded, so a slow internet
     link does not make a healthy site look slow. Raises on DNS, connection or timeout errors."""
@@ -151,7 +211,7 @@ def katana_crawl(target: str) -> tuple[list[str], list[str]]:
         "-jc",                  # parse JavaScript files for endpoints
         "-kf", "all",           # also read robots.txt and sitemap.xml
         "-d", str(_env_int("KATANA_DEPTH", 3)),
-        "-c", "5", "-rl", str(_env_int("KATANA_RATE_LIMIT", 40)),
+        "-c", str(pace()["katana_c"]), "-rl", str(_env_int("KATANA_RATE_LIMIT", pace()["katana_rl"])),
         "-timeout", "10", "-ct", f"{seconds}s",
         "-fs", "fqdn",          # stay on the exact host being assessed
         "-ef", STATIC_EXT,
@@ -214,9 +274,8 @@ def run_nuclei(target: str, crawled: list[str]) -> tuple[list[dict[str, Any]], l
         # -sr: fall back to the system resolver. Nuclei otherwise retries public resolvers, which cannot
         # resolve internal names (docker services, intranet hosts); one failed lookup marks the host dead.
         "-sr",
-        "-severity", os.getenv("NUCLEI_SEVERITY", "low,medium,high,critical"),
         "-etags", "dos,fuzz-dos,brute-force,bruteforce,intrusive,headless",
-        "-rl", str(_env_int("NUCLEI_RATE_LIMIT", 40)), "-c", "10", "-bs", "10",
+        "-rl", str(_env_int("NUCLEI_RATE_LIMIT", pace()["nuclei_rl"])), "-c", str(pace()["nuclei_c"]), "-bs", "10",
         "-timeout", "10", "-retries", "1",
         "-stats", "-sj", "-si", "30",
     ]
@@ -235,8 +294,21 @@ def run_nuclei(target: str, crawled: list[str]) -> tuple[list[dict[str, Any]], l
         # 1) Signature templates (CVEs, exposures, misconfigurations, default logins) against the root.
         root_file = Path(tmp, "roots.txt")
         root_file.write_text(_base(target) + "\n", encoding="utf-8")
-        cmd = ["nuclei", "-l", str(root_file), "-t", templates, "-pt", "http", *common]
-        code, out, err = _run(cmd, timeout=seconds)
+        severity = os.getenv("NUCLEI_SEVERITY", "low,medium,high,critical")
+        if pace()["nuclei_full"]:
+            passes = [(["-t", templates, "-pt", "http"], severity)]
+        else:
+            # Polite: generic web checks incl. default logins, full severity range (~8k requests), plus only the critical
+            # CVE templates (~2.6k), instead of all ~25.7k requests. Keeps a scan under ~10 minutes at
+            # a rate CDNs tolerate; set WEB_SCAN_PACE=normal for the full set.
+            generic = [arg for d in ("exposures", "misconfiguration", "vulnerabilities", "default-logins", "takeovers", "miscellaneous")
+                       for arg in ("-t", f"{templates}/http/{d}")]
+            passes = [(generic, severity), (["-t", f"{templates}/http/cves"], "critical")]
+        out, err, code = "", "", 0
+        for args, sev in passes:
+            cmd = ["nuclei", "-l", str(root_file), *args, "-severity", sev, *common]
+            c, o, e = _run(cmd, timeout=seconds)
+            out, err, code = out + o, err + e, (c if c not in (0, 1) else code)
         findings += _parse_nuclei(out)
         done = _nuclei_percent(err)
         if code == -9:
@@ -254,7 +326,8 @@ def run_nuclei(target: str, crawled: list[str]) -> tuple[list[dict[str, Any]], l
             if param_urls:
                 dast_file = Path(tmp, "dast.txt")
                 dast_file.write_text("\n".join(param_urls) + "\n", encoding="utf-8")
-                cmd = ["nuclei", "-l", str(dast_file), "-t", templates, "-dast", *common]
+                cmd = ["nuclei", "-l", str(dast_file), "-t", templates, "-dast",
+                       "-severity", os.getenv("NUCLEI_SEVERITY", "low,medium,high,critical"), *common]
                 code, out, err = _run(cmd, timeout=_env_int("NUCLEI_DAST_MAX_SECONDS", 600))
                 findings += _parse_nuclei(out)
                 done = _nuclei_percent(err)

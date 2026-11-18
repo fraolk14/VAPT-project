@@ -608,12 +608,15 @@ def _augment_web_findings(db: Session, scan: Scan, target: str, findings: list[d
     stages["katana_urls"] = len(crawled)
 
     status(92, "Waiting for the target to respond normally again before the next engines...")
-    ready, waited, answered = wp.wait_for_target(target)
+    # Already known to be blocking: one short check instead of a three-minute wait.
+    blocked_before = bool((scan.engine_metadata or {}).get("target_blocked"))
+    ready, waited, answered = wp.wait_for_target(target, max_wait=30 if blocked_before else None)
     stages["target_recovery_seconds"] = waited
     if not answered:
         # Nothing to test: don't spend 25 minutes of Nuclei and confirmation on a target that is gone.
-        warnings.append(f"The target stopped answering (no response for {int(waited)}s), so Nuclei, testssl.sh "
-                        "and the confirmation tools were skipped. Check that the site is up and not blocking the scanner.")
+        if not blocked_before:
+            warnings.append(f"The target stopped answering (no response for {int(waited)}s), so Nuclei, testssl.sh "
+                            "and the confirmation tools were skipped. " + wp.blocked_advice(wp._host_port(target)[0]))
         stages["skipped_unreachable"] = True
         scan.engine_metadata = {
             **(scan.engine_metadata or {}),
@@ -862,6 +865,25 @@ def refresh_openvas_scan(db: Session, scan: Scan) -> Scan:
 ZAP_MAX_ACTIVE_MINUTES = int(os.getenv("ZAP_MAX_ACTIVE_MINUTES", "120"))
 ZAP_MAX_STATUS_FAILURES = int(os.getenv("ZAP_MAX_STATUS_FAILURES", "12"))
 ZAP_POLL_SECONDS = 10
+BLOCK_PROBE_SECONDS = int(os.getenv("WEB_BLOCK_PROBE_SECONDS", "60"))
+BLOCK_ABORT_SECONDS = int(os.getenv("WEB_BLOCK_ABORT_SECONDS", "180"))
+
+
+def _watch_for_block(metadata: dict[str, Any], target: str) -> tuple[dict[str, Any], bool]:
+    """Probe the target about once a minute while ZAP runs. Returns (metadata, blocked) where blocked
+    means it has sent nothing back for BLOCK_ABORT_SECONDS: further scanning would test nothing."""
+    from app.services import web_pipeline as wp
+
+    now = datetime.now(timezone.utc)
+    last = metadata.get("block_probe_at")
+    if last and (now - datetime.fromisoformat(last)).total_seconds() < BLOCK_PROBE_SECONDS:
+        return metadata, False
+    metadata = {**metadata, "block_probe_at": now.isoformat()}
+    if wp.target_answers(target):
+        return {**metadata, "unreachable_since": None}, False
+    since = metadata.get("unreachable_since") or now.isoformat()
+    metadata = {**metadata, "unreachable_since": since}
+    return metadata, (now - datetime.fromisoformat(since)).total_seconds() >= BLOCK_ABORT_SECONDS
 
 
 def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
@@ -884,6 +906,22 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
             scan.error_message = f"🕷️ ZAP Spider: {spider_progress}% complete. Discovering web pages and application routes..."
             scan.engine_metadata = {**metadata, "phase": "spider", "spider_progress": spider_progress}
 
+            if spider_status["status"] != "completed":
+                watched, blocked = _watch_for_block(scan.engine_metadata, target)
+                scan.engine_metadata = watched
+                if blocked:
+                    from app.services import web_pipeline as wp
+
+                    client.stop_spider(str(spider_scan_id))
+                    client.stop_ajax_spider()
+                    host = wp._host_port(target)[0]
+                    scan.engine_metadata = {
+                        **scan.engine_metadata, "target_blocked": True, "blocked_during": "spider",
+                        "scan_warnings": list(scan.engine_metadata.get("scan_warnings") or [])
+                        + [f"The target stopped answering during crawling ({spider_progress}%). " + wp.blocked_advice(host)],
+                    }
+                    spider_status = {"status": "completed", "progress": spider_progress}
+
             if spider_status["status"] == "completed":
                 # Katana finds endpoints ZAP's spider misses (JavaScript routes, sitemap, robots.txt);
                 # requesting them through ZAP puts them in scope for the active scan.
@@ -891,7 +929,8 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
 
                 scan.error_message = "Katana: crawling JavaScript-heavy pages for endpoints the spider missed..."
                 db.commit()
-                crawled, crawl_warnings = wp.katana_crawl(target)
+                client.stop_ajax_spider()
+                crawled, crawl_warnings = ([], []) if scan.engine_metadata.get("target_blocked") else wp.katana_crawl(target)
                 fed = wp.feed_urls_to_zap(client, crawled) if crawled else 0
                 scan.engine_metadata = {
                     **scan.engine_metadata,
@@ -899,7 +938,10 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
                     "katana_fed_to_zap": fed,
                     "scan_warnings": list(scan.engine_metadata.get("scan_warnings") or []) + crawl_warnings,
                 }
-                active_metadata = client.launch_active_scan(target)
+                active_metadata = (
+                    {"active_scan_id": None, "active_scan_error": "Active scan skipped: the target had stopped answering."}
+                    if scan.engine_metadata.get("target_blocked") else client.launch_active_scan(target)
+                )
                 scan.status = "running"
                 scan.progress = "40"
                 scan.error_message = "⚡ ZAP Active Scan launched. Probing discovered routes for security vulnerabilities..."
@@ -936,6 +978,16 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
                         return scan
                     warnings.append(f"Lost contact with ZAP while the active scan was running ({status_exc}); results may be incomplete.")
                     active_status = {"status": "completed", "progress": int(metadata.get("active_progress") or 0)}
+                if active_status["status"] != "completed":
+                    metadata, blocked = _watch_for_block(metadata, target)
+                    if blocked:
+                        from app.services import web_pipeline as wp
+
+                        client.stop_active_scan(str(active_scan_id))
+                        warnings.append(f"The target stopped answering {active_status.get('progress', 0)}% into the active scan. "
+                                        + wp.blocked_advice(wp._host_port(target)[0]))
+                        metadata = {**metadata, "target_blocked": True, "blocked_during": "active"}
+                        active_status = {"status": "completed", "progress": active_status.get("progress", 0)}
                 if active_status["status"] != "completed" and elapsed_min >= ZAP_MAX_ACTIVE_MINUTES:
                     client.stop_active_scan(str(active_scan_id))
                     warnings.append(
@@ -979,7 +1031,12 @@ def refresh_zap_scan(db: Session, scan: Scan) -> Scan:
                 # ALWAYS run web_assessment in addition to ZAP — not just as fallback.
                 # web_assessment does deep API/header/cookie/path scanning that ZAP misses on SPAs.
                 from app.services.web_assessment import run_web_assessment
+                from app.services.web_pipeline import target_answers
+
                 try:
+                    # A target that has stopped answering would only make every built-in check time out.
+                    if (scan.engine_metadata or {}).get("target_blocked") and not target_answers(target):
+                        raise RuntimeError("target is not answering; built-in checks skipped")
                     web_findings = run_web_assessment(target)
                     # Merge: keep findings with distinct title and URL/path
                     existing_keys = {
