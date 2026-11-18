@@ -38,30 +38,75 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def wait_for_target(target: str, max_wait: int | None = None) -> tuple[bool, float]:
-    """Wait until the target answers quickly twice in a row.
-
-    Heavy active scanning can leave an app sluggish for a while. Testing it in that state produces
-    false positives (timing checks) and false negatives (timeouts), so each later stage waits here.
-    Returns (responsive, seconds waited).
-    """
+def _first_byte_seconds(url: str, timeout: float = 10) -> float:
+    """Seconds until the response headers arrive. The body is not downloaded, so a slow internet
+    link does not make a healthy site look slow. Raises on DNS, connection or timeout errors."""
     import time
 
     import requests
 
+    t0 = time.time()
+    with requests.get(url, timeout=timeout, allow_redirects=False, verify=False, stream=True,
+                      headers={"User-Agent": "Mozilla/5.0 (compatible; VAPT-Platform)"}):
+        return time.time() - t0
+
+
+def probe_target(target: str, connect_timeout: float = 10, read_timeout: float = 25) -> tuple[bool, str]:
+    """Check, before any engine starts, that the scanner can reach the target at all.
+
+    Returns (reachable, plain-language detail). Distinguishes DNS failure, a connection that is
+    refused or never answers (site down, or the host/firewall blocking this network), and a site
+    that accepts the connection but never sends a response.
+    """
+    import socket
+
+    import requests
+
+    host, port, scheme = _host_port(target)
+    try:
+        addr = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)[0][4][0]
+    except OSError:
+        return False, f"The scanner could not resolve {host} in DNS. Check the address, or the server's DNS settings."
+    try:
+        with socket.create_connection((addr, port), timeout=connect_timeout):
+            pass
+    except ConnectionRefusedError:
+        return False, f"{host} ({addr}) refused the connection on port {port}. Nothing is listening there, or a firewall rejects it."
+    except OSError:
+        return False, (f"The scanner could not connect to {host} ({addr}) on port {port}: no answer within "
+                       f"{int(connect_timeout)}s. The site may be down, or its host or a firewall may be blocking "
+                       "this network's IP address (hosting providers often block an IP after scanner traffic). "
+                       "Check that the site opens from another network, then allow-list the scanner's public IP.")
+    try:
+        seconds = _first_byte_seconds(_base(target), timeout=read_timeout)
+    except requests.RequestException as exc:
+        return False, (f"{host} accepted the connection on port {port} but sent no usable response "
+                       f"within {int(read_timeout)}s ({type(exc).__name__}).")
+    return True, f"{host} ({addr}) answered in {seconds:.1f}s."
+
+
+def wait_for_target(target: str, max_wait: int | None = None) -> tuple[bool, float, bool]:
+    """Wait until the target answers quickly (first byte under 3 s) twice in a row.
+
+    Heavy active scanning can leave an app sluggish for a while. Testing it in that state produces
+    false positives (timing checks) and false negatives (timeouts), so each later stage waits here.
+    Returns (responsive, seconds waited, answered at least once).
+    """
+    import time
+
     limit = max_wait if max_wait is not None else _env_int("TARGET_RECOVERY_SECONDS", 180)
-    start, fast = time.time(), 0
+    start, fast, answered = time.time(), 0, False
     while True:
-        t0 = time.time()
         try:
-            requests.get(_base(target), timeout=10, allow_redirects=False, verify=False)
-            fast = fast + 1 if time.time() - t0 < 3 else 0
+            seconds = _first_byte_seconds(_base(target))
+            answered = True
+            fast = fast + 1 if seconds < 3 else 0
         except Exception:
             fast = 0
         if fast >= 2:
-            return True, round(time.time() - start, 1)
+            return True, round(time.time() - start, 1), True
         if time.time() - start > limit:
-            return False, round(time.time() - start, 1)
+            return False, round(time.time() - start, 1), answered
         time.sleep(5)
 
 

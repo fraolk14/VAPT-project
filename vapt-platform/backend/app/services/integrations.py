@@ -323,6 +323,14 @@ class OpenVASClient:
         return normalized
 
 
+class ZAPAPIError(RuntimeError):
+    """ZAP answered the API call with an error (code is ZAP's own, e.g. 'url_not_found')."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class ZAPClient:
     def __init__(self) -> None:
         self.base_url = os.getenv("ZAP_API_URL", "http://zap:8080")
@@ -343,12 +351,24 @@ class ZAPClient:
             )
             response.raise_for_status()
             payload = response.json()
+        except requests.HTTPError as exc:
+            # ZAP answered but rejected the call; pass its own reason on (e.g. url_not_found).
+            reason = ""
+            try:
+                body = exc.response.json()
+                reason = body.get("message") or body.get("code") or ""
+                code = body.get("code") or ""
+            except Exception:
+                code = ""
+            raise ZAPAPIError(code, reason or str(exc)) from exc
         except requests.RequestException as exc:
+            # Network hiccup: retry once with the same key (never without it) and more time.
             try:
                 response = requests.get(
                     f"{self.base_url}/JSON/{component}/{category}/{name}/",
-                    params=params,
-                    timeout=10,
+                    headers=headers,
+                    params=req_params,
+                    timeout=max(_timeout, 30),
                     verify=False,
                 )
                 response.raise_for_status()
@@ -418,24 +438,27 @@ class ZAPClient:
         target_slash = f"{target_no_slash}/"
 
         active_scan_id = None
+        last_error: Exception | None = None
         for candidate_url in [normalized_target, target_no_slash, target_slash]:
-            try:
-                payload = self._request("ascan", "action", "scan", url=candidate_url, recurse="true")
-                if payload and payload.get("scan") is not None:
-                    active_scan_id = payload.get("scan")
-                    break
-            except Exception:
+            for extra in ({"recurse": "true"}, {}):
                 try:
-                    payload = self._request("ascan", "action", "scan", url=candidate_url)
+                    payload = self._request("ascan", "action", "scan", url=candidate_url, **extra)
                     if payload and payload.get("scan") is not None:
                         active_scan_id = payload.get("scan")
                         break
-                except Exception:
-                    continue
+                except Exception as exc:
+                    last_error = exc
+            if active_scan_id is not None:
+                break
 
         if active_scan_id is None:
-            # Could not start the active scan; record it so the scan does not pretend it ran.
-            return {"active_scan_id": None, "active_scan_error": "ZAP refused to start an active scan for this URL.", "phase": "active"}
+            # Could not start the active scan; record why so the scan does not pretend it ran.
+            if isinstance(last_error, ZAPAPIError) and last_error.code == "url_not_found":
+                why = ("ZAP's spider could not load any page from the target, so there was nothing to active-scan. "
+                       "The site may be down, blocking the scanner, or only reachable after login.")
+            else:
+                why = f"ZAP refused to start an active scan for this URL ({last_error or 'no reason given'})."
+            return {"active_scan_id": None, "active_scan_error": why, "phase": "active"}
 
         return {"active_scan_id": str(active_scan_id), "phase": "active"}
 

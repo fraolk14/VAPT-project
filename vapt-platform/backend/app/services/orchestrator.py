@@ -608,8 +608,20 @@ def _augment_web_findings(db: Session, scan: Scan, target: str, findings: list[d
     stages["katana_urls"] = len(crawled)
 
     status(92, "Waiting for the target to respond normally again before the next engines...")
-    ready, waited = wp.wait_for_target(target)
+    ready, waited, answered = wp.wait_for_target(target)
     stages["target_recovery_seconds"] = waited
+    if not answered:
+        # Nothing to test: don't spend 25 minutes of Nuclei and confirmation on a target that is gone.
+        warnings.append(f"The target stopped answering (no response for {int(waited)}s), so Nuclei, testssl.sh "
+                        "and the confirmation tools were skipped. Check that the site is up and not blocking the scanner.")
+        stages["skipped_unreachable"] = True
+        scan.engine_metadata = {
+            **(scan.engine_metadata or {}),
+            "pipeline": stages,
+            "scan_warnings": list((scan.engine_metadata or {}).get("scan_warnings") or []) + warnings,
+        }
+        db.commit()
+        return wp.merge_findings(findings)
     if not ready:
         warnings.append(f"The target was still slow {int(waited)}s after the active scan; later engine results may be incomplete.")
 
@@ -706,6 +718,19 @@ def run_direct_web_scan(db: Session, scan: Scan) -> Scan:
 
 
 def launch_zap_scan(db: Session, scan: Scan) -> Scan:
+    # Fail fast, with the real reason, when the scanner cannot reach the target at all.
+    from app.services import web_pipeline as wp
+
+    reachable, detail = wp.probe_target(scan.target)
+    scan.engine_metadata = {**(scan.engine_metadata or {}), "preflight": {"reachable": reachable, "detail": detail}}
+    if not reachable:
+        scan.status = "failed"
+        scan.progress = "100"
+        scan.finished_at = datetime.now(timezone.utc)
+        scan.error_message = f"Target unreachable: {detail}"
+        db.commit()
+        db.refresh(scan)
+        return scan
     client = ZAPClient()
     try:
         metadata = client.launch_scan(scan.target, scan.profile)
