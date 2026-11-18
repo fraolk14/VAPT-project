@@ -246,7 +246,7 @@ export default function ThreatIntelligence() {
 
       {error && <p className="so-error" role="alert">{error}</p>}
 
-      <TodayIntel />
+      <TodayIntel focusCve={searchParams.get("cve") || ""} focusTab={searchParams.get("today") || ""} />
 
       <div className="ti-layout">
         <section className="cc-panel ti-exposure" aria-label="Exploitation priority">

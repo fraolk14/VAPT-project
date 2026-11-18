@@ -4,6 +4,7 @@ from .asset import Asset
 from .auth import AuthSession
 from .finding import AuditLog, FalsePositiveRule, Finding
 from .platform import DevSecOpsEvent, DevSecOpsHook, EndpointSoftwareInventory, PluginRegistration, PublicApiKey
+from .notification import Notification
 from .misconfiguration import MisconfigAsset, Misconfiguration, Organization, ScanJob
 from .operations import ComplianceAssessment, ComplianceTemplate, MonitoringEvent, MonitoringRule, SecurityIncident
 from .schedule import ScheduledScan

@@ -25,6 +25,7 @@ from app.routers import scan as scan_router
 from app.routers import schedule as schedule_router
 from app.routers import shadow_it as shadow_it_router
 from app.routers import software as software_router
+from app.routers import notifications as notifications_router
 from app.routers import threat_intelligence as threat_intelligence_router
 from app.routers import vulnerability as vulnerability_router
 from app.services.bootstrap import ensure_runtime_schema
@@ -97,6 +98,7 @@ for _router in (
     platform_router,
     operations_router,
     hosts_router,
+    notifications_router,
 ):
     app.include_router(_router.router, dependencies=SIGNED_IN)
 
@@ -113,6 +115,9 @@ def get_attack_map_dashboard_root(time_range: str = "24h", db: Session = Depends
 def startup() -> None:
     ensure_runtime_schema()
     start_scheduler()
+    from app.services.notifications import start_cve_notifier
+
+    start_cve_notifier()
     db = SessionLocal()
     try:
         seed_demo_data(db)
