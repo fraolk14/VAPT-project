@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 
+import NotificationBell from "./NotificationBell";
+
 const PRIMARY = [
   { to: "/", label: "Overview", end: true },
   { to: "/findings", label: "Findings" },
@@ -101,6 +103,7 @@ export default function Navbar({ user, onLogout, integrations }) {
             {engines.label}
           </span>
           <Link to="/scans" className="nw-btn nw-btn--accent">+ Launch scan</Link>
+          <NotificationBell />
           <span className="nw-user">
             {user?.username || "Operator"}
             <button type="button" className="nw-btn nw-btn--ghost" onClick={onLogout}>

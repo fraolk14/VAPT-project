@@ -323,6 +323,12 @@ def update_finding(
         previous_assignee = finding.assigned_to
         finding.assigned_to = payload.assigned_to
         if payload.assigned_to and payload.assigned_to != previous_assignee:
+            try:
+                from app.services.notifications import notify_finding_assigned
+
+                notify_finding_assigned(finding, payload.assigned_to, current_user.username, target=_finding_target(finding))
+            except Exception:
+                pass  # a notification problem must never block the assignment itself
             assigned_user = db.query(User).filter(User.username == payload.assigned_to).first()
             if assigned_user and assigned_user.email:
                 try:

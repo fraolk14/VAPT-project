@@ -315,3 +315,10 @@
   text-transform: uppercase;
   color: var(--cc-muted);
 }
+
+/* A CVE opened from a notification */
+.ti-kevlist li.is-focus {
+  outline: 2px solid var(--cc-cyan, #5ce1ff);
+  outline-offset: 2px;
+  background: rgba(92, 225, 255, 0.08);
+}

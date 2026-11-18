@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import api from "../api/client";
 
@@ -23,9 +23,9 @@ function Flags({ row }) {
   );
 }
 
-function MsRow({ r }) {
+function MsRow({ r, focus }) {
   return (
-    <li>
+    <li id={`ti-${r.cve}`} className={focus === r.cve ? "is-focus" : ""}>
       <div className="ti-kevlist__head">
         <a className="cc-mono ti-cve" href={msLink(r.cve)} target="_blank" rel="noreferrer">{r.cve}</a>
         {r.exploited ? <span className="ti-badge-kev">Exploited in the wild</span> : null}
@@ -40,10 +40,13 @@ function MsRow({ r }) {
   );
 }
 
-/** Today's vulnerability news from CISA KEV, Microsoft MSRC and NVD. */
-export default function TodayIntel() {
+/** Today's vulnerability news from CISA KEV, Microsoft MSRC and NVD.
+ *  `focusCve` (from a notification link) opens the tab that lists it and scrolls to it. */
+export default function TodayIntel({ focusCve = "", focusTab = "" }) {
   const [data, setData] = useState(null);
-  const [tab, setTab] = useState("kev");
+  const [tab, setTab] = useState(["kev", "microsoft", "nvd"].includes(focusTab) ? focusTab : "kev");
+  const focus = String(focusCve || "").toUpperCase();
+  const focusedOnce = useRef("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -72,6 +75,18 @@ export default function TodayIntel() {
   const kev = data?.kev;
   const ms = data?.microsoft;
   const nvd = data?.nvd;
+
+  // When opened from a notification, switch to the tab that lists the CVE, then scroll to it.
+  useEffect(() => {
+    if (!data || !focus || focusedOnce.current === focus) return;
+    const inKev = (data.kev?.items || []).some((i) => i.cve === focus);
+    const msRows = ["exploited", "disclosed", "critical", "published_today", "revised_today"].flatMap((g) => data.microsoft?.[g] || []);
+    const inMs = msRows.some((r) => (r.cve || "").toUpperCase() === focus);
+    const nextTab = inKev ? "kev" : inMs ? "microsoft" : "nvd";
+    focusedOnce.current = focus;
+    setTab(nextTab);
+    window.setTimeout(() => document.getElementById(`ti-${focus}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 150);
+  }, [data, focus]);
   const kevToday = (kev?.items || []).filter((i) => isToday(i.date_added)).length;
   const msToday = (ms?.revised_today?.length || 0) + (ms?.published_today?.length || 0);
 
@@ -105,7 +120,7 @@ export default function TodayIntel() {
           </p>
           <ul className="ti-kevlist">
             {kev.items.map((i) => (
-              <li key={i.cve} className={i.in_environment ? "is-env" : ""}>
+              <li key={i.cve} id={`ti-${i.cve}`} className={[i.in_environment ? "is-env" : "", focus === i.cve ? "is-focus" : ""].join(" ").trim()}>
                 <div className="ti-kevlist__head">
                   <a className="cc-mono ti-cve" href={nvdLink(i.cve)} target="_blank" rel="noreferrer">{i.cve}</a>
                   <span className={isToday(i.date_added) ? "ti-badge-kev" : "so-sub"}>{isToday(i.date_added) ? "Added today" : `Added ${fmtDay(i.date_added)}`}</span>
@@ -132,23 +147,23 @@ export default function TodayIntel() {
               </p>
               <h3 className="an-subhead">Zero-days (exploited in the wild)</h3>
               <ul className="ti-kevlist">
-                {ms.exploited.map((r) => <MsRow key={r.cve} r={r} />)}
+                {ms.exploited.map((r) => <MsRow key={r.cve} r={r} focus={focus} />)}
                 {!ms.exploited.length ? <li className="cc-empty">None flagged as exploited in this release.</li> : null}
               </ul>
               {ms.disclosed.length ? (
                 <>
                   <h3 className="an-subhead">Publicly disclosed before a fix</h3>
-                  <ul className="ti-kevlist">{ms.disclosed.map((r) => <MsRow key={r.cve} r={r} />)}</ul>
+                  <ul className="ti-kevlist">{ms.disclosed.map((r) => <MsRow key={r.cve} r={r} focus={focus} />)}</ul>
                 </>
               ) : null}
               {msToday ? (
                 <>
                   <h3 className="an-subhead">Published or revised today</h3>
-                  <ul className="ti-kevlist">{[...ms.published_today, ...ms.revised_today].map((r) => <MsRow key={`t-${r.cve}`} r={r} />)}</ul>
+                  <ul className="ti-kevlist">{[...ms.published_today, ...ms.revised_today].map((r) => <MsRow key={`t-${r.cve}`} r={r} focus={focus} />)}</ul>
                 </>
               ) : null}
               <h3 className="an-subhead">Critical</h3>
-              <ul className="ti-kevlist">{ms.critical.map((r) => <MsRow key={`c-${r.cve}`} r={r} />)}</ul>
+              <ul className="ti-kevlist">{ms.critical.map((r) => <MsRow key={`c-${r.cve}`} r={r} focus={focus} />)}</ul>
             </>
           ) : null}
         </>
@@ -165,7 +180,7 @@ export default function TodayIntel() {
               </p>
               <ul className="ti-kevlist">
                 {nvd.top.map((i) => (
-                  <li key={i.cve} className={i.in_environment ? "is-env" : ""}>
+                  <li key={i.cve} id={`ti-${i.cve}`} className={[i.in_environment ? "is-env" : "", focus === i.cve ? "is-focus" : ""].join(" ").trim()}>
                     <div className="ti-kevlist__head">
                       <a className="cc-mono ti-cve" href={nvdLink(i.cve)} target="_blank" rel="noreferrer">{i.cve}</a>
                       {i.severity ? <span className={`mc-sev mc-sev--${i.severity}`}>{i.severity}</span> : <span className="so-sub">Not scored yet</span>}
