@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -249,6 +250,218 @@ def _build() -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Ransomware victims (ransomware.live) — the only public, near-real-time source that names the
+# organisations being attacked. Each entry is a claim a ransomware group published on its leak site.
+# ---------------------------------------------------------------------------
+
+RANSOMWARE_LIVE = os.getenv("RANSOMWARE_LIVE_API", "https://api.ransomware.live/v2")
+_victim_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+def _victim(row: dict) -> dict:
+    return {
+        "victim": (row.get("victim") or "").strip(),
+        "group": row.get("group") or "",
+        "sector": row.get("activity") if row.get("activity") not in (None, "", "Not Found") else "",
+        "cc": (row.get("country") or "").upper(),
+        "website": row.get("domain") or "",
+        "discovered": row.get("discovered") or "",
+        "attack_date": row.get("attackdate") or "",
+        "url": row.get("url") or "",
+    }
+
+
+def _fetch_victims(path: str, ttl: int, timeout: int) -> list[dict]:
+    cached = _victim_cache.get(path)
+    if cached and time.time() - cached[0] < ttl:
+        return cached[1]
+    try:
+        r = requests.get(f"{RANSOMWARE_LIVE}/{path}", headers=USER_AGENT, timeout=timeout)
+        r.raise_for_status()
+        rows = [_victim(x) for x in r.json() if isinstance(x, dict) and x.get("victim")]
+        _victim_cache[path] = (time.time(), rows)
+        _status("ransomware_live", True, len(rows) if path == "recentvictims" else _feed_status.get("ransomware_live", {}).get("count", 0),
+                "ransomware.live — organisations claimed by ransomware groups on their leak sites")
+        return rows
+    except Exception as exc:
+        _status("ransomware_live", False, 0, str(exc)[:160])
+        return cached[1] if cached else []
+
+
+def recent_victims() -> list[dict]:
+    """The latest ~100 published victims worldwide (about the last two days)."""
+    return _fetch_victims("recentvictims", ttl=900, timeout=25)
+
+
+def country_victims(cc: str, days: int = 30) -> list[dict]:
+    """Victims in one country published in the last `days` days, newest first."""
+    rows = _fetch_victims(f"countryvictims/{cc.upper()}", ttl=6 * 3600, timeout=60)
+    cutoff = (_now() - timedelta(days=days)).isoformat()
+    rows = [v for v in rows if (v["discovered"] or "") >= cutoff]
+    return sorted(rows, key=lambda v: v["discovered"], reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# What an attacking IP actually did (DShield per-IP log). The attack type is inferred from the
+# ports it hit on the sensors; the log itself is real.
+# ---------------------------------------------------------------------------
+
+# DShield sensors log connection attempts (mostly TCP SYN), not logins or payloads, so each label
+# says what service was targeted rather than claiming a brute-force or exploit succeeded.
+ATTACK_TYPES: dict[int, str] = {
+    22: "SSH login targeting", 2222: "SSH login targeting", 23: "Telnet login targeting (IoT botnets)",
+    2323: "Telnet login targeting (IoT botnets)", 445: "SMB targeting", 139: "SMB / NetBIOS probing",
+    3389: "RDP targeting", 5900: "VNC targeting", 80: "Web exploitation / scanning",
+    443: "Web exploitation / scanning", 8080: "Web exploitation / scanning", 8000: "Web exploitation / scanning",
+    8443: "Web exploitation / scanning", 8888: "Web exploitation / scanning", 8081: "Web exploitation / scanning",
+    1433: "Database targeting (MSSQL)", 3306: "Database targeting (MySQL)", 5432: "Database targeting (PostgreSQL)",
+    6379: "Database targeting (Redis)", 27017: "Database targeting (MongoDB)", 9200: "Elasticsearch probing",
+    2375: "Exposed Docker API probing", 5555: "Android Debug Bridge (ADB) targeting", 5060: "SIP / VoIP fraud scanning",
+    25: "SMTP abuse / relay probing", 53: "DNS probing", 123: "NTP probing", 21: "FTP login targeting",
+    1723: "PPTP VPN probing", 11211: "Memcached probing", 161: "SNMP probing",
+}
+
+# Organisations that scan the whole internet for research and exposure monitoring. Their traffic is
+# real but not hostile, so they are tagged and kept out of the attack-type counts.
+RESEARCH_SCANNERS = re.compile(
+    r"censys|shodan|shadowserver|modat|rapid7|binaryedge|onyphe|stretchoid|leakix|driftnet|internet[- ]measurement|"
+    r"recyber|criminal ip|aim(?:e|-)?\s?security|palo alto|expanse|cortex|netscout|cyble|ipip\.net|alpha strike|"
+    r"academic|university|ruhr-uni|tum\b|caida|merit network|bitsight|securitytrails|quadmetrics|intrinsec",
+    re.I,
+)
+
+
+def is_research_scanner(network: str) -> bool:
+    return bool(RESEARCH_SCANNERS.search(network or ""))
+
+
+_activity_cache: dict[str, tuple[float, dict]] = {}
+
+
+def source_activity(ip: str) -> dict:
+    """Ports, attack types and last activity for one DShield source (cached for an hour)."""
+    cached = _activity_cache.get(ip)
+    if cached and time.time() - cached[0] < 3600:
+        return cached[1]
+    result: dict[str, Any] = {"ip": ip, "records": 0, "ports": [], "attack_types": [], "last_activity": None, "available": False}
+    try:
+        r = requests.get(f"https://isc.sans.edu/api/ipdetails/{ip}?json", headers=USER_AGENT, timeout=20)
+        r.raise_for_status()
+        rows = [x for x in r.json() if isinstance(x, dict) and x.get("targetport") is not None]
+    except Exception:
+        _activity_cache[ip] = (time.time(), result)
+        return result
+    ports: dict[int, int] = {}
+    last = ""
+    for row in rows:
+        try:
+            port = int(row["targetport"])
+        except (TypeError, ValueError):
+            continue
+        ports[port] = ports.get(port, 0) + 1
+        stamp = f"{row.get('date', '')}T{row.get('time', '')}"
+        last = max(last, stamp)
+    types: dict[str, int] = {}
+    for port, n in ports.items():
+        types[ATTACK_TYPES.get(port, "Port scanning")] = types.get(ATTACK_TYPES.get(port, "Port scanning"), 0) + n
+    if len(ports) >= 20:
+        # Many distinct ports from one IP is a sweep, whatever the individual ports are.
+        types = {"Mass port scanning": sum(ports.values()), **{k: v for k, v in types.items() if k != "Port scanning"}}
+    result.update({
+        "available": True,
+        "records": sum(ports.values()),
+        "ports": [{"port": p, "service": PORT_NAMES.get(p, ""), "hits": n} for p, n in sorted(ports.items(), key=lambda x: -x[1])[:8]],
+        "distinct_ports": len(ports),
+        "attack_types": [{"type": t, "hits": n} for t, n in sorted(types.items(), key=lambda x: -x[1])],
+        "last_activity": (last + "Z") if last else None,
+    })
+    _activity_cache[ip] = (time.time(), result)
+    return result
+
+
+def country_detail(cc: str, window: str = "7d") -> dict:
+    """Everything real we can say about one country: attacks launched from it, and organisations
+    in it that ransomware groups have claimed."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    cc = cc.upper()
+    live = get_live_map(window)
+    here = [s for s in live["sources"] if (s.get("cc") or "").upper() == cc]
+    attackers = [s for s in here if s["kind"] == "attacker"][:12]
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        activity = dict(zip([s["ip"] for s in attackers], pool.map(source_activity, [s["ip"] for s in attackers])))
+
+    attack_types: dict[str, dict] = {}
+    top_sources = []
+    research = 0
+    for s in attackers:
+        act = activity.get(s["ip"]) or {}
+        benign = is_research_scanner(s.get("asn", ""))
+        research += 1 if benign else 0
+        for t in ([] if benign else act.get("attack_types", [])):
+            row = attack_types.setdefault(t["type"], {"type": t["type"], "hits": 0, "sources": 0})
+            row["hits"] += t["hits"]
+            row["sources"] += 1
+        top_sources.append({
+            "ip": s["ip"], "city": s.get("city"), "network": s.get("asn"), "reports": s["reports"], "targets": s["targets"],
+            "attack_types": [t["type"] for t in act.get("attack_types", [])[:3]],
+            "ports": act.get("ports", [])[:5], "distinct_ports": act.get("distinct_ports", 0),
+            "last_activity": act.get("last_activity") or s.get("last_seen"), "detail_available": act.get("available", False),
+            "research_scanner": benign,
+        })
+    # Hostile sources first; research scanners after them.
+    top_sources.sort(key=lambda x: x["research_scanner"])
+    malware = {}
+    for s in here:
+        if s["kind"] in {"c2", "malware"}:
+            m = malware.setdefault(s.get("malware") or "Unknown", {"family": s.get("malware") or "Unknown", "servers": 0, "ips": []})
+            m["servers"] += 1
+            if len(m["ips"]) < 5:
+                m["ips"].append(s["ip"])
+
+    # Newest first, widening the window only when there is nothing more recent, and saying which.
+    victims, scope = [v for v in recent_victims() if v["cc"] == cc], "last 48 hours"
+    if not victims:
+        victims, scope = country_victims(cc, days=30), "last 30 days"
+    if not victims:
+        victims, scope = country_victims(cc, days=365), "last 12 months"
+    name = next((s["country"] for s in here), "")
+
+    return {
+        "cc": cc,
+        "country": name,
+        "window": live["window"],
+        "generated_at": _now().isoformat(),
+        "outbound": {
+            "sources": len(here),
+            "attackers": sum(1 for s in here if s["kind"] == "attacker"),
+            "reports": sum(s["reports"] for s in here),
+            "attack_types": sorted(attack_types.values(), key=lambda t: -t["hits"]),
+            "research_scanners": research,
+            "examined": len(attackers),
+            "top_sources": top_sources,
+            "botnets": sorted(malware.values(), key=lambda m: -m["servers"]),
+            "destination_note": (
+                "Destinations are SANS DShield's volunteer sensors worldwide. No public real-time feed names "
+                "the organisations that scans and exploit attempts like these hit."
+            ),
+            "type_note": ("Attack type is inferred from the ports each source hit on the sensors; the sensors log "
+                          "connection attempts, not logins, so 'targeting' means the service was attacked, not breached. "
+                          "Known research scanners (e.g. Censys, Shodan) are tagged and left out of the counts."),
+        },
+        "inbound": {
+            "victims": victims[:30],
+            "total": len(victims),
+            "scope": scope,
+            "source": "ransomware.live",
+            "note": ("Organisations ransomware groups claim to have breached, as published on their leak sites. "
+                     "Claims are real and current but not independently verified; the attack itself usually "
+                     "happened days or weeks before the claim."),
+        },
+    }
+
+
 def get_live_map(window: str = "7d") -> dict:
     """Cached live map, filtered to sources last seen inside the window (24h / 7d / 30d)."""
     with _lock:
@@ -273,8 +486,15 @@ def get_live_map(window: str = "7d") -> dict:
             a["sources"] += 1
             a["reports"] += s["reports"]
 
+    victims_by_cc: dict[str, int] = {}
+    for v in recent_victims():
+        if v["cc"]:
+            victims_by_cc[v["cc"]] = victims_by_cc.get(v["cc"], 0) + 1
+
     return {
         **{k: v for k, v in data.items() if k != "sources"},
+        "feeds": dict(_feed_status),
+        "victims_by_country": victims_by_cc,
         "window": window if window in {"24h", "7d", "30d"} else "7d",
         "sources": sorted(sources, key=lambda s: (-s["reports"], s["ip"])),
         "countries": sorted(by_country.values(), key=lambda c: (-c["reports"], -c["sources"])),

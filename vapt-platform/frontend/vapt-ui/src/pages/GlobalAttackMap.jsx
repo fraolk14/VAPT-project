@@ -38,6 +38,38 @@ const COUNTRY_ALIASES = {
 };
 const atlasName = (name) => COUNTRY_ALIASES[String(name || "").toLowerCase()] || name;
 
+// world-atlas name -> ISO 3166-1 alpha-2, from the browser's own region names plus the
+// abbreviations world-atlas uses. Northern Cyprus and Somaliland have no ISO code.
+const ATLAS_CC = (() => {
+  const map = {
+    "w. sahara": "EH", "united states of america": "US", "dem. rep. congo": "CD", "dominican rep.": "DO",
+    "falkland is.": "FK", "fr. s. antarctic lands": "TF", "côte d'ivoire": "CI", "central african rep.": "CF",
+    "congo": "CG", "eq. guinea": "GQ", "palestine": "PS", "myanmar": "MM", "turkey": "TR", "solomon is.": "SB",
+    "bosnia and herz.": "BA", "macedonia": "MK", "trinidad and tobago": "TT", "s. sudan": "SS",
+  };
+  try {
+    const dn = new Intl.DisplayNames(["en"], { type: "region" });
+    for (let a = 65; a <= 90; a += 1) {
+      for (let b = 65; b <= 90; b += 1) {
+        const code = String.fromCharCode(a, b);
+        try {
+          const n = dn.of(code);
+          if (n && n !== code && !map[n.toLowerCase()]) map[n.toLowerCase()] = code;
+        } catch { /* not a region */ }
+      }
+    }
+  } catch { /* old browser: aliases only */ }
+  return map;
+})();
+const ccOf = (name) => ATLAS_CC[String(name || "").toLowerCase()] || "";
+
+const when = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+};
+
 const fmt = (n) => {
   const v = Number(n) || 0;
   if (v >= 1e9) return `${(v / 1e9).toFixed(1)}B`;
@@ -83,6 +115,8 @@ export default function GlobalAttackMap() {
   const [tick, setTick] = useState(0);
   const [now, setNow] = useState(() => Date.now());
   const [fullscreen, setFullscreen] = useState(false);
+  const [detail, setDetail] = useState(null); // { cc, name, status, data }
+  const [activity, setActivity] = useState({}); // ip -> per-source DShield activity
 
   const load = useCallback(async () => {
     try {
@@ -156,6 +190,18 @@ export default function GlobalAttackMap() {
       delay: (i % 20) * 350,
     }));
   }, [visible, home]);
+  const victimsByCc = data?.victims_by_country || {};
+  const worldWithBox = useMemo(() => WORLD.map((f) => {
+    if (f.bbox) return f;
+    let minX = 180; let minY = 90; let maxX = -180; let maxY = -90;
+    const walk = (c) => {
+      if (typeof c[0] === "number") {
+        minX = Math.min(minX, c[0]); maxX = Math.max(maxX, c[0]); minY = Math.min(minY, c[1]); maxY = Math.max(maxY, c[1]);
+      } else c.forEach(walk);
+    };
+    walk(f.geometry.coordinates);
+    return { ...f, bbox: [minX, minY, maxX, maxY] };
+  }), []);
   const countryVolume = useMemo(() => {
     const m = {};
     (data?.countries || []).forEach((c) => { m[atlasName(c.country)] = c; });
@@ -172,24 +218,60 @@ export default function GlobalAttackMap() {
     const g = globeRef.current;
     if (!g) return;
     const controls = g.controls();
-    controls.autoRotate = !selected && !country;
+    controls.autoRotate = !selected && !country && !detail;
     controls.autoRotateSpeed = 0.45;
-    if (home && !selected && !country) g.pointOfView({ lat: home.lat + 12, lng: home.lon - 25, altitude: 2.3 }, 1200);
-  }, [home, selected, country]);
+    if (home && !selected && !country && !detail) g.pointOfView({ lat: home.lat + 12, lng: home.lon - 25, altitude: 2.3 }, 1200);
+  }, [home, selected, country, detail]);
 
   const focus = (lat, lng) => globeRef.current?.pointOfView({ lat, lng, altitude: 1.6 }, 900);
 
-  const pickCountry = (name) => {
+  const loadDetail = useCallback(async (cc, name) => {
+    setDetail({ cc, name, status: "loading", data: null });
+    try {
+      const res = await api.get(`/threat-intelligence/live-map/country/${cc}`, { params: { window: windowKey } });
+      setDetail((d) => (d && d.cc === cc ? { cc, name: res.data.country || name, status: "ready", data: res.data } : d));
+    } catch {
+      setDetail((d) => (d && d.cc === cc ? { ...d, status: "error" } : d));
+    }
+  }, [windowKey]);
+
+  // Reload the open country when the time window changes (loadDetail changes with windowKey).
+  useEffect(() => {
+    if (detail?.cc && detail.status !== "loading") loadDetail(detail.cc, detail.name);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadDetail]);
+
+  // Clicking any country opens its detail, whether or not attacks originate there
+  // (it may still have organisations claimed by ransomware groups).
+  const pickCountry = (name, polygon) => {
     const c = (data?.countries || []).find((x) => x.country === name || atlasName(x.country) === name);
-    if (!c) return;
-    setCountry(c.country);
+    const cc = c?.cc || ccOf(name);
     setSelected(null);
-    focus(c.lat, c.lon);
+    if (c) {
+      setCountry(c.country);
+      focus(c.lat, c.lon);
+    } else {
+      setCountry("");
+      if (polygon?.bbox) focus((polygon.bbox[1] + polygon.bbox[3]) / 2, (polygon.bbox[0] + polygon.bbox[2]) / 2);
+    }
+    if (cc) loadDetail(cc, c?.country || name);
+    else setDetail({ cc: "", name, status: "nocode", data: null });
+  };
+
+  const closeCountry = () => {
+    setCountry("");
+    setDetail(null);
   };
 
   const pickSource = (s) => {
     setSelected(s);
     focus(s.lat, s.lon);
+    if (s.kind === "attacker" && !activity[s.ip]) {
+      setActivity((a) => ({ ...a, [s.ip]: { status: "loading" } }));
+      api.get(`/threat-intelligence/live-map/source/${s.ip}`)
+        .then((res) => setActivity((a) => ({ ...a, [s.ip]: { status: "ready", ...res.data } })))
+        .catch(() => setActivity((a) => ({ ...a, [s.ip]: { status: "error" } })));
+    }
   };
 
   const toggleFullscreen = () => {
@@ -245,9 +327,9 @@ export default function GlobalAttackMap() {
                 <span className="cc-sr">Search IP, network or city</span>
                 <input type="search" className="so-input am-search" placeholder="Search IP, network, city" value={query} onChange={(e) => setQuery(e.target.value)} />
               </label>
-              {(country || selected) && (
-                <button type="button" className="cc-btn" onClick={() => { setCountry(""); setSelected(null); }}>
-                  Clear {country ? country : "selection"}
+              {(country || selected || detail) && (
+                <button type="button" className="cc-btn" onClick={() => { closeCountry(); setSelected(null); }}>
+                  Clear {detail?.name || country || "selection"}
                 </button>
               )}
             </div>
@@ -266,7 +348,7 @@ export default function GlobalAttackMap() {
                 atmosphereColor="#2e7bff"
                 atmosphereAltitude={0.18}
                 globeMaterial={OCEAN}
-                polygonsData={WORLD}
+                polygonsData={worldWithBox}
                 polygonAltitude={(f) => (countryVolume[f.properties.name] ? 0.012 : 0.006)}
                 polygonCapColor={(f) => {
                   const c = countryVolume[f.properties.name];
@@ -275,12 +357,17 @@ export default function GlobalAttackMap() {
                   return `rgba(255, ${Math.round(140 - t * 90)}, ${Math.round(110 - t * 70)}, ${0.35 + t * 0.5})`;
                 }}
                 polygonSideColor={() => "rgba(46, 123, 255, 0.15)"}
-                polygonStrokeColor={() => "rgba(92, 225, 255, 0.35)"}
+                polygonStrokeColor={(f) => {
+                  const cc = ccOf(f.properties.name);
+                  if (detail && detail.cc && cc === detail.cc) return "#ffffff";
+                  return victimsByCc[cc] ? "rgba(245, 215, 110, 0.9)" : "rgba(92, 225, 255, 0.35)";
+                }}
                 polygonLabel={(f) => {
                   const c = countryVolume[f.properties.name];
-                  return `<div class="am-tip"><b>${f.properties.name}</b>${c ? `<br/>${c.sources} sources · ${fmt(c.reports)} reports` : "<br/>No reported sources"}</div>`;
+                  const v = victimsByCc[ccOf(f.properties.name)];
+                  return `<div class="am-tip"><b>${f.properties.name}</b>${c ? `<br/>${c.sources} attack sources · ${fmt(c.reports)} reports` : "<br/>No reported attack sources"}${v ? `<br/>${v} organisation${v === 1 ? "" : "s"} claimed by ransomware (48 h)` : ""}<br/><i>Click for details</i></div>`;
                 }}
-                onPolygonClick={(f) => pickCountry(f.properties.name)}
+                onPolygonClick={(f) => pickCountry(f.properties.name, f)}
                 pointsData={points}
                 pointLat="lat"
                 pointLng="lon"
@@ -324,6 +411,7 @@ export default function GlobalAttackMap() {
             <ul className="am-legend" aria-label="Legend">
               {Object.entries(KIND).map(([k, v]) => <li key={k}><span style={{ background: v.color }} />{v.label}</li>)}
               <li><span style={{ background: "#5ce1ff" }} />Your network</li>
+              <li><span className="am-legend__outline" />Ransomware victims (48 h)</li>
             </ul>
           </div>
           <p className="am-note">{data?.note}</p>
@@ -347,6 +435,24 @@ export default function GlobalAttackMap() {
                 <div><dt>First seen</dt><dd>{selected.first_seen || "—"}</dd></div>
                 <div><dt>Last seen</dt><dd>{selected.last_seen || "—"}</dd></div>
               </dl>
+              {selected.kind === "attacker" && (() => {
+                const act = activity[selected.ip];
+                if (!act || act.status === "loading") return <p className="cc-muted am-sub">Loading what this source attacked…</p>;
+                if (act.status === "error" || !act.available) return <p className="cc-muted am-sub">DShield has no per-port log for this source right now.</p>;
+                return (
+                  <div className="am-activity">
+                    <h3>What it attacked</h3>
+                    <ul className="am-types">
+                      {act.attack_types.slice(0, 5).map((t) => <li key={t.type}><span>{t.type}</span><span className="cc-mono">{fmt(t.hits)}</span></li>)}
+                    </ul>
+                    <p className="cc-muted am-sub">
+                      Ports: {act.ports.map((p) => `${p.port}${p.service ? ` ${p.service}` : ""}`).join(", ")}
+                      {act.distinct_ports > act.ports.length ? ` +${act.distinct_ports - act.ports.length} more` : ""} · last activity {when(act.last_activity)}
+                    </p>
+                    <p className="cc-muted am-sub">Targets were SANS DShield sensors. Attack type is inferred from the ports hit.</p>
+                  </div>
+                );
+              })()}
               <div className="ti-drawer__actions">
                 <a className="cc-btn" href={`https://isc.sans.edu/ipinfo/${encodeURIComponent(selected.ip)}`} target="_blank" rel="noreferrer">SANS ISC record</a>
                 <a className="cc-btn" href={`https://www.abuseipdb.com/check/${encodeURIComponent(selected.ip)}`} target="_blank" rel="noreferrer">AbuseIPDB</a>
@@ -354,22 +460,97 @@ export default function GlobalAttackMap() {
             </section>
           )}
 
-          {country && (
-            <section className="cc-panel" aria-label={`Sources in ${country}`}>
+          {detail && (
+            <section className="cc-panel am-country" aria-label={`${detail.name} details`}>
               <header className="cc-panel__head">
-                <h2>{country}</h2>
-                <button type="button" className="cc-btn" onClick={() => downloadBlocklist(visible, `blocklist_${country.replace(/\W+/g, "_")}.csv`)}>Blocklist CSV</button>
+                <h2>{detail.name}{detail.cc ? <span className="cc-muted am-cc"> {detail.cc}</span> : null}</h2>
+                <div className="am-head-actions">
+                  {country && <button type="button" className="cc-btn" onClick={() => downloadBlocklist(visible, `blocklist_${country.replace(/\W+/g, "_")}.csv`)}>Blocklist CSV</button>}
+                  <button type="button" className="cc-icon" aria-label="Close country details" onClick={closeCountry}>×</button>
+                </div>
               </header>
-              <ul className="cc-list am-scroll">
-                {visible.slice(0, 40).map((s) => (
-                  <li key={s.id}>
-                    <span className="cc-dot" style={{ background: KIND[s.kind].color }} />
-                    <button type="button" className="ti-name cc-mono" onClick={() => pickSource(s)}>{s.ip}</button>
-                    <span className="cc-muted am-ellipsis">{s.city}</span>
-                    <span className="cc-mono cc-right">{s.reports ? fmt(s.reports) : s.malware}</span>
-                  </li>
-                ))}
-              </ul>
+
+              {detail.status === "loading" && <p className="cc-muted am-sub">Pulling live attack logs and published victims for {detail.name}…</p>}
+              {detail.status === "error" && <p className="cc-empty">Couldn't load live details. The server needs internet access to SANS ISC and ransomware.live.</p>}
+              {detail.status === "nocode" && <p className="cc-empty">{detail.name} has no ISO country code, so the feeds can't be queried for it.</p>}
+
+              {detail.status === "ready" && (() => {
+                const out = detail.data.outbound;
+                const inn = detail.data.inbound;
+                const maxType = Math.max(1, ...out.attack_types.map((t) => t.hits));
+                return (
+                  <>
+                    <h3 className="am-h3">Attacks launched from {detail.name}</h3>
+                    {out.attackers ? (
+                      <>
+                        <p className="cc-muted am-sub">
+                          {out.attackers} active source{out.attackers === 1 ? "" : "s"} · {fmt(out.reports)} reports ({detail.data.window}) · top {out.examined} examined
+                          {out.research_scanners ? ` (${out.research_scanners} known research scanner${out.research_scanners === 1 ? "" : "s"})` : ""}
+                        </p>
+                        <ol className="cc-bars am-typebars">
+                          {out.attack_types.slice(0, 6).map((t) => (
+                            <li key={t.type}>
+                              <span className="cc-bars__name am-ellipsis" title={t.type}>{t.type}</span>
+                              <div className="cc-bars__track" aria-hidden="true"><span className="cc-fill--critical" style={{ width: `${(t.hits / maxType) * 100}%` }} /></div>
+                              <span className="cc-bars__value">{t.sources} IP{t.sources === 1 ? "" : "s"}</span>
+                            </li>
+                          ))}
+                        </ol>
+                        <ul className="cc-list am-scroll am-srcs">
+                          {out.top_sources.map((s) => {
+                            const src = (data?.sources || []).find((x) => x.ip === s.ip);
+                            return (
+                              <li key={s.ip}>
+                                <span className="cc-dot" style={{ background: KIND.attacker.color }} />
+                                <span className="am-src">
+                                  <button type="button" className="ti-name cc-mono" onClick={() => src && pickSource(src)}>{s.ip}</button>
+                                  <span className="cc-muted am-ellipsis" title={s.network}>{s.network}</span>
+                                  <span className="am-chips">
+                                    {s.research_scanner
+                                      ? <span className="am-chip am-chip--research">Research scanner (internet survey)</span>
+                                      : s.attack_types.map((t) => <span key={t} className="am-chip">{t}</span>)}
+                                  </span>
+                                  {s.ports.length > 0 && <span className="cc-muted am-sub">ports {s.ports.map((p) => p.port).join(", ")}{s.distinct_ports > s.ports.length ? ` +${s.distinct_ports - s.ports.length}` : ""} · {when(s.last_activity)}</span>}
+                                </span>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                        <p className="am-note am-note--tight">{out.type_note} {out.destination_note}</p>
+                      </>
+                    ) : <p className="cc-muted am-sub">No attack sources from {detail.name} in the {detail.data.window} window.</p>}
+
+                    {out.botnets.length > 0 && (
+                      <>
+                        <h3 className="am-h3">Botnet C2 servers hosted here</h3>
+                        <ul className="cc-list">
+                          {out.botnets.map((b) => <li key={b.family}><span className="cc-dot" style={{ background: KIND.c2.color }} /><span>{b.family}</span><span className="cc-muted cc-right">{b.servers} server{b.servers === 1 ? "" : "s"}</span></li>)}
+                        </ul>
+                      </>
+                    )}
+
+                    <h3 className="am-h3">Organisations attacked in {detail.name}</h3>
+                    {inn.victims.length ? (
+                      <>
+                        <p className="cc-muted am-sub">{inn.total} claimed by ransomware groups · {inn.scope}</p>
+                        <ul className="cc-list am-scroll am-victims">
+                          {inn.victims.map((v) => (
+                            <li key={`${v.victim}-${v.group}-${v.discovered}`}>
+                              <span className="cc-dot" style={{ background: "#f5d76e" }} />
+                              <span className="am-src">
+                                {v.url ? <a className="ti-name" href={v.url} target="_blank" rel="noreferrer">{v.victim}</a> : <strong>{v.victim}</strong>}
+                                <span className="cc-muted">{[v.sector, v.website].filter(Boolean).join(" · ") || "Sector not published"}</span>
+                                <span className="am-chips"><span className="am-chip am-chip--group">Ransomware: {v.group}</span><span className="cc-muted am-sub">claimed {when(v.discovered)}</span></span>
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    ) : <p className="cc-muted am-sub">No organisations in {detail.name} have been claimed by ransomware groups in the last 12 months.</p>}
+                    <p className="am-note am-note--tight">{inn.note} Source: ransomware.live.</p>
+                  </>
+                );
+              })()}
             </section>
           )}
 
@@ -443,7 +624,7 @@ export default function GlobalAttackMap() {
                 <li key={name} className="am-feed">
                   <span className={`cc-dot cc-dot--${f.status === "connected" ? "healthy" : f.status === "needs_key" ? "medium" : "down"}`} />
                   <span>
-                    <strong>{name === "dshield" ? "SANS ISC / DShield" : name === "feodo" ? "abuse.ch Feodo Tracker" : "abuse.ch ThreatFox"}</strong>
+                    <strong>{{ dshield: "SANS ISC / DShield", feodo: "abuse.ch Feodo Tracker", threatfox: "abuse.ch ThreatFox", ransomware_live: "ransomware.live" }[name] || name}</strong>
                     <span className="cc-muted am-feed__detail">{f.status === "connected" ? `${f.count} records · ${f.detail}` : f.detail}</span>
                   </span>
                 </li>
