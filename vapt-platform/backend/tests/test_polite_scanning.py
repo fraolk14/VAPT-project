@@ -35,6 +35,14 @@ class PaceTests(unittest.TestCase):
         self.assertEqual(cves[cves.index("-severity") + 1], "critical")
         self.assertEqual(generic[generic.index("-rl") + 1], "20")
 
+    def test_dast_only_pass_skips_signature_checks(self):
+        calls = []
+        with patch.object(wp, "tool_available", return_value=True), \
+             patch.object(wp, "_run", side_effect=lambda cmd, timeout, cwd=None: calls.append(cmd) or (0, "", "")):
+            wp.run_nuclei("http://app.test", ["http://app.test/s?q=1", "http://app.test/about"], "balanced", signature=False)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("-dast", calls[0])
+
     def test_normal_pace_runs_the_full_set_once(self):
         calls = []
         with patch.dict(os.environ, {"WEB_SCAN_PACE": "normal"}), \
@@ -43,6 +51,45 @@ class PaceTests(unittest.TestCase):
             wp.run_nuclei("http://app.test", [])
         self.assertEqual(len(calls), 1)
         self.assertIn("-pt", calls[0])
+
+
+class SpeedTests(unittest.TestCase):
+    def test_internal_targets_are_recognised(self):
+        self.assertTrue(wp.is_internal_target("http://192.168.10.25:8080"))
+        self.assertTrue(wp.is_internal_target("http://dvwa"))
+        self.assertTrue(wp.is_internal_target("https://intranet.local/"))
+        self.assertFalse(wp.is_internal_target("https://8.8.8.8/"))
+
+    def test_auto_is_fast_inside_balanced_outside_and_env_overrides(self):
+        with patch.dict(os.environ, {"WEB_SCAN_PACE": "auto"}):
+            self.assertEqual(wp.resolve_pace("auto", "http://dvwa"), "fast")
+            self.assertEqual(wp.resolve_pace("auto", "https://8.8.8.8/"), "balanced")
+            self.assertEqual(wp.resolve_pace("polite", "http://dvwa"), "polite")
+        with patch.dict(os.environ, {"WEB_SCAN_PACE": "polite"}):
+            self.assertEqual(wp.resolve_pace("auto", "http://dvwa"), "polite")
+
+    def test_nuclei_slows_down_while_running_alongside_zap(self):
+        os.environ.pop("NUCLEI_RATE_LIMIT", None)
+        self.assertEqual(wp._nuclei_rate("balanced", parallel=False), 25)
+        self.assertEqual(wp._nuclei_rate("balanced", parallel=True), 15)
+        self.assertEqual(wp._nuclei_rate("fast", parallel=True), 60)
+
+    def test_background_job_returns_results_and_can_be_cancelled(self):
+        with patch.object(wp, "run_nuclei", return_value=([{"title": "x"}], [])), \
+             patch.object(wp, "run_testssl", return_value=([], ["tls skipped"])):
+            wp.start_background_checks("scan-1", "http://app.test", [], "fast")
+            res = wp.collect_background_checks("scan-1", timeout=10)
+        self.assertEqual(len(res["nuclei"]), 1)
+        self.assertEqual(res["tls_warnings"], ["tls skipped"])
+        self.assertFalse(res["cancelled"])
+        self.assertIsNone(wp.collect_background_checks("never-started", timeout=1))
+        wp.cancel_background_checks("scan-2")
+        wp._job.key = "scan-2"
+        try:
+            self.assertEqual(wp._run(["echo", "hi"], timeout=5)[0], -15)
+        finally:
+            wp._job.key = None
+            wp._job_cancelled.discard("scan-2")
 
 
 class BlockWatchTests(unittest.TestCase):

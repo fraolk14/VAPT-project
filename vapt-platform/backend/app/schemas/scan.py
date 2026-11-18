@@ -74,6 +74,16 @@ class NetworkScanRequest(BaseModel):
 class WebScanRequest(BaseModel):
     target: str
     label: Optional[str] = None
+    # auto: fast for internal hosts, balanced for public sites; or polite / balanced / fast.
+    pace: str = "auto"
+
+    @field_validator("pace")
+    @classmethod
+    def validate_pace(cls, value: str) -> str:
+        value = (value or "auto").strip().lower()
+        if value not in {"auto", "polite", "balanced", "normal", "fast"}:
+            raise ValueError("pace must be auto, polite, balanced or fast")
+        return value
 
     @field_validator("target")
     @classmethod
