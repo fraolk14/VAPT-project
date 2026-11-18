@@ -230,8 +230,14 @@ export default function GlobalAttackMap() {
     try {
       const res = await api.get(`/threat-intelligence/live-map/country/${cc}`, { params: { window: windowKey } });
       setDetail((d) => (d && d.cc === cc ? { cc, name: res.data.country || name, status: "ready", data: res.data } : d));
-    } catch {
-      setDetail((d) => (d && d.cc === cc ? { ...d, status: "error" } : d));
+    } catch (err) {
+      const code = err?.response?.status;
+      const reason = code === 401 || code === 403
+        ? "Your session has ended. Sign in again to load country details."
+        : code
+          ? `The server couldn't build the details (HTTP ${code}${err.response?.data?.detail ? `: ${err.response.data.detail}` : ""}).`
+          : "Couldn't reach the VAPT server. Check your connection and try again.";
+      setDetail((d) => (d && d.cc === cc ? { ...d, status: "error", reason } : d));
     }
   }, [windowKey]);
 
@@ -471,7 +477,12 @@ export default function GlobalAttackMap() {
               </header>
 
               {detail.status === "loading" && <p className="cc-muted am-sub">Pulling live attack logs and published victims for {detail.name}…</p>}
-              {detail.status === "error" && <p className="cc-empty">Couldn't load live details. The server needs internet access to SANS ISC and ransomware.live.</p>}
+              {detail.status === "error" && (
+                <p className="cc-empty">
+                  {detail.reason}{" "}
+                  <button type="button" className="am-linkbtn" onClick={() => loadDetail(detail.cc, detail.name)}>Retry</button>
+                </p>
+              )}
               {detail.status === "nocode" && <p className="cc-empty">{detail.name} has no ISO country code, so the feeds can't be queried for it.</p>}
 
               {detail.status === "ready" && (() => {
